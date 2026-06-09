@@ -1,12 +1,4 @@
-use std::{
-    cell::{RefCell, RefMut},
-    hash::Hash,
-    os::fd::{AsRawFd, BorrowedFd},
-    path::PathBuf,
-    rc::{Rc, Weak},
-    time::{Duration, Instant},
-};
-
+use crate::error::{LinuxError, WaylandError};
 use ashpd::WindowIdentifier;
 use calloop::{
     EventLoop, LoopHandle,
@@ -787,7 +779,7 @@ impl LinuxClient for WaylandClient {
     #[cfg(feature = "screen-capture")]
     fn screen_capture_sources(
         &self,
-    ) -> futures::channel::oneshot::Receiver<anyhow::Result<Vec<Rc<dyn gpui::ScreenCaptureSource>>>>
+    ) -> futures::channel::oneshot::Receiver<crate::error::Result<Vec<Rc<dyn gpui::ScreenCaptureSource>>>>
     {
         // TODO: Get screen capture working on wayland. Be sure to try window resizing as that may
         // be tricky.
@@ -795,9 +787,7 @@ impl LinuxClient for WaylandClient {
         // start_scap_default_target_source()
         let (sources_tx, sources_rx) = futures::channel::oneshot::channel();
         sources_tx
-            .send(Err(anyhow::anyhow!(
-                "Wayland screen capture not yet implemented."
-            )))
+            .send(Err(LinuxError::ScreenCaptureUnsupported))
             .ok();
         sources_rx
     }
@@ -814,7 +804,7 @@ impl LinuxClient for WaylandClient {
         &self,
         handle: AnyWindowHandle,
         params: WindowParams,
-    ) -> anyhow::Result<Box<dyn PlatformWindow>> {
+    ) -> crate::error::Result<Box<dyn PlatformWindow>> {
         let mut state = self.0.borrow_mut();
 
         let parent = state.keyboard_focused_window.clone();
@@ -2300,7 +2290,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                     let read_task = state.common.background_executor.spawn(async {
                         let buffer = unsafe { read_fd(fd)? };
                         let text = String::from_utf8(buffer)?;
-                        anyhow::Ok(text)
+                        Ok(text)
                     });
 
                     let this = this.clone();

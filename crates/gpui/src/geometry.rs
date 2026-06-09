@@ -2,8 +2,6 @@
 //! can be used to describe common units, concepts, and the relationships
 //! between them.
 
-use anyhow::{Context as _, anyhow};
-use core::fmt::Debug;
 use derive_more::{Add, AddAssign, Div, DivAssign, Mul, Neg, Sub, SubAssign};
 use refineable::Refineable;
 use schemars::{JsonSchema, json_schema};
@@ -12,7 +10,7 @@ use std::borrow::Cow;
 use std::ops::Range;
 use std::{
     cmp::{self, PartialOrd},
-    fmt::{self, Display},
+    fmt::{self, Debug, Display},
     hash::Hash,
     ops::{Add, Div, Mul, MulAssign, Neg, Sub},
 };
@@ -2766,13 +2764,36 @@ impl<'a> std::iter::Sum<&'a Pixels> for Pixels {
     }
 }
 
+/// An error that can occur when parsing geometry types.
+#[derive(Debug, thiserror::Error)]
+pub enum GeometryError {
+    /// Expected a 'px' suffix when parsing a length.
+    #[error("expected 'px' suffix")]
+    ExpectedPxSuffix,
+    /// Expected a 'rem' suffix when parsing a length.
+    #[error("expected 'rem' suffix")]
+    ExpectedRemSuffix,
+    /// The string could not be parsed as an absolute length.
+    #[error("invalid AbsoluteLength '{0}', expected number with 'px' or 'rem' suffix")]
+    InvalidAbsoluteLength(String),
+    /// The string could not be parsed as a definite length.
+    #[error("invalid DefiniteLength '{0}', expected number with 'px', 'rem', or '%' suffix")]
+    InvalidDefiniteLength(String),
+    /// The string could not be parsed as a length.
+    #[error("invalid Length '{0}', expected 'auto' or number with 'px', 'rem', or '%' suffix")]
+    InvalidLength(String),
+    /// Error parsing a floating point number.
+    #[error("parse float error: {0}")]
+    ParseFloat(#[from] std::num::ParseFloatError),
+}
+
 impl TryFrom<&'_ str> for Pixels {
-    type Error = anyhow::Error;
+    type Error = GeometryError;
 
     fn try_from(value: &'_ str) -> Result<Self, Self::Error> {
         value
             .strip_suffix("px")
-            .context("expected 'px' suffix")
+            .ok_or(GeometryError::ExpectedPxSuffix)
             .and_then(|number| Ok(number.parse()?))
             .map(Self)
     }
@@ -3265,12 +3286,12 @@ impl Debug for Rems {
 }
 
 impl TryFrom<&'_ str> for Rems {
-    type Error = anyhow::Error;
+    type Error = GeometryError;
 
     fn try_from(value: &'_ str) -> Result<Self, Self::Error> {
         value
             .strip_suffix("rem")
-            .context("expected 'rem' suffix")
+            .ok_or(GeometryError::ExpectedRemSuffix)
             .and_then(|number| Ok(number.parse()?))
             .map(Self)
     }
@@ -3382,7 +3403,7 @@ impl Debug for AbsoluteLength {
 const EXPECTED_ABSOLUTE_LENGTH: &str = "number with 'px' or 'rem' suffix";
 
 impl TryFrom<&'_ str> for AbsoluteLength {
-    type Error = anyhow::Error;
+    type Error = GeometryError;
 
     fn try_from(value: &'_ str) -> Result<Self, Self::Error> {
         if let Ok(pixels) = value.try_into() {
@@ -3390,9 +3411,7 @@ impl TryFrom<&'_ str> for AbsoluteLength {
         } else if let Ok(rems) = value.try_into() {
             Ok(Self::Rems(rems))
         } else {
-            Err(anyhow!(
-                "invalid AbsoluteLength '{value}', expected {EXPECTED_ABSOLUTE_LENGTH}"
-            ))
+            Err(GeometryError::InvalidAbsoluteLength(value.to_string()))
         }
     }
 }
@@ -3510,20 +3529,18 @@ impl Display for DefiniteLength {
 const EXPECTED_DEFINITE_LENGTH: &str = "expected number with 'px', 'rem', or '%' suffix";
 
 impl TryFrom<&'_ str> for DefiniteLength {
-    type Error = anyhow::Error;
+    type Error = GeometryError;
 
     fn try_from(value: &'_ str) -> Result<Self, Self::Error> {
         if let Some(percentage) = value.strip_suffix('%') {
-            let fraction: f32 = percentage.parse::<f32>().with_context(|| {
-                format!("invalid DefiniteLength '{value}', expected {EXPECTED_DEFINITE_LENGTH}")
+            let fraction: f32 = percentage.parse::<f32>().map_err(|_| {
+                GeometryError::InvalidDefiniteLength(value.to_string())
             })?;
             Ok(DefiniteLength::Fraction(fraction / 100.0))
         } else if let Ok(absolute_length) = value.try_into() {
             Ok(DefiniteLength::Absolute(absolute_length))
         } else {
-            Err(anyhow!(
-                "invalid DefiniteLength '{value}', expected {EXPECTED_DEFINITE_LENGTH}"
-            ))
+            Err(GeometryError::InvalidDefiniteLength(value.to_string()))
         }
     }
 }
@@ -3621,7 +3638,7 @@ impl Display for Length {
 const EXPECTED_LENGTH: &str = "expected 'auto' or number with 'px', 'rem', or '%' suffix";
 
 impl TryFrom<&'_ str> for Length {
-    type Error = anyhow::Error;
+    type Error = GeometryError;
 
     fn try_from(value: &'_ str) -> Result<Self, Self::Error> {
         if value == "auto" {
@@ -3629,9 +3646,7 @@ impl TryFrom<&'_ str> for Length {
         } else if let Ok(definite_length) = value.try_into() {
             Ok(Length::Definite(definite_length))
         } else {
-            Err(anyhow!(
-                "invalid Length '{value}', expected {EXPECTED_LENGTH}"
-            ))
+            Err(GeometryError::InvalidLength(value.to_string()))
         }
     }
 }

@@ -3,7 +3,7 @@ use crate::{
     FocusHandle, FocusOutEvent, Focusable, Global, KeystrokeObserver, Priority, Reservation,
     SubscriberSet, Subscription, Task, WeakEntity, WeakFocusHandle, Window, WindowHandle,
 };
-use anyhow::Result;
+use crate::Result;
 use futures::FutureExt;
 use gpui_util::Deferred;
 use std::{

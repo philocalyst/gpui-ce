@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use crate::error::{Result, WindowsError};
 use util::ResultExt;
 use windows::Win32::{
     Foundation::HWND,
@@ -30,7 +30,6 @@ pub(crate) struct VSyncProvider {
 impl VSyncProvider {
     pub(crate) fn new() -> Self {
         let interval = get_dwm_interval()
-            .context("Failed to get DWM interval")
             .log_err()
             .unwrap_or(DEFAULT_VSYNC_INTERVAL);
         let f = Box::new(|| unsafe { DwmFlush().is_ok() });
@@ -60,7 +59,7 @@ fn get_dwm_interval() -> Result<Duration> {
         cbSize: std::mem::size_of::<DWM_TIMING_INFO>() as u32,
         ..Default::default()
     };
-    unsafe { DwmGetCompositionTimingInfo(HWND::default(), &mut timing_info) }?;
+    unsafe { DwmGetCompositionTimingInfo(HWND::default(), &mut timing_info).map_err(|e| WindowsError::Api(e)) }?;
     let interval = retrieve_duration(timing_info.qpcRefreshPeriod, *QPC_TICKS_PER_SECOND);
     // Check for interval values that are impossibly low. A 29 microsecond
     // interval was seen (from a qpcRefreshPeriod of 60).

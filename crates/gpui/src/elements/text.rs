@@ -5,7 +5,6 @@ use crate::{
     TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
     WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
-use anyhow::Context as _;
 use gpui_util::ResultExt;
 use itertools::Itertools;
 use smallvec::SmallVec;
@@ -761,8 +760,7 @@ impl TextLayout {
         let mut element_state = self.0.borrow_mut();
         let element_state = element_state
             .as_mut()
-            .with_context(|| format!("measurement has not been performed on {text}"))
-            .unwrap();
+            .expect("measurement has not been performed");
         element_state.bounds = Some(bounds);
     }
 
@@ -770,12 +768,10 @@ impl TextLayout {
         let element_state = self.0.borrow();
         let element_state = element_state
             .as_ref()
-            .with_context(|| format!("measurement has not been performed on {text}"))
-            .unwrap();
+            .expect("measurement has not been performed");
         let bounds = element_state
             .bounds
-            .with_context(|| format!("prepaint has not been performed on {text}"))
-            .unwrap();
+            .expect("prepaint has not been performed");
 
         let line_height = element_state.line_height;
         let mut line_origin = bounds.origin;

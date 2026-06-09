@@ -27,9 +27,6 @@ use std::rc::Rc;
 
 /// Returns the default platform implementation for the current OS.
 pub fn current_platform(headless: bool) -> Rc<dyn gpui::Platform> {
-    #[cfg(feature = "x11")]
-    use anyhow::Context as _;
-
     if headless {
         return Rc::new(LinuxPlatform {
             inner: HeadlessClient::new(),
@@ -44,9 +41,7 @@ pub fn current_platform(headless: bool) -> Rc<dyn gpui::Platform> {
 
         #[cfg(feature = "x11")]
         "X11" => Rc::new(LinuxPlatform {
-            inner: X11Client::new()
-                .context("Failed to initialize X11 client.")
-                .unwrap(),
+            inner: X11Client::new().unwrap(),
         }),
 
         "Headless" => Rc::new(LinuxPlatform {

@@ -4,7 +4,7 @@ use std::{
 };
 
 use ::util::ResultExt;
-use anyhow::{Context, Result};
+use crate::error::{WindowsError, Result};
 use windows::{
     Win32::{
         Foundation::HWND,
@@ -117,7 +117,7 @@ impl DirectXRendererDevices {
         let dxgi_device = if disable_direct_composition {
             None
         } else {
-            Some(device.cast().context("Creating DXGI device")?)
+            Some(device.cast().map_err(|e| WindowsError::DirectXRender { details: format!("Creating DXGI device: {e}") })?)
         };
 
         Ok(Self {
@@ -141,24 +141,24 @@ impl DirectXRenderer {
         }
 
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
-            .context("Creating DirectX devices")?;
+            .map_err(|e| WindowsError::DirectXRender { details: format!("Creating DirectX devices: {e}") })?;
         let atlas = Arc::new(DirectXAtlas::new(&devices.device, &devices.device_context));
 
         let resources = DirectXResources::new(&devices, 1, 1, hwnd, disable_direct_composition)
-            .context("Creating DirectX resources")?;
+            .map_err(|e| WindowsError::DirectXRender { details: format!("Creating DirectX resources: {e}") })?;
         let globals = DirectXGlobalElements::new(&devices.device)
-            .context("Creating DirectX global elements")?;
+            .map_err(|e| WindowsError::DirectXRender { details: format!("Creating DirectX global elements: {e}") })?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
-            .context("Creating DirectX render pipelines")?;
+            .map_err(|e| WindowsError::DirectXRender { details: format!("Creating DirectX render pipelines: {e}") })?;
 
         let direct_composition = if disable_direct_composition {
             None
         } else {
             let composition = DirectComposition::new(devices.dxgi_device.as_ref().unwrap(), hwnd)
-                .context("Creating DirectComposition")?;
+                .map_err(|e| WindowsError::DirectXRender { details: format!("Creating DirectComposition: {e}") })?;
             composition
                 .set_swap_chain(&resources.swap_chain)
-                .context("Setting swap chain for DirectComposition")?;
+                .map_err(|e| WindowsError::DirectXRender { details: format!("Setting swap chain for DirectComposition: {e}") })?;
             Some(composition)
         };
 
@@ -205,7 +205,7 @@ impl DirectXRenderer {
                 resources
                     .render_target_view
                     .as_ref()
-                    .context("missing render target view")?,
+                    .ok_or_else(|| WindowsError::DirectXRender { details: "missing render target view".into() })?,
                 clear_color,
             );
             device_context
@@ -224,13 +224,13 @@ impl DirectXRenderer {
                 .swap_chain
                 .Present(0, DXGI_PRESENT(0))
         };
-        result.ok().context("Presenting swap chain failed")
+        result.map_err(|e| WindowsError::DirectXRender { details: format!("Presenting swap chain failed: {e}") })
     }
 
     pub(crate) fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
         try_to_recover_from_device_lost(|| {
             self.handle_device_lost_impl(directx_devices)
-                .context("DirectXRenderer handling device lost")
+                .map_err(|e| WindowsError::DirectXRender { details: format!("DirectXRenderer handling device lost: {e}") })
         })
     }
 
@@ -241,7 +241,7 @@ impl DirectXRenderer {
             #[cfg(debug_assertions)]
             if let Some(devices) = &self.devices {
                 report_live_objects(&devices.device)
-                    .context("Failed to report live objects after device lost")
+                    .map_err(|_| WindowsError::DeviceLost)
                     .log_err();
             }
 
@@ -252,7 +252,7 @@ impl DirectXRenderer {
                 devices.device_context.Flush();
                 #[cfg(debug_assertions)]
                 report_live_objects(&devices.device)
-                    .context("Failed to report live objects after device lost")
+                    .map_err(|_| WindowsError::DeviceLost)
                     .log_err();
             }
 
@@ -261,7 +261,7 @@ impl DirectXRenderer {
         }
 
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
-            .context("Recreating DirectX devices")?;
+            .map_err(|_| WindowsError::CreateDevice)?;
         let resources = DirectXResources::new(
             &devices,
             self.width,
@@ -269,11 +269,11 @@ impl DirectXRenderer {
             self.hwnd,
             disable_direct_composition,
         )
-        .context("Creating DirectX resources")?;
+        .map_err(|_| WindowsError::RenderTargetInit)?;
         let globals = DirectXGlobalElements::new(&devices.device)
-            .context("Creating DirectXGlobalElements")?;
+            .map_err(|_| WindowsError::DirectCompositionInit)?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
-            .context("Creating DirectXRenderPipelines")?;
+            .map_err(|_| WindowsError::RenderTargetInit)?;
 
         let direct_composition = if disable_direct_composition {
             None
@@ -339,18 +339,7 @@ impl DirectXRenderer {
                 }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
             }
-            .context(format!(
-                "scene too large:\
-                {} paths, {} shadows, {} quads, {} underlines, {} mono, {} subpixel, {} poly, {} surfaces",
-                scene.paths.len(),
-                scene.shadows.len(),
-                scene.quads.len(),
-                scene.underlines.len(),
-                scene.monochrome_sprites.len(),
-                scene.subpixel_sprites.len(),
-                scene.polychrome_sprites.len(),
-                scene.surfaces.len(),
-            ))?;
+            .map_err(|_| WindowsError::SceneTooLarge)?;
         }
         self.present()
     }
@@ -365,9 +354,9 @@ impl DirectXRenderer {
         self.height = height;
 
         // Clear the render target before resizing
-        let devices = self.devices.as_ref().context("devices missing")?;
+        let devices = self.devices.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "devices missing".into() })?;
         unsafe { devices.device_context.OMSetRenderTargets(None, None) };
-        let resources = self.resources.as_mut().context("resources missing")?;
+        let resources = self.resources.as_mut().ok_or_else(|| WindowsError::DirectXRender { details: "resources missing".into() })?;
         resources.render_target.take();
         resources.render_target_view.take();
 
@@ -385,7 +374,7 @@ impl DirectXRenderer {
                     RENDER_TARGET_FORMAT,
                     DXGI_SWAP_CHAIN_FLAG(0),
                 )
-                .context("Failed to resize swap chain")?;
+                .map_err(|_| WindowsError::ResizeSwapChain)?;
         }
 
         resources.recreate_resources(devices, width, height)?;
@@ -400,7 +389,7 @@ impl DirectXRenderer {
     }
 
     fn upload_scene_buffers(&mut self, scene: &Scene) -> Result<()> {
-        let devices = self.devices.as_ref().context("devices missing")?;
+        let devices = self.devices.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "devices missing".into() })?;
 
         if !scene.shadows.is_empty() {
             self.pipelines.shadow_pipeline.update_buffer(
@@ -457,7 +446,7 @@ impl DirectXRenderer {
         if len == 0 {
             return Ok(());
         }
-        let devices = self.devices.as_ref().context("devices missing")?;
+        let devices = self.devices.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "devices missing".into() })?;
         self.pipelines.shadow_pipeline.draw_range(
             &devices.device,
             &devices.device_context,
@@ -465,7 +454,7 @@ impl DirectXRenderer {
                 &self
                     .resources
                     .as_ref()
-                    .context("resources missing")?
+                    .ok_or_else(|| WindowsError::DirectXRender { details: "resources missing".into() })?
                     .viewport,
             ),
             slice::from_ref(&self.globals.global_params_buffer),
@@ -479,7 +468,7 @@ impl DirectXRenderer {
         if len == 0 {
             return Ok(());
         }
-        let devices = self.devices.as_ref().context("devices missing")?;
+        let devices = self.devices.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "devices missing".into() })?;
         self.pipelines.quad_pipeline.draw_range(
             &devices.device,
             &devices.device_context,
@@ -487,7 +476,7 @@ impl DirectXRenderer {
                 &self
                     .resources
                     .as_ref()
-                    .context("resources missing")?
+                    .ok_or_else(|| WindowsError::DirectXRender { details: "resources missing".into() })?
                     .viewport,
             ),
             slice::from_ref(&self.globals.global_params_buffer),
@@ -502,8 +491,8 @@ impl DirectXRenderer {
             return Ok(());
         }
 
-        let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
+        let devices = self.devices.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "devices missing".into() })?;
+        let resources = self.resources.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "resources missing".into() })?;
         // Clear intermediate MSAA texture
         unsafe {
             devices.device_context.ClearRenderTargetView(
@@ -589,8 +578,8 @@ impl DirectXRenderer {
             vec![PathSprite { bounds }]
         };
 
-        let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
+        let devices = self.devices.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "devices missing".into() })?;
+        let resources = self.resources.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "resources missing".into() })?;
         self.pipelines.path_sprite_pipeline.update_buffer(
             &devices.device,
             &devices.device_context,
@@ -612,8 +601,8 @@ impl DirectXRenderer {
         if len == 0 {
             return Ok(());
         }
-        let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
+        let devices = self.devices.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "devices missing".into() })?;
+        let resources = self.resources.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "resources missing".into() })?;
         self.pipelines.underline_pipeline.draw_range(
             &devices.device,
             &devices.device_context,
@@ -634,8 +623,8 @@ impl DirectXRenderer {
         if len == 0 {
             return Ok(());
         }
-        let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
+        let devices = self.devices.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "devices missing".into() })?;
+        let resources = self.resources.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "resources missing".into() })?;
         let texture_view = self.atlas.get_texture_view(texture_id);
         self.pipelines.mono_sprites.draw_range_with_texture(
             &devices.device,
@@ -658,8 +647,8 @@ impl DirectXRenderer {
         if len == 0 {
             return Ok(());
         }
-        let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
+        let devices = self.devices.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "devices missing".into() })?;
+        let resources = self.resources.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "resources missing".into() })?;
         let texture_view = self.atlas.get_texture_view(texture_id);
         self.pipelines.subpixel_sprites.draw_range_with_texture(
             &devices.device,
@@ -682,8 +671,8 @@ impl DirectXRenderer {
         if len == 0 {
             return Ok(());
         }
-        let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
+        let devices = self.devices.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "devices missing".into() })?;
+        let resources = self.resources.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "resources missing".into() })?;
         let texture_view = self.atlas.get_texture_view(texture_id);
         self.pipelines.poly_sprites.draw_range_with_texture(
             &devices.device,
@@ -705,7 +694,7 @@ impl DirectXRenderer {
     }
 
     pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
-        let devices = self.devices.as_ref().context("devices missing")?;
+        let devices = self.devices.as_ref().ok_or_else(|| WindowsError::DirectXRender { details: "devices missing".into() })?;
         let desc = unsafe { devices.adapter.GetDesc1() }?;
         let is_software_emulated = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0;
         let device_name = String::from_utf16_lossy(&desc.Description)
@@ -723,7 +712,6 @@ impl DirectXRenderer {
             // For Intel and other vendors, we use the DXGI API to get the driver version.
             _ => dxgi::get_driver_version(&devices.adapter),
         }
-        .context("Failed to get gpu driver info")
         .log_err()
         .unwrap_or("Unknown Driver".to_string());
         Ok(GpuSpecs {
@@ -1582,7 +1570,7 @@ fn report_live_objects(device: &ID3D11Device) -> Result<()> {
 const BUFFER_COUNT: usize = 3;
 
 pub(crate) mod shader_resources {
-    use anyhow::Result;
+    use crate::error::Result;
 
     #[cfg(debug_assertions)]
     use windows::{
@@ -1739,14 +1727,14 @@ pub(crate) mod shader_resources {
             );
             if ret.is_err() {
                 let Some(error_blob) = error_blob else {
-                    return Err(anyhow::anyhow!("{ret:?}"));
+                    return Err(WindowsError::ShaderCompilation(format!("{ret:?}")));
                 };
 
                 let error_string =
                     std::ffi::CStr::from_ptr(error_blob.GetBufferPointer() as *const i8)
                         .to_string_lossy();
                 log::error!("Shader compile error: {}", error_string);
-                return Err(anyhow::anyhow!("Compile error: {}", error_string));
+                return Err(WindowsError::ShaderCompilation(format!("Compile error: {}", error_string)));
             }
             Ok(compile_blob.unwrap())
         }
@@ -1779,7 +1767,7 @@ mod nvidia {
         os::raw::{c_char, c_int, c_uint},
     };
 
-    use anyhow::Result;
+    use crate::error::Result;
     use windows::{Win32::System::LibraryLoader::GetProcAddress, core::s};
 
     use crate::with_dll_library;
@@ -1806,13 +1794,13 @@ mod nvidia {
 
         with_dll_library(nvidia_dll_name, |nvidia_dll| unsafe {
             let nvapi_query_addr = GetProcAddress(nvidia_dll, s!("nvapi_QueryInterface"))
-                .ok_or_else(|| anyhow::anyhow!("Failed to get nvapi_QueryInterface address"))?;
+                .ok_or_else(|| WindowsError::NvidiaDriverVersion)?;
             let nvapi_query: extern "C" fn(u32) -> *mut () = std::mem::transmute(nvapi_query_addr);
 
             // https://github.com/NVIDIA/nvapi/blob/7cb76fce2f52de818b3da497af646af1ec16ce27/nvapi_interface.h#L41
             let nvapi_get_driver_version_ptr = nvapi_query(0x2926aaad);
             if nvapi_get_driver_version_ptr.is_null() {
-                anyhow::bail!("Failed to get NVIDIA driver version function pointer");
+                return Err(WindowsError::NvidiaDriverVersion);
             }
             let nvapi_get_driver_version: NvAPI_SYS_GetDriverAndBranchVersion_t =
                 std::mem::transmute(nvapi_get_driver_version_ptr);
@@ -1825,10 +1813,7 @@ mod nvidia {
             );
 
             if result != 0 {
-                anyhow::bail!(
-                    "Failed to get NVIDIA driver version, error code: {}",
-                    result
-                );
+                return Err(WindowsError::NvidiaDriverVersion);
             }
             let major = driver_version / 100;
             let minor = driver_version % 100;
@@ -1846,7 +1831,7 @@ mod nvidia {
 mod amd {
     use std::os::raw::{c_char, c_int, c_void};
 
-    use anyhow::Result;
+    use crate::error::Result;
     use windows::{Win32::System::LibraryLoader::GetProcAddress, core::s};
 
     use crate::with_dll_library;
@@ -1890,9 +1875,9 @@ mod amd {
 
         with_dll_library(amd_dll_name, |amd_dll| unsafe {
             let ags_initialize_addr = GetProcAddress(amd_dll, s!("agsInitialize"))
-                .ok_or_else(|| anyhow::anyhow!("Failed to get agsInitialize address"))?;
+                .ok_or_else(|| WindowsError::AmdDriverVersion)?;
             let ags_deinitialize_addr = GetProcAddress(amd_dll, s!("agsDeInitialize"))
-                .ok_or_else(|| anyhow::anyhow!("Failed to get agsDeInitialize address"))?;
+                .ok_or_else(|| WindowsError::AmdDriverVersion)?;
 
             let ags_initialize: agsInitialize_t = std::mem::transmute(ags_initialize_addr);
             let ags_deinitialize: agsDeInitialize_t = std::mem::transmute(ags_deinitialize_addr);
@@ -1912,7 +1897,7 @@ mod amd {
                 &mut gpu_info,
             );
             if result != 0 {
-                anyhow::bail!("Failed to initialize AMD AGS, error code: {}", result);
+                return Err(WindowsError::AmdDriverVersion);
             }
 
             // Vulkan actually returns this as the driver version
@@ -1939,12 +1924,13 @@ mod amd {
 }
 
 mod dxgi {
+    use crate::error::Result;
     use windows::{
         Win32::Graphics::Dxgi::{IDXGIAdapter1, IDXGIDevice},
         core::Interface,
     };
 
-    pub(super) fn get_driver_version(adapter: &IDXGIAdapter1) -> anyhow::Result<String> {
+    pub(super) fn get_driver_version(adapter: &IDXGIAdapter1) -> Result<String> {
         let number = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID as _) }?;
         Ok(format!(
             "{}.{}.{}.{}",

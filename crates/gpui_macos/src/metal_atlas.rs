@@ -1,4 +1,4 @@
-use anyhow::{Context as _, Result};
+use crate::error::MacError;
 use collections::FxHashMap;
 use derive_more::{Deref, DerefMut};
 use etagere::BucketedAtlasAllocator;
@@ -40,8 +40,8 @@ impl PlatformAtlas for MetalAtlas {
     fn get_or_insert_with<'a>(
         &self,
         key: &AtlasKey,
-        build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
-    ) -> Result<Option<AtlasTile>> {
+        build: &mut dyn FnMut() -> gpui::Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
+    ) -> gpui::Result<Option<AtlasTile>> {
         let mut lock = self.0.lock();
         if let Some(tile) = lock.tiles_by_key.get(key) {
             Ok(Some(*tile))
@@ -51,7 +51,7 @@ impl PlatformAtlas for MetalAtlas {
             };
             let tile = lock
                 .allocate(size, key.texture_kind())
-                .context("failed to allocate")?;
+                .ok_or(MacError::AtlasAllocation)?;
             let texture = lock.texture(tile.texture_id);
             texture.upload(tile.bounds, &bytes);
             lock.tiles_by_key.insert(key.clone(), tile);

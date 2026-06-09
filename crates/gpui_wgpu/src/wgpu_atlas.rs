@@ -1,4 +1,4 @@
-use anyhow::{Context as _, Result};
+use crate::error::{Result, WgpuError};
 use collections::FxHashMap;
 use etagere::{BucketedAtlasAllocator, size2};
 use gpui::{
@@ -120,7 +120,7 @@ impl PlatformAtlas for WgpuAtlas {
             };
             let tile = lock
                 .allocate(size, key.texture_kind())
-                .context("failed to allocate")?;
+                .ok_or(WgpuError::AtlasFull)?;
             lock.upload_texture(tile.texture_id, tile.bounds, &bytes);
             lock.tiles_by_key.insert(key.clone(), tile);
             Ok(Some(tile))
@@ -399,11 +399,12 @@ fn swizzle_upload_data(bytes: &[u8], format: wgpu::TextureFormat) -> Vec<u8> {
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
+    use crate::error::{Result, WgpuError};
     use gpui::block_on;
     use gpui::{ImageId, RenderImageParams};
     use std::sync::Arc;
 
-    fn test_device_and_queue() -> anyhow::Result<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
+    fn test_device_and_queue() -> Result<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
         block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::all(),
@@ -419,7 +420,7 @@ mod tests {
                     force_fallback_adapter: false,
                 })
                 .await
-                .map_err(|error| anyhow::anyhow!("failed to request adapter: {error}"))?;
+                .map_err(|error| WgpuError::RequestAdapter { details: format!("{error}") })?;
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("wgpu_atlas_test_device"),
@@ -432,13 +433,13 @@ mod tests {
                     experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 })
                 .await
-                .map_err(|error| anyhow::anyhow!("failed to request device: {error}"))?;
+                .map_err(|error| WgpuError::RequestDevice { details: format!("{error}") })?;
             Ok((Arc::new(device), Arc::new(queue)))
         })
     }
 
     #[test]
-    fn before_frame_skips_uploads_for_removed_texture() -> anyhow::Result<()> {
+    fn before_frame_skips_uploads_for_removed_texture() -> Result<()> {
         let (device, queue) = test_device_and_queue()?;
 
         let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);

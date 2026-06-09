@@ -298,15 +298,14 @@ impl PlatformWindow for TestWindow {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn render_to_image(&self, scene: &Scene) -> anyhow::Result<RgbaImage> {
+    fn render_to_image(&self, scene: &Scene) -> Result<RgbaImage, PlatformError> {
         let mut state = self.0.lock();
-        let size = state.bounds.size;
         if let Some(renderer) = &mut state.renderer {
             let scale_factor = 2.0;
-            let device_size: Size<DevicePixels> = size.to_device_pixels(scale_factor);
+            let device_size: Size<DevicePixels> = state.bounds.size.to_device_pixels(scale_factor);
             renderer.render_scene_to_image(scene, device_size)
         } else {
-            anyhow::bail!("render_to_image not available: no HeadlessRenderer configured")
+            Err(PlatformError::NoHeadlessRenderer)
         }
     }
 
@@ -354,10 +353,11 @@ impl PlatformAtlas for TestAtlas {
     fn get_or_insert_with<'a>(
         &self,
         key: &crate::AtlasKey,
-        build: &mut dyn FnMut() -> anyhow::Result<
+        build: &mut dyn FnMut() -> Result<
             Option<(Size<crate::DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
+            PlatformError,
         >,
-    ) -> anyhow::Result<Option<crate::AtlasTile>> {
+    ) -> Result<Option<crate::AtlasTile>, PlatformError> {
         let mut state = self.0.lock();
         if let Some(&tile) = state.tiles.get(key) {
             return Ok(Some(tile));

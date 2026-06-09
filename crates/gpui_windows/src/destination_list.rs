@@ -20,6 +20,7 @@ use windows::{
     core::{GUID, HSTRING, Interface},
 };
 
+use crate::error::{Result, WindowsError};
 use gpui::{Action, MenuItem, SharedString};
 
 pub(crate) struct JumpList {
@@ -43,7 +44,7 @@ pub(crate) struct DockMenuItem {
 }
 
 impl DockMenuItem {
-    pub(crate) fn new(item: MenuItem) -> anyhow::Result<Self> {
+    pub(crate) fn new(item: MenuItem) -> Result<Self> {
         match item {
             MenuItem::Action { name, action, .. } => Ok(Self {
                 name: name.clone(),
@@ -54,7 +55,7 @@ impl DockMenuItem {
                 },
                 action,
             }),
-            _ => anyhow::bail!("Only `MenuItem::Action` is supported for dock menu on Windows."),
+            _ => return Err(WindowsError::DockMenuItemNotSupported { item_type: "MenuItem::Action" }),
         }
     }
 }
@@ -64,7 +65,7 @@ impl DockMenuItem {
 pub(crate) fn update_jump_list(
     recent_workspaces: &[SmallVec<[PathBuf; 2]>],
     dock_menus: &[(SharedString, SharedString)],
-) -> anyhow::Result<Vec<SmallVec<[PathBuf; 2]>>> {
+) -> Result<Vec<SmallVec<[PathBuf; 2]>>> {
     let (list, removed) = create_destination_list()?;
     add_recent_folders(&list, recent_workspaces, removed.as_ref())?;
     add_dock_menu(&list, dock_menus)?;
@@ -79,7 +80,7 @@ const PKEY_TITLE: PROPERTYKEY = PROPERTYKEY {
     pid: 2,
 };
 
-fn create_destination_list() -> anyhow::Result<(ICustomDestinationList, Vec<SmallVec<[PathBuf; 2]>>)>
+fn create_destination_list() -> Result<(ICustomDestinationList, Vec<SmallVec<[PathBuf; 2]>>)>
 {
     let list: ICustomDestinationList =
         unsafe { CoCreateInstance(&DestinationList, None, CLSCTX_INPROC_SERVER) }?;
@@ -114,7 +115,7 @@ fn create_destination_list() -> anyhow::Result<(ICustomDestinationList, Vec<Smal
 fn add_dock_menu(
     list: &ICustomDestinationList,
     dock_menus: &[(SharedString, SharedString)],
-) -> anyhow::Result<()> {
+) -> Result<()> {
     unsafe {
         let tasks: IObjectCollection =
             CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER)?;
@@ -134,7 +135,7 @@ fn add_recent_folders(
     list: &ICustomDestinationList,
     entries: &[SmallVec<[PathBuf; 2]>],
     removed: &Vec<SmallVec<[PathBuf; 2]>>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     unsafe {
         let tasks: IObjectCollection =
             CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER)?;
@@ -187,7 +188,7 @@ fn create_shell_link(
     description: HSTRING,
     icon: Option<HSTRING>,
     display: &str,
-) -> anyhow::Result<IShellLinkW> {
+) -> Result<IShellLinkW> {
     unsafe {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
         let exe_path = HSTRING::from(std::env::current_exe()?.as_os_str());

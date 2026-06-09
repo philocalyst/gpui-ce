@@ -3,11 +3,11 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use anyhow::Context as _;
 use uuid::Uuid;
 use wayland_backend::client::ObjectId;
 
 use gpui::{Bounds, DisplayId, Pixels, PlatformDisplay};
+use crate::error::WaylandError;
 
 #[derive(Debug, Clone)]
 pub(crate) struct WaylandDisplay {
@@ -28,11 +28,11 @@ impl PlatformDisplay for WaylandDisplay {
         DisplayId::new(self.id.protocol_id() as u64)
     }
 
-    fn uuid(&self) -> anyhow::Result<Uuid> {
+    fn uuid(&self) -> gpui::platform::Result<Uuid> {
         let name = self
             .name
             .as_ref()
-            .context("Wayland display does not have a name")?;
+            .ok_or_else(|| WaylandError::Display { id: format!("{:?}", self.id) })?;
         Ok(Uuid::new_v5(&Uuid::NAMESPACE_DNS, name.as_bytes()))
     }
 

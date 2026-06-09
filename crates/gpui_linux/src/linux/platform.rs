@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as _, anyhow};
+use crate::error::{LinuxError, X11Error};
 use calloop::LoopSignal;
 use futures::channel::oneshot;
 use util::ResultExt as _;
@@ -43,10 +43,6 @@ pub(crate) const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 pub(crate) const DOUBLE_CLICK_DISTANCE: Pixels = px(5.0);
 pub(crate) const KEYRING_LABEL: &str = "zed-github-account";
 
-#[cfg(any(feature = "wayland", feature = "x11"))]
-const FILE_PICKER_PORTAL_MISSING: &str =
-    "Couldn't open file picker due to missing xdg-desktop-portal implementation.";
-
 pub(crate) trait LinuxClient {
     fn compositor_name(&self) -> &'static str;
     fn with_common<R>(&self, f: impl FnOnce(&mut LinuxCommon) -> R) -> R;
@@ -67,9 +63,9 @@ pub(crate) trait LinuxClient {
     ) -> oneshot::Receiver<Result<Vec<Rc<dyn gpui::ScreenCaptureSource>>>> {
         let (sources_tx, sources_rx) = oneshot::channel();
         sources_tx
-            .send(Err(anyhow::anyhow!(
-                "gpui_linux was compiled without the screen-capture feature"
-            )))
+            .send(Err(LinuxError::FeatureNotCompiled(
+                "gpui_linux was compiled without the screen-capture feature".to_string(),
+            ).into()))
             .ok();
         sources_rx
     }
@@ -78,7 +74,7 @@ pub(crate) trait LinuxClient {
         &self,
         handle: AnyWindowHandle,
         options: WindowParams,
-    ) -> anyhow::Result<Box<dyn PlatformWindow>>;
+    ) -> crate::error::Result<Box<dyn PlatformWindow>>;
     fn set_cursor_style(&self, style: CursorStyle);
     fn hide_cursor_until_mouse_moves(&self) {}
     fn is_cursor_visible(&self) -> bool {
@@ -313,7 +309,7 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
         &self,
         handle: AnyWindowHandle,
         options: WindowParams,
-    ) -> anyhow::Result<Box<dyn PlatformWindow>> {
+    ) -> crate::error::Result<Box<dyn PlatformWindow>> {
         self.inner.open_window(handle, options)
     }
 
@@ -363,11 +359,11 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                 {
                     Ok(request) => request,
                     Err(err) => {
-                        let result = match err {
-                            ashpd::Error::PortalNotFound(_) => anyhow!(FILE_PICKER_PORTAL_MISSING),
-                            err => err.into(),
+                        let result: LinuxError = match err {
+                            ashpd::Error::PortalNotFound(_) => LinuxError::FilePickerPortalMissing,
+                            err => LinuxError::Portal(err),
                         };
-                        let _ = done_tx.send(Err(result));
+                        let _ = done_tx.send(Err(result.into()));
                         return;
                     }
                 };
@@ -382,7 +378,7 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                             .collect::<Vec<_>>(),
                     )),
                     Err(ashpd::Error::Response(_)) => Ok(None),
-                    Err(e) => Err(e.into()),
+                    Err(e) => Err(LinuxError::Portal(e).into()),
                 };
                 let _ = done_tx.send(result);
             })
@@ -427,7 +423,7 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                         Err(err) => {
                             let result = match err {
                                 ashpd::Error::PortalNotFound(_) => {
-                                    anyhow!(FILE_PICKER_PORTAL_MISSING)
+                                    LinuxError::FilePickerPortalMissing
                                 }
                                 err => err.into(),
                             };
@@ -469,7 +465,6 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                 let _ = new_command("xdg-open")
                     .arg(path)
                     .spawn()
-                    .context("invoking xdg-open")
                     .log_err()?
                     .status()
                     .await
@@ -530,8 +525,8 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
     }
 
     fn path_for_auxiliary_executable(&self, _name: &str) -> Result<PathBuf> {
-        Err(anyhow::Error::msg(
-            "Platform<LinuxPlatform>::path_for_auxiliary_executable is not implemented yet",
+        Err(LinuxError::NotImplemented(
+            PlatformMethod::PathForAuxiliaryExecutable,
         ))
     }
 
@@ -583,7 +578,12 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                     let attributes = item.attributes().await?;
                     let username = attributes
                         .get("username")
-                        .context("Cannot find username in stored credentials")?;
+                        .ok_or_else(|| {
+                            LinuxError::Io(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "Cannot find username in stored credentials",
+                            ))
+                        })?;
                     item.unlock().await?;
                     let secret = item.secret().await?;
 
@@ -625,8 +625,8 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
         Some(self.inner.with_common(|common| common.button_layout))
     }
 
-    fn register_url_scheme(&self, _: &str) -> Task<anyhow::Result<()>> {
-        Task::ready(Err(anyhow!("register_url_scheme unimplemented")))
+    fn register_url_scheme(&self, _: &str) -> Task<crate::error::Result<()>> {
+        Task::ready(Err(LinuxError::NotImplemented(PlatformMethod::RegisterUrlScheme)))
     }
 
     fn write_to_primary(&self, item: ClipboardItem) {

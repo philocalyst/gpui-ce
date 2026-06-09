@@ -1,3 +1,4 @@
+use crate::error::{Result, WgpuError};
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext, WgpuDeviceRequirements};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
@@ -193,13 +194,13 @@ impl WgpuRenderer {
         config: WgpuSurfaceConfig,
         compositor_gpu: Option<CompositorGpuHint>,
         extra_requirements: Option<WgpuDeviceRequirements>,
-    ) -> anyhow::Result<Self>
+    ) -> Result<Self>
     where
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
     {
         let window_handle = window
             .window_handle()
-            .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
+            .map_err(|e| WgpuError::WindowHandle { details: format!("{e}") })?;
 
         let target = wgpu::SurfaceTargetUnsafe::RawHandle {
             // Fall back to the display handle already provided via InstanceDescriptor::display.
@@ -222,7 +223,7 @@ impl WgpuRenderer {
         let surface = unsafe {
             instance
                 .create_surface_unsafe(target)
-                .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))?
+                .map_err(|e| WgpuError::SurfaceCreation { details: format!("{e}") })?
         };
 
         let mut ctx_ref = gpu_context.borrow_mut();
@@ -257,11 +258,11 @@ impl WgpuRenderer {
         context: &WgpuContext,
         canvas: &web_sys::HtmlCanvasElement,
         config: WgpuSurfaceConfig,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self> {
         let surface = context
             .instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
-            .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))?;
+            .map_err(|e| WgpuError::SurfaceCreation { details: format!("{e}") })?;
 
         let atlas = Arc::new(WgpuAtlas::from_context(context));
 
@@ -276,7 +277,7 @@ impl WgpuRenderer {
         compositor_gpu: Option<CompositorGpuHint>,
         extra_requirements: Option<WgpuDeviceRequirements>,
         atlas: Arc<WgpuAtlas>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self> {
         let surface_caps = surface.get_capabilities(&context.adapter);
         let preferred_formats = [
             wgpu::TextureFormat::Bgra8Unorm,
@@ -289,24 +290,22 @@ impl WgpuRenderer {
             .or_else(|| surface_caps.formats.iter().find(|f| !f.is_srgb()).copied())
             .or_else(|| surface_caps.formats.first().copied())
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Surface reports no supported texture formats for adapter {:?}",
-                    context.adapter.get_info().name
-                )
+                WgpuError::NoTextureFormats {
+                    adapter: context.adapter.get_info().name,
+                }
             })?;
 
         let pick_alpha_mode =
-            |preferences: &[wgpu::CompositeAlphaMode]| -> anyhow::Result<wgpu::CompositeAlphaMode> {
+            |preferences: &[wgpu::CompositeAlphaMode]| -> Result<wgpu::CompositeAlphaMode> {
                 preferences
                     .iter()
                     .find(|p| surface_caps.alpha_modes.contains(p))
                     .copied()
                     .or_else(|| surface_caps.alpha_modes.first().copied())
                     .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Surface reports no supported alpha modes for adapter {:?}",
-                            context.adapter.get_info().name
-                        )
+                        WgpuError::NoSupportedAlphaMode {
+                            adapter: context.adapter.get_info().name,
+                        }
                     })
             };
 
@@ -1783,10 +1782,10 @@ impl WgpuRenderer {
         window: &W,
         config: WgpuSurfaceConfig,
         instance: &wgpu::Instance,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let window_handle = window
             .window_handle()
-            .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
+            .map_err(|e| WgpuError::WindowHandle { details: format!("{e}") })?;
 
         let surface = create_surface(instance, window_handle.as_raw())?;
 
@@ -1848,7 +1847,7 @@ impl WgpuRenderer {
     /// - The first window to call this will recreate the shared context
     /// - Subsequent windows will adopt the already-recovered context
     #[cfg(not(target_family = "wasm"))]
-    pub fn recover<W>(&mut self, window: &W) -> anyhow::Result<()>
+    pub fn recover<W>(&mut self, window: &W) -> Result<()>
     where
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
     {
@@ -1862,7 +1861,7 @@ impl WgpuRenderer {
 
         let window_handle = window
             .window_handle()
-            .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
+            .map_err(|e| WgpuError::WindowHandle { details: format!("{e}") })?;
 
         let surface = if needs_new_context {
             log::warn!("GPU device lost, recreating context...");
@@ -1928,7 +1927,7 @@ impl WgpuRenderer {
 fn create_surface(
     instance: &wgpu::Instance,
     raw_window_handle: raw_window_handle::RawWindowHandle,
-) -> anyhow::Result<wgpu::Surface<'static>> {
+) -> Result<wgpu::Surface<'static>> {
     unsafe {
         instance
             .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
@@ -1936,7 +1935,7 @@ fn create_surface(
                 raw_display_handle: None,
                 raw_window_handle,
             })
-            .map_err(|e| anyhow::anyhow!("{e}"))
+            .map_err(|e| WgpuError::SurfaceCreation { details: format!("{e}") })
     }
 }
 

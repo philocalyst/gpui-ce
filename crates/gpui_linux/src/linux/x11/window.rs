@@ -1,4 +1,4 @@
-use anyhow::{Context as _, anyhow};
+use crate::error::{LinuxError, X11Error, X11Request};
 use x11rb::connection::RequestConnection;
 
 use crate::linux::X11ClientStatePtr;
@@ -13,11 +13,11 @@ use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig};
 
 use collections::FxHashSet;
 use raw_window_handle as rwh;
-use util::{ResultExt, maybe};
+use util::ResultExt;
 use x11rb::{
     connection::Connection,
     cookie::{Cookie, VoidCookie},
-    errors::ConnectionError,
+    errors::{ConnectionError, ReplyError},
     properties::WmSizeHints,
     protocol::{
         sync,
@@ -29,7 +29,7 @@ use x11rb::{
 };
 
 use std::{
-    cell::RefCell, ffi::c_void, fmt::Display, num::NonZeroU32, ptr::NonNull, rc::Rc, sync::Arc,
+    cell::RefCell, ffi::c_void, num::NonZeroU32, ptr::NonNull, rc::Rc, sync::Arc,
 };
 
 use super::{X11Display, XINPUT_ALL_DEVICE_GROUPS, XINPUT_ALL_DEVICES};
@@ -89,8 +89,8 @@ x11rb::atom_manager! {
 fn query_render_extent(
     xcb: &Rc<XCBConnection>,
     x_window: xproto::Window,
-) -> anyhow::Result<Size<DevicePixels>> {
-    let reply = get_reply(|| "X11 GetGeometry failed.", xcb.get_geometry(x_window))?;
+) -> crate::error::Result<Size<DevicePixels>> {
+    let reply = GetGeometry, xcb.get_geometry(x_window))?;
     Ok(Size {
         width: DevicePixels(reply.width as i32),
         height: DevicePixels(reply.height as i32),
@@ -352,60 +352,43 @@ impl rwh::HasDisplayHandle for X11Window {
 }
 
 pub(crate) fn xcb_flush(xcb: &XCBConnection) {
-    xcb.flush()
-        .map_err(handle_connection_error)
-        .context("X11 flush failed")
-        .log_err();
+    xcb.flush().map_err(handle_connection_error).log_err();
 }
 
-pub(crate) fn check_reply<E, F, C>(
-    failure_context: F,
+pub(crate) fn check_reply<C>(
+    request: X11Request,
     result: Result<VoidCookie<'_, C>, ConnectionError>,
-) -> anyhow::Result<()>
+) -> crate::error::Result<()>
 where
-    E: Display + Send + Sync + 'static,
-    F: FnOnce() -> E,
     C: RequestConnection,
 {
     result
         .map_err(handle_connection_error)
-        .and_then(|response| response.check().map_err(|reply_error| anyhow!(reply_error)))
-        .with_context(failure_context)
+        .and_then(|response| response.check().map_err(|e| X11Error::Request(request, e)))?;
+    Ok(())
 }
 
-pub(crate) fn get_reply<E, F, C, O>(
-    failure_context: F,
+pub(crate) fn get_reply<C, O>(
+    request: X11Request,
     result: Result<Cookie<'_, C, O>, ConnectionError>,
-) -> anyhow::Result<O>
+) -> crate::error::Result<O>
 where
-    E: Display + Send + Sync + 'static,
-    F: FnOnce() -> E,
     C: RequestConnection,
     O: x11rb::x11_utils::TryParse,
 {
-    result
+    Ok(result
         .map_err(handle_connection_error)
-        .and_then(|response| response.reply().map_err(|reply_error| anyhow!(reply_error)))
-        .with_context(failure_context)
+        .and_then(|response| response.reply().map_err(|e| X11Error::Request(request, e)))?)
 }
 
-/// Convert X11 connection errors to `anyhow::Error` and panic for unrecoverable errors.
-pub(crate) fn handle_connection_error(err: ConnectionError) -> anyhow::Error {
+/// Convert X11 connection errors to `X11Error` and panic for unrecoverable errors.
+pub(crate) fn handle_connection_error(err: ConnectionError) -> X11Error {
     match err {
-        ConnectionError::UnknownError => anyhow!("X11 connection: Unknown error"),
-        ConnectionError::UnsupportedExtension => anyhow!("X11 connection: Unsupported extension"),
-        ConnectionError::MaximumRequestLengthExceeded => {
-            anyhow!("X11 connection: Maximum request length exceeded")
-        }
         ConnectionError::FdPassingFailed => {
             panic!("X11 connection: File descriptor passing failed")
         }
-        ConnectionError::ParseError(parse_error) => {
-            anyhow!(parse_error).context("Parse error in X11 response")
-        }
         ConnectionError::InsufficientMemory => panic!("X11 connection: Insufficient memory"),
-        ConnectionError::IoError(err) => anyhow!(err).context("X11 connection: IOError"),
-        _ => anyhow!(err),
+        _ => X11Error::Connection(err),
     }
 }
 
@@ -428,7 +411,7 @@ impl X11WindowState {
         parent_window: Option<X11WindowStatePtr>,
         supports_xinput_gestures: bool,
         is_bgr: bool,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::error::Result<Self> {
         let x_screen_index = params
             .display_id
             .map_or(x_main_screen_index, |did| u64::from(did) as usize);
@@ -447,7 +430,7 @@ impl X11WindowState {
         let colormap = if visual.colormap != 0 {
             visual.colormap
         } else {
-            let id = xcb.generate_id()?;
+            let id = xcb.generate_id().map_err(X11Error::from)?;
             log::info!("Creating colormap {}", id);
             check_reply(
                 || format!("X11 CreateColormap failed. id: {}", id),
@@ -524,7 +507,7 @@ impl X11WindowState {
                 ),
             )?;
 
-            let reply = get_reply(|| "X11 GetGeometry failed.", xcb.get_geometry(x_window))?;
+            let reply = GetGeometry, xcb.get_geometry(x_window))?;
             if reply.x == 0 && reply.y == 0 {
                 bounds.origin.x.0 += 2;
                 // Work around a bug where our rendered content appears
@@ -850,7 +833,7 @@ impl Drop for X11Window {
             )?;
             xcb_flush(&self.0.xcb);
 
-            anyhow::Ok(())
+            Ok(())
         })
         .log_err();
 
@@ -897,7 +880,7 @@ impl X11Window {
         parent_window: Option<X11WindowStatePtr>,
         supports_xinput_gestures: bool,
         is_bgr: bool,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::error::Result<Self> {
         let ptr = X11WindowStatePtr {
             state: Rc::new(RefCell::new(X11WindowState::new(
                 handle,
@@ -935,7 +918,7 @@ impl X11Window {
         wm_hint_property_state: WmHintPropertyState,
         prop1: u32,
         prop2: u32,
-    ) -> anyhow::Result<()> {
+    ) -> crate::error::Result<()> {
         let state = self.0.state.borrow();
         let message = ClientMessageEvent::new(
             32,
@@ -959,7 +942,7 @@ impl X11Window {
     fn get_root_position(
         &self,
         position: Point<Pixels>,
-    ) -> anyhow::Result<TranslateCoordinatesReply> {
+    ) -> crate::error::Result<TranslateCoordinatesReply> {
         let state = self.0.state.borrow();
         get_reply(
             || "X11 TranslateCoordinates failed.",
@@ -972,7 +955,7 @@ impl X11Window {
         )
     }
 
-    fn send_moveresize(&self, flag: u32) -> anyhow::Result<()> {
+    fn send_moveresize(&self, flag: u32) -> crate::error::Result<()> {
         let state = self.0.state.borrow();
 
         check_reply(
@@ -1023,7 +1006,7 @@ impl X11WindowStatePtr {
         }
     }
 
-    pub fn property_notify(&self, event: xproto::PropertyNotifyEvent) -> anyhow::Result<()> {
+    pub fn property_notify(&self, event: xproto::PropertyNotifyEvent) -> crate::error::Result<()> {
         let state = self.state.borrow_mut();
         if event.atom == state.atoms._NET_WM_STATE {
             self.set_wm_properties(state)?;
@@ -1036,7 +1019,7 @@ impl X11WindowStatePtr {
     fn set_edge_constraints(
         &self,
         mut state: std::cell::RefMut<X11WindowState>,
-    ) -> anyhow::Result<()> {
+    ) -> crate::error::Result<()> {
         let reply = get_reply(
             || "X11 GetProperty for _GTK_EDGE_CONSTRAINTS failed.",
             self.xcb.get_property(
@@ -1065,7 +1048,7 @@ impl X11WindowStatePtr {
     fn set_wm_properties(
         &self,
         mut state: std::cell::RefMut<X11WindowState>,
-    ) -> anyhow::Result<()> {
+    ) -> crate::error::Result<()> {
         let reply = get_reply(
             || "X11 GetProperty for _NET_WM_STATE failed.",
             self.xcb.get_property(
@@ -1242,7 +1225,7 @@ impl X11WindowStatePtr {
         bounds.map(|b| b.scale(scale_factor))
     }
 
-    pub fn set_bounds(&self, bounds: Bounds<i32>) -> anyhow::Result<()> {
+    pub fn set_bounds(&self, bounds: Bounds<i32>) -> crate::error::Result<()> {
         let (is_resize, content_size, scale_factor) = {
             let mut state = self.state.borrow_mut();
             let bounds = bounds.map(|f| px(f as f32 / state.scale_factor));
@@ -1545,7 +1528,7 @@ impl PlatformWindow for X11Window {
         .log_err();
     }
 
-    fn map_window(&mut self) -> anyhow::Result<()> {
+    fn map_window(&mut self) -> crate::error::Result<()> {
         check_reply(
             || "X11 MapWindow failed.",
             self.0.xcb.map_window(self.0.x_window),

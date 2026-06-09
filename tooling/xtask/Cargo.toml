@@ -10,19 +10,19 @@ workspace = true
 
 [dependencies]
 annotate-snippets = "0.12.1"
-anyhow.workspace = true
 backtrace.workspace = true
-cargo_metadata.workspace = true
-cargo_toml.workspace = true
-clap = { workspace = true, features = ["derive"] }
-toml.workspace = true
-indoc.workspace = true
-indexmap.workspace = true
+cargo_metadata = "0.19"
+cargo_toml = "0.21"
+clap = { version = "4.5", features = ["derive"] }
+toml = "0.8"
+indoc = "2"
+indexmap = "2"
 itertools.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9.34"
 strum.workspace = true
-toml_edit.workspace = true
-gh-workflow.workspace = true
+thiserror.workspace = true
+toml_edit = "0.22"
+gh-workflow = "0.5"

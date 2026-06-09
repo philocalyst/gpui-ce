@@ -4,7 +4,7 @@ use crate::{
     Pixels, PrepaintStateIndex, Render, Style, StyleRefinement, TextStyle, WeakEntity,
 };
 use crate::{Empty, Window};
-use anyhow::Result;
+use crate::Result;
 use collections::FxHashSet;
 use refineable::Refineable;
 use std::mem;

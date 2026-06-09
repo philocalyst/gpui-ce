@@ -1,7 +1,6 @@
 use std::{rc::Rc, sync::atomic::Ordering};
 
 use ::util::ResultExt;
-use anyhow::Context as _;
 use windows::{
     Win32::{
         Foundation::*,
@@ -841,7 +840,7 @@ impl WindowsWindowInner {
                         height,
                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
                     )
-                    .context("unable to set maximized window position after dpi has changed")
+                    .map_err(|e| WindowsError::Misc { details: format!("unable to set maximized window position after dpi has changed: {e}") })
                     .log_err();
                 }
 
@@ -868,7 +867,7 @@ impl WindowsWindowInner {
                     height,
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 )
-                .context("unable to set window position after dpi has changed")
+                .map_err(|e| WindowsError::Misc { details: format!("unable to set window position after dpi has changed: {e}") })
                 .log_err();
             }
         }
@@ -1156,7 +1155,7 @@ impl WindowsWindowInner {
             log::info!("System settings changed: {}", parameter_string);
             if parameter_string.as_str() == "ImmersiveColorSet" {
                 let new_appearance = system_appearance()
-                    .context("unable to get system appearance when handling ImmersiveColorSet")
+                    .map_err(|e| WindowsError::Misc { details: format!("unable to get system appearance when handling ImmersiveColorSet: {e}") })
                     .log_err()?;
 
                 if new_appearance != self.state.appearance.get() {

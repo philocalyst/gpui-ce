@@ -1,6 +1,21 @@
 use crate::SharedString;
-use anyhow::{Context as _, Result};
 use std::fmt;
+
+#[derive(Debug, thiserror::Error)]
+pub enum KeymapContextError {
+    #[error("unexpected character {0:?}")]
+    UnexpectedChar(char),
+    #[error("unexpected end of input")]
+    UnexpectedEnd,
+    #[error("expected a ')'")]
+    ExpectedCloseParen,
+    #[error("operands of == must be identifiers")]
+    EqOperandsNotIdentifiers,
+    #[error("operands of != must be identifiers")]
+    NeqOperandsNotIdentifiers,
+}
+
+type Result<T, E = KeymapContextError> = std::result::Result<T, E>;
 
 /// A datastructure for resolving whether an action should be dispatched
 /// at this point in the element tree. Contains a set of identifiers
@@ -19,7 +34,7 @@ pub struct ContextEntry {
 }
 
 impl<'a> TryFrom<&'a str> for KeyContext {
-    type Error = anyhow::Error;
+    type Error = KeymapContextError;
 
     fn try_from(value: &'a str) -> Result<Self> {
         Self::parse(value)
@@ -250,7 +265,7 @@ impl KeyBindingContextPredicate {
         let source = skip_whitespace(source);
         let (predicate, rest) = Self::parse_expr(source, 0)?;
         if let Some(next) = rest.chars().next() {
-            anyhow::bail!("unexpected character '{next:?}'");
+            Err(KeymapContextError::UnexpectedChar(next))
         } else {
             Ok(predicate)
         }
@@ -347,7 +362,7 @@ impl KeyBindingContextPredicate {
         }
     }
 
-    fn parse_expr(mut source: &str, min_precedence: u32) -> anyhow::Result<(Self, &str)> {
+    fn parse_expr(mut source: &str, min_precedence: u32) -> Result<(Self, &str)> {
         type Op = fn(
             KeyBindingContextPredicate,
             KeyBindingContextPredicate,
@@ -378,13 +393,13 @@ impl KeyBindingContextPredicate {
         Ok((predicate, source))
     }
 
-    fn parse_primary(mut source: &str) -> anyhow::Result<(Self, &str)> {
-        let next = source.chars().next().context("unexpected end")?;
+    fn parse_primary(mut source: &str) -> Result<(Self, &str)> {
+        let next = source.chars().next().ok_or(KeymapContextError::UnexpectedEnd)?;
         match next {
             '(' => {
                 source = skip_whitespace(&source[1..]);
                 let (predicate, rest) = Self::parse_expr(source, 0)?;
-                let stripped = rest.strip_prefix(')').context("expected a ')'")?;
+                let stripped = rest.strip_prefix(')').ok_or(KeymapContextError::ExpectedCloseParen)?;
                 source = skip_whitespace(stripped);
                 Ok((predicate, source))
             }
@@ -412,7 +427,7 @@ impl KeyBindingContextPredicate {
                     source,
                 ))
             }
-            _ => anyhow::bail!("unexpected character '{next:?}'"),
+            _ => Err(KeymapContextError::UnexpectedChar(next)),
         }
     }
 
@@ -432,7 +447,7 @@ impl KeyBindingContextPredicate {
         if let (Self::Identifier(left), Self::Identifier(right)) = (self, other) {
             Ok(Self::Equal(left, right))
         } else {
-            anyhow::bail!("operands of == must be identifiers");
+            Err(KeymapContextError::EqOperandsNotIdentifiers)
         }
     }
 
@@ -440,7 +455,7 @@ impl KeyBindingContextPredicate {
         if let (Self::Identifier(left), Self::Identifier(right)) = (self, other) {
             Ok(Self::NotEqual(left, right))
         } else {
-            anyhow::bail!("operands of != must be identifiers");
+            Err(KeymapContextError::NeqOperandsNotIdentifiers)
         }
     }
 

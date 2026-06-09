@@ -1,7 +1,4 @@
-#[cfg(not(target_family = "wasm"))]
-use anyhow::Context as _;
-#[cfg(not(target_family = "wasm"))]
-use gpui_util::ResultExt;
+use crate::WgpuError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wgpu::TextureFormat;
@@ -43,7 +40,7 @@ impl WgpuContext {
         surface: &wgpu::Surface<'_>,
         compositor_gpu: Option<CompositorGpuHint>,
         extra_requirements: Option<&WgpuDeviceRequirements>,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::Result<Self> {
         Self::new_with_options(instance, surface, compositor_gpu, false, extra_requirements)
     }
 
@@ -53,7 +50,7 @@ impl WgpuContext {
         surface: &wgpu::Surface<'_>,
         compositor_gpu: Option<CompositorGpuHint>,
         extra_requirements: Option<&WgpuDeviceRequirements>,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::Result<Self> {
         Self::new_with_options(instance, surface, compositor_gpu, true, extra_requirements)
     }
 
@@ -64,15 +61,22 @@ impl WgpuContext {
         compositor_gpu: Option<CompositorGpuHint>,
         reject_software: bool,
         extra_requirements: Option<&WgpuDeviceRequirements>,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::Result<Self> {
         let device_id_filter = match std::env::var("ZED_DEVICE_ID") {
-            Ok(val) => parse_pci_id(&val)
-                .context("Failed to parse device ID from `ZED_DEVICE_ID` environment variable")
-                .log_err(),
+            Ok(val) => match parse_pci_id(&val) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    log::error!(
+                        "Failed to parse device ID from `ZED_DEVICE_ID` environment variable: {e}"
+                    );
+                    None
+                }
+            },
             Err(std::env::VarError::NotPresent) => None,
-            err => {
-                err.context("Failed to read value of `ZED_DEVICE_ID` environment variable")
-                    .log_err();
+            Err(e) => {
+                log::error!(
+                    "Failed to read value of `ZED_DEVICE_ID` environment variable: {e}"
+                );
                 None
             }
         };
@@ -118,7 +122,7 @@ impl WgpuContext {
     }
 
     #[cfg(target_family = "wasm")]
-    pub async fn new_web() -> anyhow::Result<Self> {
+    pub async fn new_web() -> crate::Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
             flags: wgpu::InstanceFlags::default(),
@@ -134,7 +138,7 @@ impl WgpuContext {
                 force_fallback_adapter: false,
             })
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to request GPU adapter: {e}"))?;
+            .map_err(|e| WgpuError::RequestAdapter(format!("Failed to request GPU adapter: {e}")))?;
 
         log::info!(
             "Selected GPU adapter: {:?} ({:?})",
@@ -160,7 +164,7 @@ impl WgpuContext {
     async fn create_device(
         adapter: &wgpu::Adapter,
         extra_requirements: Option<&WgpuDeviceRequirements>,
-    ) -> anyhow::Result<(wgpu::Device, wgpu::Queue, bool, TextureFormat)> {
+    ) -> crate::Result<(wgpu::Device, wgpu::Queue, bool, TextureFormat)> {
         let dual_source_blending = adapter
             .features()
             .contains(wgpu::Features::DUAL_SOURCE_BLENDING);
@@ -197,7 +201,7 @@ impl WgpuContext {
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
             })
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create wgpu device: {e}"))?;
+            .map_err(|e| WgpuError::RequestDevice(format!("Failed to create wgpu device: {e}")))?;
 
         Ok((
             device,
@@ -218,17 +222,17 @@ impl WgpuContext {
         })
     }
 
-    pub fn check_compatible_with_surface(&self, surface: &wgpu::Surface<'_>) -> anyhow::Result<()> {
+    pub fn check_compatible_with_surface(&self, surface: &wgpu::Surface<'_>) -> crate::Result<()> {
         let caps = surface.get_capabilities(&self.adapter);
         if caps.formats.is_empty() {
             let info = self.adapter.get_info();
-            anyhow::bail!(
+            return Err(WgpuError::IncompatibleAdapter(format!(
                 "Adapter {:?} (backend={:?}, device={:#06x}) is not compatible with the \
                  display surface for this window.",
                 info.name,
                 info.backend,
                 info.device,
-            );
+            )));
         }
         Ok(())
     }
@@ -246,7 +250,7 @@ impl WgpuContext {
         compositor_gpu: Option<&CompositorGpuHint>,
         reject_software: bool,
         extra_requirements: Option<&WgpuDeviceRequirements>,
-    ) -> anyhow::Result<(
+    ) -> crate::Result<(
         wgpu::Adapter,
         wgpu::Device,
         wgpu::Queue,
@@ -256,7 +260,7 @@ impl WgpuContext {
         let mut adapters: Vec<_> = instance.enumerate_adapters(wgpu::Backends::all()).await;
 
         if adapters.is_empty() {
-            anyhow::bail!("No GPU adapters found");
+            return Err(WgpuError::NoAdapters);
         }
 
         if let Some(device_id) = device_id_filter {
@@ -373,7 +377,7 @@ impl WgpuContext {
             }
         }
 
-        anyhow::bail!("No GPU adapter found that can configure the display surface")
+        Err(WgpuError::NoSuitableAdapter)
     }
 
     /// Try to use an adapter with a surface by creating a device and testing configuration.
@@ -383,13 +387,13 @@ impl WgpuContext {
         adapter: &wgpu::Adapter,
         surface: &wgpu::Surface<'_>,
         extra_requirements: Option<&WgpuDeviceRequirements>,
-    ) -> anyhow::Result<(wgpu::Device, wgpu::Queue, bool, TextureFormat)> {
+    ) -> crate::Result<(wgpu::Device, wgpu::Queue, bool, TextureFormat)> {
         let caps = surface.get_capabilities(adapter);
         if caps.formats.is_empty() {
-            anyhow::bail!("no compatible surface formats");
+            return Err(WgpuError::NoSurfaceFormats);
         }
         if caps.alpha_modes.is_empty() {
-            anyhow::bail!("no compatible alpha modes");
+            return Err(WgpuError::NoAlphaModes);
         }
 
         let (device, queue, dual_source_blending, color_atlas_texture_format) =
@@ -411,7 +415,7 @@ impl WgpuContext {
 
         let error = error_scope.pop().await;
         if let Some(e) = error {
-            anyhow::bail!("surface configuration failed: {e}");
+            return Err(WgpuError::SurfaceConfig(format!("surface configuration failed: {e}")));
         }
 
         Ok((
@@ -422,7 +426,7 @@ impl WgpuContext {
         ))
     }
 
-    fn select_color_texture_format(adapter: &wgpu::Adapter) -> anyhow::Result<wgpu::TextureFormat> {
+    fn select_color_texture_format(adapter: &wgpu::Adapter) -> crate::Result<wgpu::TextureFormat> {
         let required_usages = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
         let bgra_features = adapter.get_texture_format_features(wgpu::TextureFormat::Bgra8Unorm);
         if bgra_features.allowed_usages.contains(required_usages) {
@@ -443,7 +447,7 @@ impl WgpuContext {
         }
 
         let info = adapter.get_info();
-        Err(anyhow::anyhow!(
+        Err(WgpuError::ColorAtlasFormat(format!(
             "Adapter {} ({:?}, device={:#06x}) does not support a usable color atlas texture \
              format with usages {:?}. Bgra8Unorm allowed usages: {:?}; \
              Rgba8Unorm allowed usages: {:?}.",
@@ -453,8 +457,9 @@ impl WgpuContext {
             required_usages,
             bgra_features.allowed_usages,
             rgba_features.allowed_usages,
-        ))
+        )))
     }
+
     pub fn supports_dual_source_blending(&self) -> bool {
         self.dual_source_blending
     }
@@ -476,7 +481,7 @@ impl WgpuContext {
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
+fn parse_pci_id(id: &str) -> crate::Result<u32> {
     let mut id = id.trim();
 
     if id.starts_with("0x") || id.starts_with("0X") {
@@ -484,12 +489,14 @@ fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
     }
     let is_hex_string = id.chars().all(|c| c.is_ascii_hexdigit());
     let is_4_chars = id.len() == 4;
-    anyhow::ensure!(
-        is_4_chars && is_hex_string,
-        "Expected a 4 digit PCI ID in hexadecimal format"
-    );
+    if !is_4_chars || !is_hex_string {
+        return Err(WgpuError::PciId(
+            "Expected a 4 digit PCI ID in hexadecimal format".into(),
+        ));
+    }
 
-    u32::from_str_radix(id, 16).context("parsing PCI ID as hex")
+    u32::from_str_radix(id, 16)
+        .map_err(|e| WgpuError::PciId(format!("parsing PCI ID as hex: {e}")))
 }
 
 #[cfg(test)]

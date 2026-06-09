@@ -1,5 +1,4 @@
 use annotate_snippets::{AnnotationKind, Group, Level, Snippet};
-use anyhow::{Result, anyhow};
 use regex::Regex;
 use serde_yaml::Value;
 use std::{
@@ -9,6 +8,8 @@ use std::{
     path::{Path, PathBuf},
     sync::LazyLock,
 };
+
+use crate::error::XtaskError;
 
 static GITHUB_INPUT_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"\$\{\{[[:blank:]]*([[:alnum:]]|[[:punct:]])+?[[:blank:]]*\}\}"#)
@@ -21,22 +22,19 @@ pub struct WorkflowFile {
 }
 
 impl WorkflowFile {
-    pub fn load(workflow_file_path: &Path) -> Result<Self> {
-        fs::read_to_string(workflow_file_path)
-            .map_err(|_| {
-                anyhow!(
-                    "Could not read workflow file at {}",
-                    workflow_file_path.display()
-                )
-            })
-            .and_then(|file_content| {
-                serde_yaml::from_str(&file_content)
-                    .map(|parsed_content| Self {
-                        raw_content: file_content,
-                        parsed_content,
-                    })
-                    .map_err(|e| anyhow!("Failed to parse workflow file: {e:?}"))
-            })
+    pub fn load(workflow_file_path: &Path) -> std::result::Result<Self, XtaskError> {
+        let raw_content = fs::read_to_string(workflow_file_path).map_err(|_| {
+            XtaskError::Message { details: format!(
+                "Could not read workflow file at {}",
+                workflow_file_path.display()
+            ) }
+        })?;
+        let parsed_content = serde_yaml::from_str(&raw_content)
+            .map_err(|e| XtaskError::Message { details: format!("Failed to parse workflow file: {e:?}") })?;
+        Ok(Self {
+            raw_content,
+            parsed_content,
+        })
     }
 }
 
@@ -104,7 +102,7 @@ pub struct RunValidationError {
     found_injection_patterns: Vec<(String, Range<usize>)>,
 }
 
-pub fn validate_run_command(command: &str) -> Result<(), RunValidationError> {
+pub fn validate_run_command(command: &str) -> std::result::Result<(), RunValidationError> {
     let patterns: Vec<_> = command
         .lines()
         .flat_map(move |line| {

@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use crate::error::WebError;
 use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, HttpClient, RedirectPolicy};
 use std::future::Future;
@@ -35,11 +35,11 @@ impl FetchHttpClient {
     /// # Safety
     ///
     /// The caller must ensure that the created `FetchHttpClient` is only used in a single thread environment.
-    pub unsafe fn with_user_agent(user_agent: &str) -> anyhow::Result<Self> {
+    pub unsafe fn with_user_agent(user_agent: &str) -> Result<Self, WebError> {
         Ok(Self {
             user_agent: Some(http_client::http::header::HeaderValue::from_str(
                 user_agent,
-            )?),
+            ).map_err(|e| WebError::HttpError(e.to_string()))?),
         })
     }
 }
@@ -50,11 +50,11 @@ impl FetchHttpClient {
         Self::default()
     }
 
-    pub fn with_user_agent(user_agent: &str) -> anyhow::Result<Self> {
+    pub fn with_user_agent(user_agent: &str) -> Result<Self, WebError> {
         Ok(Self {
             user_agent: Some(http_client::http::header::HeaderValue::from_str(
                 user_agent,
-            )?),
+            ).map_err(|e| WebError::HttpError(e.to_string()))?),
         })
     }
 }
@@ -91,7 +91,7 @@ impl HttpClient for FetchHttpClient {
     fn send(
         &self,
         req: http_client::http::Request<AsyncBody>,
-    ) -> futures::future::BoxFuture<'static, anyhow::Result<http_client::http::Response<AsyncBody>>>
+    ) -> futures::future::BoxFuture<'static, std::result::Result<http_client::http::Response<AsyncBody>, WebError>>
     {
         let (parts, body) = req.into_parts();
 
@@ -119,27 +119,27 @@ impl HttpClient for FetchHttpClient {
 
             let url = parts.uri.to_string();
             let request = web_sys::Request::new_with_str_and_init(&url, &init)
-                .map_err(|error| anyhow!("failed to create fetch Request: {error:?}"))?;
+                .map_err(|error| WebError::HttpError(format!("failed to create fetch Request: {error:?}")))?;
 
             let request_headers = request.headers();
             for (name, value) in &parts.headers {
                 let value_str = value
                     .to_str()
-                    .map_err(|_| anyhow!("non-ASCII header value for {name}"))?;
+                    .map_err(|_| WebError::HttpError(format!("non-ASCII header value for {name}")))?;
                 request_headers
                     .set(name.as_str(), value_str)
-                    .map_err(|error| anyhow!("failed to set header {name}: {error:?}"))?;
+                    .map_err(|error| WebError::HttpError(format!("failed to set header {name}: {error:?}")))?;
             }
 
             let promise = global_fetch(&request)
-                .map_err(|error| anyhow!("fetch threw an error: {error:?}"))?;
+                .map_err(|error| WebError::HttpError(format!("fetch threw an error: {error:?}")))?;
             let response_value = wasm_bindgen_futures::JsFuture::from(promise)
                 .await
-                .map_err(|error| anyhow!("fetch failed: {error:?}"))?;
+                .map_err(|error| WebError::HttpError(format!("fetch failed: {error:?}")))?;
 
             let web_response: web_sys::Response = response_value
                 .dyn_into()
-                .map_err(|error| anyhow!("fetch result is not a Response: {error:?}"))?;
+                .map_err(|error| WebError::HttpError(format!("fetch result is not a Response: {error:?}")))?;
 
             let status = web_response.status();
             let mut builder = http_client::http::Response::builder().status(status);
@@ -172,25 +172,25 @@ impl HttpClient for FetchHttpClient {
             // interop which is significantly more complex.
             let body_promise = web_response
                 .array_buffer()
-                .map_err(|error| anyhow!("failed to initiate response body read: {error:?}"))?;
+                .map_err(|error| WebError::HttpError(format!("failed to initiate response body read: {error:?}")))?;
             let body_value = wasm_bindgen_futures::JsFuture::from(body_promise)
                 .await
-                .map_err(|error| anyhow!("failed to read response body: {error:?}"))?;
+                .map_err(|error| WebError::HttpError(format!("failed to read response body: {error:?}")))?;
             let array_buffer: js_sys::ArrayBuffer = body_value
                 .dyn_into()
-                .map_err(|error| anyhow!("response body is not an ArrayBuffer: {error:?}"))?;
+                .map_err(|error| WebError::HttpError(format!("response body is not an ArrayBuffer: {error:?}")))?;
             let response_bytes = js_sys::Uint8Array::new(&array_buffer).to_vec();
 
             builder
                 .body(AsyncBody::from(response_bytes))
-                .map_err(|error| anyhow!(error))
+                .map_err(|error| WebError::HttpError(format!("{error}")))
         }))
     }
 }
 
-async fn read_body_to_bytes(mut body: AsyncBody) -> anyhow::Result<Option<Vec<u8>>> {
+async fn read_body_to_bytes(mut body: AsyncBody) -> std::result::Result<Option<Vec<u8>>, WebError> {
     let mut buffer = Vec::new();
-    body.read_to_end(&mut buffer).await?;
+    body.read_to_end(&mut buffer).await.map_err(|e| WebError::HttpError(e.to_string()))?;
     if buffer.is_empty() {
         Ok(None)
     } else {

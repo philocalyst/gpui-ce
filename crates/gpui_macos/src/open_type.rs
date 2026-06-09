@@ -23,6 +23,7 @@ use core_text::{
         CTFontDescriptorRef, kCTFontCascadeListAttribute, kCTFontFeatureSettingsAttribute,
     },
 };
+use crate::error::{MacError, Result};
 use font_kit::font::Font as FontKitFont;
 use gpui::{FontFallbacks, FontFeatures};
 use std::ptr;
@@ -31,7 +32,7 @@ pub fn apply_features_and_fallbacks(
     font: &mut FontKitFont,
     features: &FontFeatures,
     fallbacks: Option<&FontFallbacks>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     unsafe {
         let mut keys = vec![kCTFontFeatureSettingsAttribute];
         let mut values = vec![generate_feature_array(features)];

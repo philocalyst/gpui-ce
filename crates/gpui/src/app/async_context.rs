@@ -4,7 +4,7 @@ use crate::{
     PromptButton, PromptLevel, Render, Reservation, Result, Subscription, Task, VisualContext,
     Window, WindowHandle,
 };
-use anyhow::{Context as _, bail};
+use crate::AppError;
 use derive_more::{Deref, DerefMut};
 use futures::channel::oneshot;
 use futures::future::FutureExt;
@@ -86,10 +86,10 @@ impl AppContext for AsyncApp {
     where
         F: FnOnce(AnyView, &mut Window, &mut App) -> T,
     {
-        let app = self.app.upgrade().context("app was released")?;
+        let app = self.app.upgrade().ok_or(AppError::WindowNotFound)?;
         let mut lock = app.try_borrow_mut()?;
         if lock.quitting {
-            bail!("app is quitting");
+            return Err(AppError::AppIsQuitting);
         }
         lock.update_window(window, f)
     }
@@ -115,10 +115,10 @@ impl AppContext for AsyncApp {
     where
         T: 'static,
     {
-        let app = self.app.upgrade().context("app was released")?;
+        let app = self.app.upgrade().ok_or(AppError::WindowNotFound)?;
         let lock = app.borrow();
         if lock.quitting {
-            bail!("app is quitting");
+            return Err(AppError::AppIsQuitting);
         }
         lock.read_window(window, read)
     }
@@ -194,7 +194,7 @@ impl AsyncApp {
         let app = self.app();
         let mut lock = app.borrow_mut();
         if lock.quitting {
-            bail!("app is quitting");
+            return Err(AppError::AppIsQuitting);
         }
         lock.open_window(options, build_root_view)
     }
@@ -509,7 +509,7 @@ impl VisualContext for AsyncWindowContext {
             .with_window(view.entity_id(), |window, app| {
                 view.update(app, |entity, cx| update(entity, window, cx))
             })
-            .context("entity has no current window")
+            .ok_or(AppError::EntityHasNoCurrentWindow)
     }
 
     fn replace_root_view<V>(

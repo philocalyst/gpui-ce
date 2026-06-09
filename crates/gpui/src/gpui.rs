@@ -66,7 +66,6 @@ pub mod _ownership_and_data_flow;
 /// Do not touch, here be dragons for use by gpui_macros and such.
 #[doc(hidden)]
 pub mod private {
-    pub use anyhow;
     pub use inventory;
     pub use schemars;
     pub use serde;
@@ -83,8 +82,7 @@ pub use accesskit;
 pub use accesskit::Action as AccessibleAction;
 pub use accesskit::{Orientation, Role, Toggled};
 pub use action::*;
-pub use anyhow::Result;
-pub use app::*;
+pub use app::{Result, *};
 pub(crate) use arena::*;
 pub use asset_cache::*;
 pub use assets::*;

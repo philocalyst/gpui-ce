@@ -6,7 +6,8 @@ use crate::{
     SourceMetadata, Task, TestDisplay, TestWindow, ThermalState, WindowAppearance, WindowParams,
     size,
 };
-use anyhow::Result;
+use crate::PlatformError;
+type Result<T, E = PlatformError> = std::result::Result<T, E>;
 use collections::VecDeque;
 use futures::channel::oneshot;
 use parking_lot::Mutex;
@@ -354,7 +355,7 @@ impl Platform for TestPlatform {
         &self,
         handle: AnyWindowHandle,
         params: WindowParams,
-    ) -> anyhow::Result<Box<dyn crate::PlatformWindow>> {
+    ) -> Result<Box<dyn crate::PlatformWindow>> {
         let renderer = self.headless_renderer_factory.as_ref().and_then(|f| f());
         let window = TestWindow::new(
             handle,
@@ -487,7 +488,7 @@ impl Platform for TestPlatform {
         Task::ready(Ok(()))
     }
 
-    fn register_url_scheme(&self, _: &str) -> Task<anyhow::Result<()>> {
+    fn register_url_scheme(&self, _: &str) -> Task<Result<()>> {
         unimplemented!()
     }
 

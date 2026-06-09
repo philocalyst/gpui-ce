@@ -138,7 +138,7 @@ impl WaylandSurfaceState {
         params: &WindowParams,
         parent: Option<WaylandWindowStatePtr>,
         target_output: Option<wl_output::WlOutput>,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::error::Result<Self> {
         // For layer_shell windows, create a layer surface instead of an xdg surface
         if let WindowKind::LayerShell(options) = &params.kind {
             let Some(layer_shell) = globals.layer_shell.as_ref() else {
@@ -331,7 +331,7 @@ impl WaylandWindowState {
         gpu_requirements: Option<gpui_wgpu::WgpuDeviceRequirements>,
         options: WindowParams,
         parent: Option<WaylandWindowStatePtr>,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::error::Result<Self> {
         let renderer = {
             let raw_window = RawWindow {
                 window: surface.id().as_ptr().cast::<c_void>(),
@@ -527,7 +527,7 @@ impl WaylandWindow {
         appearance: WindowAppearance,
         parent: Option<WaylandWindowStatePtr>,
         target_output: Option<wl_output::WlOutput>,
-    ) -> anyhow::Result<(Self, ObjectId)> {
+    ) -> crate::error::Result<(Self, ObjectId)> {
         let surface = globals.compositor.create_surface(&globals.qh, ());
         let surface_state =
             WaylandSurfaceState::new(&surface, &globals, &params, parent.clone(), target_output)?;

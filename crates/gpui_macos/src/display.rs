@@ -1,5 +1,5 @@
 use crate::ns_string;
-use anyhow::Result;
+use crate::error::MacError;
 use cocoa::{
     appkit::NSScreen,
     base::{id, nil},
@@ -76,12 +76,11 @@ impl PlatformDisplay for MacDisplay {
         DisplayId::new(self.0 as u64)
     }
 
-    fn uuid(&self) -> Result<Uuid> {
+    fn uuid(&self) -> gpui::Result<Uuid> {
         let cfuuid = unsafe { CGDisplayCreateUUIDFromDisplayID(self.0 as CGDirectDisplayID) };
-        anyhow::ensure!(
-            !cfuuid.is_null(),
-            "AppKit returned a null from CGDisplayCreateUUIDFromDisplayID"
-        );
+        if cfuuid.is_null() {
+            return Err(MacError::NullDisplayUUID.into());
+        }
 
         let bytes = unsafe { CFUUIDGetUUIDBytes(cfuuid) };
         unsafe { CFRelease(cfuuid as _) };

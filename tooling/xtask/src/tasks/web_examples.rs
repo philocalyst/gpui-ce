@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context as _, Result, bail};
+use crate::error::{Result, XtaskError};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -20,7 +20,9 @@ pub struct WebExamplesArgs {
 fn check_program(binary: &str, install_hint: &str) -> Result<()> {
     match Command::new(binary).arg("--version").output() {
         Ok(output) if output.status.success() => Ok(()),
-        _ => bail!("`{binary}` not found. Install with: {install_hint}"),
+        _ => Err(XtaskError::Message { details: format!(
+            "`{binary}` not found. Install with: {install_hint}"
+        ) }),
     }
 }
 
@@ -28,7 +30,7 @@ fn discover_examples() -> Result<Vec<String>> {
     let examples_dir = Path::new("crates/gpui/examples");
     let mut names = Vec::new();
 
-    for entry in std::fs::read_dir(examples_dir).context("failed to read crates/gpui/examples")? {
+    for entry in std::fs::read_dir(examples_dir)? {
         let path = entry?.path();
         if path.extension().and_then(|e| e.to_str()) == Some("rs") {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -38,7 +40,7 @@ fn discover_examples() -> Result<Vec<String>> {
     }
 
     if names.is_empty() {
-        bail!("no examples found in crates/gpui/examples");
+        return Err(XtaskError::Message { details: "no examples found in crates/gpui/examples".into() });
     }
 
     names.sort();
@@ -58,7 +60,7 @@ pub fn run_web_examples(args: WebExamplesArgs) -> Result<()> {
         examples.len()
     );
 
-    std::fs::create_dir_all(out_dir).context("failed to create output directory")?;
+    std::fs::create_dir_all(out_dir)?;
 
     eprintln!("Building all examples...");
 
@@ -80,7 +82,7 @@ pub fn run_web_examples(args: WebExamplesArgs) -> Result<()> {
         cmd.arg("--release");
     }
 
-    let _ = cmd.status().context("failed to run cargo build")?;
+    let _ = cmd.status()?;
 
     // Run wasm-bindgen on each .wasm that was produced.
     let mut succeeded: Vec<String> = Vec::new();
@@ -97,8 +99,7 @@ pub fn run_web_examples(args: WebExamplesArgs) -> Result<()> {
         eprintln!("[{name}] Running wasm-bindgen...");
 
         let example_dir = format!("{out_dir}/{name}");
-        std::fs::create_dir_all(&example_dir)
-            .with_context(|| format!("failed to create {example_dir}"))?;
+        std::fs::create_dir_all(&example_dir)?;
 
         let status = Command::new("wasm-bindgen")
             .args([
@@ -113,8 +114,7 @@ pub fn run_web_examples(args: WebExamplesArgs) -> Result<()> {
             ])
             // 🙈
             .env("RUSTC_BOOTSTRAP", "1")
-            .status()
-            .context("failed to run wasm-bindgen")?;
+            .status()?;
         if !status.success() {
             eprintln!("[{name}] SKIPPED (wasm-bindgen failed)");
             failed.push(name.clone());
@@ -124,22 +124,23 @@ pub fn run_web_examples(args: WebExamplesArgs) -> Result<()> {
         // Write per-example index.html.
         let html_path = format!("{example_dir}/index.html");
         std::fs::File::create(&html_path)
-            .and_then(|mut file| file.write_all(make_example_html(name).as_bytes()))
-            .with_context(|| format!("failed to write {html_path}"))?;
+            .and_then(|mut file| file.write_all(make_example_html(name).as_bytes()))?;
 
         eprintln!("[{name}] OK");
         succeeded.push(name.clone());
     }
 
     if succeeded.is_empty() {
-        bail!("all {} examples failed to build", examples.len());
+        return Err(XtaskError::Message { details: format!(
+            "all {} examples failed to build",
+            examples.len()
+        ) });
     }
 
     let example_names: Vec<&str> = succeeded.iter().map(|s| s.as_str()).collect();
     let index_path = format!("{out_dir}/index.html");
     std::fs::File::create(&index_path)
-        .and_then(|mut file| file.write_all(make_gallery_html(&example_names).as_bytes()))
-        .context("failed to write index.html")?;
+        .and_then(|mut file| file.write_all(make_gallery_html(&example_names).as_bytes()))?;
 
     if args.no_serve {
         return Ok(());
@@ -165,10 +166,11 @@ http.server.HTTPServer(("127.0.0.1", {port}), Handler).serve_forever()
 
     let status = Command::new("python3")
         .args(["-c", &server_script])
-        .status()
-        .context("failed to run python3 http server (is python3 installed?)")?;
+        .status()?;
     if !status.success() {
-        bail!("python3 http server exited with: {status}");
+        return Err(XtaskError::Message { details: format!(
+            "python3 http server exited with: {status}"
+        ) });
     }
 
     Ok(())

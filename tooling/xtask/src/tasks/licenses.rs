@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use crate::error::{Result, XtaskError};
 use clap::Parser;
 
 use crate::workspace::load_workspace;
@@ -17,7 +17,7 @@ pub fn run_licenses(_args: LicensesArgs) -> Result<()> {
         let crate_dir = package
             .manifest_path
             .parent()
-            .with_context(|| format!("no crate directory for {}", package.name))?;
+            .ok_or_else(|| XtaskError::Message { details: format!("no crate directory for {}", package.name) })?;
 
         if let Some(license_file) = first_license_file(crate_dir, LICENSE_FILES) {
             if !license_file.is_symlink() {

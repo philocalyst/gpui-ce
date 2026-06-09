@@ -1,5 +1,5 @@
-use anyhow::{Context as _, Ok, Result};
 use collections::HashMap;
+use crate::error::{Result, WgpuError};
 use cosmic_text::{
     Attrs, AttrsList, Ellipsize, Family, Font as CosmicTextFont,
     FontFeatures as CosmicFontFeatures, FontSystem, ShapeBuffer, ShapeLine,
@@ -283,7 +283,7 @@ impl CosmicTextSystemState {
             let font = self
                 .font_system
                 .get_font(font_id, cosmic_text::Weight::NORMAL)
-                .context("Could not load font")?;
+                .map_err(|e| WgpuError::FontLoading(format!("Could not load font: {e}")))?;
 
             // HACK: To let the storybook run and render Windows caption icons. We should actually do better font fallback.
             let allowed_bad_font_names = [
@@ -343,7 +343,7 @@ impl CosmicTextSystemState {
         glyph_bounds: Bounds<DevicePixels>,
     ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
         if glyph_bounds.size.width.0 == 0 || glyph_bounds.size.height.0 == 0 {
-            anyhow::bail!("glyph bounds are empty");
+            return Err(WgpuError::EmptyGlyphBounds);
         }
 
         let mut image = self.render_glyph_image(params)?;
@@ -411,7 +411,7 @@ impl CosmicTextSystemState {
         let glyph_id: u16 = params.glyph_id.0.try_into()?;
         renderer
             .render(&mut scaler, glyph_id)
-            .with_context(|| format!("unable to render glyph via swash for {params:?}"))
+            .map_err(|e| WgpuError::GlyphRendering(format!("unable to render glyph via swash for {params:?}: {e}")))
     }
 
     /// This is used when cosmic_text has chosen a fallback font instead of using the requested
@@ -433,12 +433,12 @@ impl CosmicTextSystemState {
             let font = self
                 .font_system
                 .get_font(id, cosmic_text::Weight::NORMAL)
-                .context("failed to get fallback font from cosmic-text font system")?;
+                .map_err(|e| WgpuError::FontLoading(format!("failed to get fallback font from cosmic-text font system: {e}")))?;
             let face = self
                 .font_system
                 .db()
                 .face(id)
-                .context("fallback font face not found in cosmic-text database")?;
+                .ok_or_else(|| WgpuError::FontFaceNotFound("fallback font face not found in cosmic-text database".into()))?;
 
             let font_id = FontId(self.loaded_fonts.len());
             self.loaded_fonts.push(LoadedFont {
@@ -633,14 +633,14 @@ fn find_best_match(
                 .font_system
                 .db()
                 .face(database_id)
-                .context("font face not found in database")?;
+                .ok_or_else(|| WgpuError::FontFaceQuery("font face not found in database".into()))?;
             Ok(face_info_into_properties(face_info))
         })
         .collect::<Result<SmallVec<[_; 4]>>>()?;
 
     let ix =
         font_kit::matching::find_best_match(&candidate_properties, &font_into_properties(font))
-            .context("requested font family contains no font matching the other parameters")?;
+            .map_err(|e| WgpuError::FontMatching(format!("requested font family contains no font matching the other parameters: {e}")))?;
 
     Ok(ix)
 }
@@ -652,7 +652,9 @@ fn find_best_match(
     state: &CosmicTextSystemState,
 ) -> Result<usize> {
     if candidates.is_empty() {
-        anyhow::bail!("requested font family contains no font matching the other parameters");
+        return Err(WgpuError::FontMatching(
+            "requested font family contains no font matching the other parameters".into(),
+        ));
     }
     if candidates.len() == 1 {
         return Ok(0);
@@ -673,7 +675,7 @@ fn find_best_match(
             .font_system
             .db()
             .face(database_id)
-            .context("font face not found in database")?;
+            .ok_or_else(|| WgpuError::FontFaceQuery("font face not found in database".into()))?;
 
         let is_italic = matches!(
             face_info.style,
@@ -810,7 +812,7 @@ fn cosmic_font_features(features: &FontFeatures) -> Result<CosmicFontFeatures> {
             .0
             .as_bytes()
             .try_into()
-            .context("Incorrect feature flag format")?;
+            .map_err(|_| WgpuError::FontFeatureFlag)?;
 
         let tag = cosmic_text::FeatureTag::new(&name_bytes);
 

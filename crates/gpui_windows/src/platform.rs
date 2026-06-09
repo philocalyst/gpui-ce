@@ -10,7 +10,7 @@ use std::{
 };
 
 use ::util::{ResultExt, paths::SanitizedPath};
-use anyhow::{Context as _, Result, anyhow};
+use crate::error::Result;
 use futures::channel::oneshot::{self, Receiver};
 use itertools::Itertools;
 use parking_lot::RwLock;
@@ -99,13 +99,13 @@ impl WindowsPlatformState {
 impl WindowsPlatform {
     pub fn new(headless: bool) -> Result<Self> {
         unsafe {
-            OleInitialize(None).context("unable to initialize Windows OLE")?;
+            OleInitialize(None).map_err(|e| WindowsError::Api(e))?;
         }
         let (directx_devices, text_system, direct_write_text_system) = if !headless {
-            let devices = DirectXDevices::new().context("Creating DirectX devices")?;
+            let devices = DirectXDevices::new().map_err(|e| WindowsError::PathTessellation(format!("Creating DirectX devices: {e}")))?;
             let dw_text_system = Arc::new(
                 DirectWriteTextSystem::new(&devices)
-                    .context("Error creating DirectWriteTextSystem")?,
+                    .map_err(|e| WindowsError::PathTessellation(format!("Error creating DirectWriteTextSystem: {e}")))?,
             );
             (
                 Some(devices),
@@ -157,11 +157,12 @@ impl WindowsPlatform {
         let inner = context
             .inner
             .take()
-            .context("CreateWindowExW did not run correctly")??;
+            .ok_or_else(|| WindowsError::PathTessellation("CreateWindowExW did not run correctly".into()))?
+            .map_err(|e| WindowsError::PathTessellation(format!("CreateWindowExW did not run correctly: {e}")))?;
         let dispatcher = context
             .dispatcher
             .take()
-            .context("CreateWindowExW did not run correctly")?;
+            .ok_or_else(|| WindowsError::PathTessellation("CreateWindowExW did not run correctly".into()))?;
         let handle = result?;
 
         let disable_direct_composition = std::env::var(DISABLE_DIRECT_COMPOSITION)
@@ -172,7 +173,7 @@ impl WindowsPlatform {
         let drop_target_helper: Option<IDropTargetHelper> = if !headless {
             Some(unsafe {
                 CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER)
-                    .context("Error creating drop target helper.")?
+                    .map_err(|e| WindowsError::Api(e))?
             })
         } else {
             None
@@ -545,7 +546,7 @@ impl Platform for WindowsPlatform {
         self.background_executor()
             .spawn(async move {
                 open_target(&url_string)
-                    .with_context(|| format!("Opening url: {}", url_string))
+                    .map_err(|e| WindowsError::PathTessellation(format!("Opening url: {}: {e}", url_string)))
                     .log_err();
             })
             .detach();
@@ -601,7 +602,7 @@ impl Platform for WindowsPlatform {
         self.background_executor()
             .spawn(async move {
                 open_target_in_explorer(&path)
-                    .with_context(|| format!("Revealing path {} in explorer", path.display()))
+                    .map_err(|e| WindowsError::PathTessellation(format!("Revealing path {} in explorer: {e}", path.display())))
                     .log_err();
             })
             .detach();
@@ -615,7 +616,7 @@ impl Platform for WindowsPlatform {
         self.background_executor()
             .spawn(async move {
                 open_target(&path)
-                    .with_context(|| format!("Opening {} with system", path.display()))
+                    .map_err(|e| WindowsError::PathTessellation(format!("Opening {} with system: {e}", path.display())))
                     .log_err();
             })
             .detach();
@@ -671,7 +672,7 @@ impl Platform for WindowsPlatform {
 
     // todo(windows)
     fn path_for_auxiliary_executable(&self, _name: &str) -> Result<PathBuf> {
-        anyhow::bail!("not yet implemented");
+        Err(WindowsError::PathTessellation("not yet implemented".into()).into())
     }
 
     fn set_cursor_style(&self, style: CursorStyle) {
@@ -743,12 +744,7 @@ impl Platform for WindowsPlatform {
                 ..CREDENTIALW::default()
             };
             unsafe {
-                CredWriteW(&credentials, 0).map_err(|err| {
-                    anyhow!(
-                        "Failed to write credentials to Windows Credential Manager: {}",
-                        err,
-                    )
-                })?;
+                CredWriteW(&credentials, 0).map_err(WindowsError::Credential)?;
             }
             Ok(())
         })
@@ -813,8 +809,8 @@ impl Platform for WindowsPlatform {
         })
     }
 
-    fn register_url_scheme(&self, _: &str) -> Task<anyhow::Result<()>> {
-        Task::ready(Err(anyhow!("register_url_scheme unimplemented")))
+    fn register_url_scheme(&self, _: &str) -> Task<Result<()>> {
+        Task::ready(Err(WindowsError::UrlSchemeRegistration))
     }
 
     fn perform_dock_menu_action(&self, action: usize) {
@@ -844,16 +840,16 @@ impl WindowsPlatformInner {
         Ok(Rc::new(Self {
             state,
             raw_window_handles: context.raw_window_handles.clone(),
-            dispatcher: context
-                .dispatcher
-                .as_ref()
-                .context("missing dispatcher")?
+        dispatcher: context
+            .dispatcher
+            .as_ref()
+            .ok_or_else(|| WindowsError::PathTessellation("missing dispatcher".into()))?
                 .clone(),
             validation_number: context.validation_number,
             main_receiver: context
                 .main_receiver
                 .take()
-                .context("missing main receiver")?,
+                .ok_or_else(|| WindowsError::PlatformInit("missing main receiver".into()))?,
         }))
     }
 
@@ -1033,7 +1029,7 @@ impl Drop for WindowsPlatform {
     fn drop(&mut self) {
         unsafe {
             DestroyWindow(self.handle)
-                .context("Destroying platform window")
+                .map_err(|e| WindowsError::Api(e))
                 .log_err();
             OleUninitialize();
         }
@@ -1079,17 +1075,14 @@ fn open_target(target: impl AsRef<OsStr>) -> Result<()> {
         )
     };
     if ret.0 as isize <= 32 {
-        Err(anyhow::anyhow!(
-            "Unable to open target: {}",
-            std::io::Error::last_os_error()
-        ))
+        Err(WindowsError::PathTessellation(format!("Unable to open target: {}", std::io::Error::last_os_error())).into())
     } else {
         Ok(())
     }
 }
 
 fn open_target_in_explorer(target: &Path) -> Result<()> {
-    let dir = target.parent().context("No parent folder found")?;
+    let dir = target.parent().ok_or_else(|| WindowsError::PathTessellation("No parent folder found".into()))?;
     let desktop = unsafe { SHGetDesktopFolder()? };
 
     let mut dir_item = std::ptr::null_mut();
@@ -1122,9 +1115,9 @@ fn open_target_in_explorer(target: &Path) -> Result<()> {
             // On some systems, the above call mysteriously fails with "file not
             // found" even though the file is there.  In these cases, ShellExecute()
             // seems to work as a fallback (although it won't select the file).
-            open_target(dir).context("Opening target parent folder")
+            open_target(dir).map_err(|e| WindowsError::PathTessellation(format!("Opening target parent folder: {e}")))
         } else {
-            Err(anyhow::anyhow!("Can not open target path: {}", err))
+            Err(WindowsError::PathTessellation(format!("Can not open target path: {err}")).into())
         }
     })
 }
@@ -1183,7 +1176,7 @@ fn file_save_dialog(
     if !directory.to_string_lossy().is_empty()
         && let Some(full_path) = directory
             .canonicalize()
-            .context("failed to canonicalize directory")
+            .map_err(|e| WindowsError::Io(e))
             .log_err()
     {
         let full_path = SanitizedPath::new(&full_path);
@@ -1193,7 +1186,7 @@ fn file_save_dialog(
         unsafe {
             dialog
                 .SetFolder(&path_item)
-                .context("failed to set dialog folder")
+                .map_err(WindowsError::Api)
                 .log_err()
         };
     }
@@ -1202,7 +1195,7 @@ fn file_save_dialog(
         unsafe {
             dialog
                 .SetFileName(&HSTRING::from(suggested_name))
-                .context("failed to set file name")
+                .map_err(|e| WindowsError::PathTessellation(format!("failed to set file name: {e}")))
                 .log_err()
         };
     }
@@ -1228,7 +1221,7 @@ fn file_save_dialog(
 }
 
 fn load_icon() -> Result<HICON> {
-    let module = unsafe { GetModuleHandleW(None).context("unable to get module handle")? };
+    let module = unsafe { GetModuleHandleW(None).map_err(|e| WindowsError::Api(e))? };
     let handle = unsafe {
         LoadImageW(
             Some(module.into()),
@@ -1238,7 +1231,7 @@ fn load_icon() -> Result<HICON> {
             0,
             LR_DEFAULTSIZE | LR_SHARED,
         )
-        .context("unable to load icon file")?
+        .map_err(|e| WindowsError::Api(e))?
     };
     Ok(HICON(handle.0))
 }
@@ -1272,7 +1265,7 @@ fn handle_gpu_device_lost(
     std::thread::sleep(std::time::Duration::from_millis(350));
 
     *directx_devices = try_to_recover_from_device_lost(|| {
-        DirectXDevices::new().context("Failed to recreate new DirectX devices after device lost")
+        DirectXDevices::new().map_err(|e| WindowsError::DirectXDevice { details: format!("Failed to recreate new DirectX devices after device lost: {e}") })
     })?;
     log::info!("DirectX devices successfully recreated.");
 
@@ -1338,7 +1331,7 @@ unsafe extern "system" fn window_procedure(
         let creation_context = unsafe { &mut *creation_context };
 
         let Some(main_sender) = creation_context.main_sender.take() else {
-            creation_context.inner = Some(Err(anyhow!("missing main sender")));
+            creation_context.inner = Some(Err(WindowsError::PlatformInit { details: "missing main sender".into() }.into()));
             return LRESULT(0);
         };
         creation_context.dispatcher = Some(Arc::new(WindowsDispatcher::new(

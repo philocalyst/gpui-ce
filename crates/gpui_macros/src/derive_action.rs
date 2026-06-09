@@ -120,11 +120,11 @@ pub(crate) fn derive_action(input: TokenStream) -> TokenStream {
 
     let build_fn_body = if no_json {
         let error_msg = format!("{} cannot be built from JSON", full_name);
-        quote! { Err(gpui::private::anyhow::anyhow!(#error_msg)) }
+        quote! { Err(gpui::ActionBuildError::BuildError { name: #full_name.to_string(), error: Box::new(std::fmt::Error) }) }
     } else if is_unit_struct {
         quote! { Ok(Box::new(Self)) }
     } else {
-        quote! { Ok(Box::new(gpui::private::serde_json::from_value::<Self>(_value)?)) }
+        quote! { Ok(Box::new(gpui::private::serde_json::from_value::<Self>(_value).map_err(|e| gpui::ActionBuildError::BuildError { name: Self::name_for_type().to_string(), error: Box::new(e) })?)) }
     };
 
     let json_schema_fn_body = if no_json || is_unit_struct {
@@ -185,7 +185,7 @@ pub(crate) fn derive_action(input: TokenStream) -> TokenStream {
                 Box::new(self.clone())
             }
 
-            fn build(_value: gpui::private::serde_json::Value) -> gpui::Result<Box<dyn gpui::Action>> {
+            fn build(_value: gpui::private::serde_json::Value) -> std::result::Result<Box<dyn gpui::Action>, gpui::ActionBuildError> {
                 #build_fn_body
             }
 

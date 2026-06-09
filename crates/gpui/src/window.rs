@@ -1,7 +1,7 @@
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::Inspector;
 use crate::{
-    Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
+    Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, AppError, Arena, Asset,
     AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
     Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
@@ -11,7 +11,7 @@ use crate::{
     MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
     PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
     PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, Result, SMOOTH_SVG_SCALE_FACTOR,
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
@@ -20,7 +20,6 @@ use crate::{
     WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem, point,
     prelude::*, px, rems, size, transparent_black,
 };
-use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
 #[cfg(target_os = "macos")]
 use core_video::pixel_buffer::CVPixelBuffer;
@@ -1117,10 +1116,8 @@ impl InputLatencyTracker {
         Ok(Self {
             first_input_at: None,
             pending_input_count: 0,
-            latency_histogram: Histogram::new(3)
-                .map_err(|e| anyhow!("Failed to create input latency histogram: {e}"))?,
-            events_per_frame_histogram: Histogram::new(3)
-                .map_err(|e| anyhow!("Failed to create events per frame histogram: {e}"))?,
+            latency_histogram: Histogram::new(3)?,
+            events_per_frame_histogram: Histogram::new(3)?,
             mid_draw_events_dropped: 0,
         })
     }
@@ -2208,9 +2205,10 @@ impl Window {
     /// This does not present the frame to screen - useful for visual testing where we want
     /// to capture what would be rendered without displaying it or requiring the window to be visible.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn render_to_image(&self) -> anyhow::Result<image::RgbaImage> {
+    pub fn render_to_image(&self) -> Result<image::RgbaImage> {
         self.platform_window
             .render_to_image(&self.rendered_frame.scene)
+            .map_err(AppError::PlatformError)
     }
 
     /// Set the content size of the window.
@@ -3410,21 +3408,12 @@ impl Window {
             let mut state_box = inner
                 .downcast::<Option<S>>()
                 .map_err(|_| {
-                    #[cfg(debug_assertions)]
-                    {
-                        anyhow::anyhow!(
-                            "invalid element state type for id, requested {:?}, actual: {:?}",
-                            std::any::type_name::<S>(),
-                            type_name
-                        )
-                    }
-
-                    #[cfg(not(debug_assertions))]
-                    {
-                        anyhow::anyhow!(
-                            "invalid element state type for id, requested {:?}",
-                            std::any::type_name::<S>(),
-                        )
+                    AppError::InvalidElementState {
+                        requested: std::any::type_name::<S>(),
+                        #[cfg(debug_assertions)]
+                        actual: Some(type_name),
+                        #[cfg(not(debug_assertions))]
+                        actual: None,
                     }
                 })
                 .unwrap();
@@ -3837,7 +3826,10 @@ impl Window {
             let tile = self
                 .sprite_atlas
                 .get_or_insert_with(&params.clone().into(), &mut || {
-                    let (size, bytes) = self.text_system().rasterize_glyph(&params)?;
+                    let (size, bytes) = self
+                        .text_system()
+                        .rasterize_glyph(&params)
+                        .map_err(|e| PlatformError::Other(Arc::new(Box::new(e))))?;
                     Ok(Some((size, Cow::Owned(bytes))))
                 })?
                 .expect("Callback above only errors or returns Some");
@@ -3927,7 +3919,10 @@ impl Window {
             let tile = self
                 .sprite_atlas
                 .get_or_insert_with(&params.clone().into(), &mut || {
-                    let (size, bytes) = self.text_system().rasterize_glyph(&params)?;
+                    let (size, bytes) = self
+                        .text_system()
+                        .rasterize_glyph(&params)
+                        .map_err(|e| PlatformError::Other(Arc::new(Box::new(e))))?;
                     Ok(Some((size, Cow::Owned(bytes))))
                 })?
                 .expect("Callback above only errors or returns Some");
@@ -3980,7 +3975,10 @@ impl Window {
         let Some(tile) =
             self.sprite_atlas
                 .get_or_insert_with(&params.clone().into(), &mut || {
-                    let Some((size, bytes)) = cx.svg_renderer.render_alpha_mask(&params, data)?
+                    let Some((size, bytes)) = cx
+                        .svg_renderer
+                        .render_alpha_mask(&params, data)
+                        .map_err(|e| PlatformError::Other(Arc::new(Box::new(e))))?
                     else {
                         return Ok(None);
                     };
@@ -5826,7 +5824,7 @@ impl<V: 'static + Render> WindowHandle<V> {
         cx.update_window(self.any_handle, |root_view, _, _| {
             root_view
                 .downcast::<V>()
-                .map_err(|_| anyhow!("the type of the window's root view has changed"))
+                .map_err(|_| AppError::RootViewTypeChanged)
         })?
     }
 
@@ -5844,7 +5842,7 @@ impl<V: 'static + Render> WindowHandle<V> {
         cx.update_window(self.any_handle, |root_view, window, cx| {
             let view = root_view
                 .downcast::<V>()
-                .map_err(|_| anyhow!("the type of the window's root view has changed"))?;
+                .map_err(|_| AppError::RootViewTypeChanged)?;
 
             Ok(view.update(cx, |view, cx| update(view, window, cx)))
         })?
@@ -5861,10 +5859,10 @@ impl<V: 'static + Render> WindowHandle<V> {
                 window
                     .as_deref()
                     .and_then(|window| window.root.clone())
-                    .map(|root_view| root_view.downcast::<V>())
             })
-            .context("window not found")?
-            .map_err(|_| anyhow!("the type of the window's root view has changed"))?;
+            .ok_or(AppError::WindowNotFound)?
+            .downcast::<V>()
+            .map_err(|_| AppError::RootViewTypeChanged)?;
 
         Ok(x.read(cx))
     }
@@ -5977,7 +5975,7 @@ impl AnyWindowHandle {
     {
         let view = self
             .downcast::<T>()
-            .context("the type of the window's root view has changed")?;
+            .ok_or(AppError::RootViewTypeChanged)?;
 
         cx.read_window(&view, read)
     }
@@ -6052,13 +6050,13 @@ impl Display for ElementId {
 }
 
 impl TryInto<SharedString> for ElementId {
-    type Error = anyhow::Error;
+    type Error = AppError;
 
-    fn try_into(self) -> anyhow::Result<SharedString> {
+    fn try_into(self) -> Result<SharedString> {
         if let ElementId::Name(name) = self {
             Ok(name)
         } else {
-            anyhow::bail!("element id is not string")
+            Err(AppError::InvalidElementId)
         }
     }
 }

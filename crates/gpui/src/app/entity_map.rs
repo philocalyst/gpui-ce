@@ -1,5 +1,5 @@
-use crate::{App, AppContext, GpuiBorrow, VisualContext, Window, seal::Sealed};
-use anyhow::{Context as _, Result};
+use crate::{App, AppContext, AppError, GpuiBorrow, VisualContext, Window, seal::Sealed};
+use crate::Result;
 use collections::FxHashSet;
 use derive_more::{Deref, DerefMut};
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
@@ -782,7 +782,7 @@ impl<T: 'static> WeakEntity<T> {
     where
         C: AppContext,
     {
-        let entity = self.upgrade().context("entity released")?;
+        let entity = self.upgrade().ok_or(AppError::EntityReleased)?;
         Ok(cx.update_entity(&entity, update))
     }
 
@@ -797,7 +797,7 @@ impl<T: 'static> WeakEntity<T> {
     where
         C: AppContext,
     {
-        let entity = self.upgrade().context("entity released")?;
+        let entity = self.upgrade().ok_or(AppError::EntityReleased)?;
         cx.with_window(entity.entity_id(), |window, app| {
             entity.update(app, |entity, cx| update(entity, window, cx))
         })
@@ -811,7 +811,7 @@ impl<T: 'static> WeakEntity<T> {
     where
         C: AppContext,
     {
-        let entity = self.upgrade().context("entity released")?;
+        let entity = self.upgrade().ok_or(AppError::EntityReleased)?;
         Ok(cx.read_entity(&entity, read))
     }
 

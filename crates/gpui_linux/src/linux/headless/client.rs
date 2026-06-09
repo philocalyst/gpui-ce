@@ -67,11 +67,11 @@ impl LinuxClient for HeadlessClient {
     #[cfg(feature = "screen-capture")]
     fn screen_capture_sources(
         &self,
-    ) -> futures::channel::oneshot::Receiver<anyhow::Result<Vec<Rc<dyn gpui::ScreenCaptureSource>>>>
+    ) -> futures::channel::oneshot::Receiver<crate::error::Result<Vec<Rc<dyn gpui::ScreenCaptureSource>>>>
     {
         let (tx, rx) = futures::channel::oneshot::channel();
-        tx.send(Err(anyhow::anyhow!(
-            "Headless mode does not support screen capture."
+        tx.send(Err(LinuxError::HeadlessIncompatible(
+            HeadlessError::HeadlessModeDoesNotSupportScreenCapture,
         )))
         .ok();
         rx
@@ -89,8 +89,10 @@ impl LinuxClient for HeadlessClient {
         &self,
         _handle: AnyWindowHandle,
         _params: WindowParams,
-    ) -> anyhow::Result<Box<dyn PlatformWindow>> {
-        anyhow::bail!("neither DISPLAY nor WAYLAND_DISPLAY is set. You can run in headless mode");
+    ) -> crate::error::Result<Box<dyn PlatformWindow>> {
+        Err(LinuxError::HeadlessIncompatible(
+            HeadlessError::NeitherDisplayNorWaylandDisplaySet,
+        ))
     }
 
     fn compositor_name(&self) -> &'static str {

@@ -1,4 +1,5 @@
 use crate::display::WebDisplay;
+use crate::error::{Result, WebError};
 use crate::events::{ClickState, WebEventListeners, is_mac_platform};
 use std::sync::Arc;
 use std::{cell::Cell, cell::RefCell, rc::Rc};
@@ -76,16 +77,26 @@ impl WebWindow {
         _params: WindowParams,
         context: &WgpuContext,
         browser_window: web_sys::Window,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self> {
         let document = browser_window
             .document()
-            .ok_or_else(|| anyhow::anyhow!("No `document` found on window"))?;
+            .ok_or_else(|| WebError::MissingDomElement { element: "document" })?;
 
         let canvas: web_sys::HtmlCanvasElement = document
             .create_element("canvas")
-            .map_err(|e| anyhow::anyhow!("Failed to create canvas element: {e:?}"))?
+            .map_err(|e| {
+                WebError::Js {
+                    description: "create canvas element".into(),
+                    js_error: Some(format!("{e:?}")),
+                }
+            })?
             .dyn_into()
-            .map_err(|e| anyhow::anyhow!("Created element is not a canvas: {e:?}"))?;
+            .map_err(|e| {
+                WebError::Js {
+                    description: "dyn_into canvas".into(),
+                    js_error: Some(format!("{e:?}")),
+                }
+            })?;
 
         let dpr = browser_window.device_pixel_ratio() as f32;
         let max_texture_dimension = context.device.limits().max_texture_dimension_2d;
@@ -96,31 +107,71 @@ impl WebWindow {
         let style = canvas.style();
         style
             .set_property("width", "100%")
-            .map_err(|e| anyhow::anyhow!("Failed to set canvas width style: {e:?}"))?;
+            .map_err(|e| {
+                WebError::Js {
+                    description: "set canvas width style".into(),
+                    js_error: Some(format!("{e:?}")),
+                }
+            })?;
         style
             .set_property("height", "100%")
-            .map_err(|e| anyhow::anyhow!("Failed to set canvas height style: {e:?}"))?;
+            .map_err(|e| {
+                WebError::Js {
+                    description: "set canvas height style".into(),
+                    js_error: Some(format!("{e:?}")),
+                }
+            })?;
         style
             .set_property("display", "block")
-            .map_err(|e| anyhow::anyhow!("Failed to set canvas display style: {e:?}"))?;
+            .map_err(|e| {
+                WebError::Js {
+                    description: "set canvas display style".into(),
+                    js_error: Some(format!("{e:?}")),
+                }
+            })?;
         style
             .set_property("outline", "none")
-            .map_err(|e| anyhow::anyhow!("Failed to set canvas outline style: {e:?}"))?;
+            .map_err(|e| {
+                WebError::Js {
+                    description: "set canvas outline style".into(),
+                    js_error: Some(format!("{e:?}")),
+                }
+            })?;
         style
             .set_property("touch-action", "none")
-            .map_err(|e| anyhow::anyhow!("Failed to set touch-action style: {e:?}"))?;
+            .map_err(|e| {
+                WebError::Js {
+                    description: "set touch-action style".into(),
+                    js_error: Some(format!("{e:?}")),
+                }
+            })?;
 
         let body = document
             .body()
-            .ok_or_else(|| anyhow::anyhow!("No `body` found on document"))?;
+            .ok_or_else(|| WebError::MissingDomElement { element: "body" })?;
         body.append_child(&canvas)
-            .map_err(|e| anyhow::anyhow!("Failed to append canvas to body: {e:?}"))?;
+            .map_err(|e| {
+                WebError::Js {
+                    description: "append canvas to body".into(),
+                    js_error: Some(format!("{e:?}")),
+                }
+            })?;
 
         let input_element: web_sys::HtmlInputElement = document
             .create_element("input")
-            .map_err(|e| anyhow::anyhow!("Failed to create input element: {e:?}"))?
+            .map_err(|e| {
+                WebError::Js {
+                    description: "create input element".into(),
+                    js_error: Some(format!("{e:?}")),
+                }
+            })?
             .dyn_into()
-            .map_err(|e| anyhow::anyhow!("Created element is not an input: {e:?}"))?;
+            .map_err(|e| {
+                WebError::Js {
+                    description: "dyn_into input".into(),
+                    js_error: Some(format!("{e:?}")),
+                }
+            })?;
         let input_style = input_element.style();
         input_style.set_property("position", "fixed").ok();
         input_style.set_property("top", "0").ok();
@@ -129,7 +180,12 @@ impl WebWindow {
         input_style.set_property("height", "1px").ok();
         input_style.set_property("opacity", "0").ok();
         body.append_child(&input_element)
-            .map_err(|e| anyhow::anyhow!("Failed to append input to body: {e:?}"))?;
+            .map_err(|e| {
+                WebError::Js {
+                    description: "append input to body".into(),
+                    js_error: Some(format!("{e:?}")),
+                }
+            })?;
         input_element.focus().ok();
 
         let device_size = Size {
@@ -143,7 +199,8 @@ impl WebWindow {
             preferred_present_mode: None,
         };
 
-        let renderer = WgpuRenderer::new_from_canvas(context, &canvas, renderer_config)?;
+        let renderer = WgpuRenderer::new_from_canvas(context, &canvas, renderer_config)
+            .map_err(|e| WebError::Wgpu(format!("{e}")))?;
 
         let display: Rc<dyn PlatformDisplay> = Rc::new(WebDisplay::new(browser_window.clone()));
 

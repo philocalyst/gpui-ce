@@ -1,11 +1,10 @@
-use anyhow::{Context as _, Result};
+use serde_json::json;
 use collections::HashMap;
 pub use gpui_macros::Action;
 pub use no_action::{NoAction, Unbind, is_no_action, is_unbind};
-use serde_json::json;
 use std::{
     any::{Any, TypeId},
-    fmt::Display,
+    fmt::{self, Display},
 };
 
 /// Defines and registers unit structs that can be used as actions. For more complex data types, derive `Action`.
@@ -107,7 +106,7 @@ macro_rules! actions {
 ///     # fn partial_eq(&self, other: &dyn gpui::Action) -> bool { unimplemented!() }
 ///     # fn name(&self) -> &'static str { "Paste" }
 ///     # fn name_for_type() -> &'static str { "Paste" }
-///     # fn build(value: serde_json::Value) -> anyhow::Result<Box<dyn gpui::Action>> {
+///     # fn build(value: serde_json::Value) -> std::result::Result<Box<dyn gpui::Action>, gpui::ActionBuildError> {
 ///     #     unimplemented!()
 ///     # }
 /// }
@@ -131,7 +130,7 @@ pub trait Action: Any + Send {
 
     /// Build this action from a JSON value. This is used to construct actions from the keymap.
     /// A value of `{}` will be passed for actions that don't have any parameters.
-    fn build(value: serde_json::Value) -> Result<Box<dyn Action>>
+    fn build(value: serde_json::Value) -> std::result::Result<Box<dyn Action>, ActionBuildError>
     where
         Self: Sized;
 
@@ -187,7 +186,7 @@ impl dyn Action {
     }
 }
 
-/// Error type for `Keystroke::parse`. This is used instead of `anyhow::Error` so that Zed can use
+/// Error type for `Keystroke::parse` and `ActionBuild`. This is used instead of a generic error so that Zed can use
 /// markdown to display it.
 #[derive(Debug)]
 pub enum ActionBuildError {
@@ -202,7 +201,7 @@ pub enum ActionBuildError {
         /// Name of the action that was attempting to be built.
         name: String,
         /// Error that occurred while building the action.
-        error: anyhow::Error,
+        error: Box<dyn std::error::Error + Send + Sync>,
     },
 }
 
@@ -210,7 +209,7 @@ impl std::error::Error for ActionBuildError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ActionBuildError::NotFound { .. } => None,
-            ActionBuildError::BuildError { error, .. } => error.source(),
+            ActionBuildError::BuildError { error, .. } => Some(error.as_ref()),
         }
     }
 }
@@ -228,7 +227,7 @@ impl Display for ActionBuildError {
     }
 }
 
-type ActionBuilder = fn(json: serde_json::Value) -> anyhow::Result<Box<dyn Action>>;
+type ActionBuilder = fn(json: serde_json::Value) -> std::result::Result<Box<dyn Action>, ActionBuildError>;
 
 pub(crate) struct ActionRegistry {
     by_name: HashMap<&'static str, ActionData>,
@@ -333,11 +332,13 @@ impl ActionRegistry {
     }
 
     /// Construct an action based on its name and optional JSON parameters sourced from the keymap.
-    pub fn build_action_type(&self, type_id: &TypeId) -> Result<Box<dyn Action>> {
+    pub fn build_action_type(&self, type_id: &TypeId) -> std::result::Result<Box<dyn Action>, ActionBuildError> {
         let name = self
             .names_by_type_id
             .get(type_id)
-            .with_context(|| format!("no action type registered for {type_id:?}"))?;
+            .ok_or_else(|| ActionBuildError::NotFound {
+                name: format!("no action type registered for {type_id:?}"),
+            })?;
 
         Ok(self.build_action(name, None)?)
     }
@@ -355,12 +356,7 @@ impl ActionRegistry {
                 name: name.to_owned(),
             })?
             .build;
-        (build_action)(params.unwrap_or_else(|| json!({}))).map_err(|e| {
-            ActionBuildError::BuildError {
-                name: name.to_owned(),
-                error: e,
-            }
-        })
+        (build_action)(params.unwrap_or_else(|| json!({})))
     }
 
     pub fn all_action_names(&self) -> &[&'static str] {

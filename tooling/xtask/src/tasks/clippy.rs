@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods, reason = "tooling is exempt")]
 use std::process::Command;
 
-use anyhow::{Context as _, Result, bail};
+use crate::error::{Result, XtaskError};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -50,14 +50,21 @@ pub fn run_clippy(args: ClippyArgs) -> Result<()> {
             .join(" ")
     );
 
-    let exit_status = clippy_command
-        .spawn()
-        .context("failed to spawn child process")?
-        .wait()
-        .context("failed to wait for child process")?;
+    let exit_status = clippy_command.spawn()?.wait()?;
 
     if !exit_status.success() {
-        bail!("clippy failed: {}", exit_status);
+        return Err(XtaskError::CommandFailed {
+            command: format!(
+                "{} {}",
+                cargo,
+                clippy_command
+                    .get_args()
+                    .map(|arg| arg.to_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            exit_code: exit_status.code(),
+        });
     }
 
     Ok(())

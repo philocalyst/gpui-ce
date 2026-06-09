@@ -16,7 +16,7 @@ use crate::{
     Bounds, DevicePixels, Hsla, Pixels, PlatformTextSystem, Point, Result, SharedString, Size,
     StrikethroughStyle, TextRenderingMode, UnderlineStyle, px,
 };
-use anyhow::{Context as _, anyhow};
+
 use collections::FxHashMap;
 use core::fmt;
 use derive_more::{Add, Deref, FromStr, Sub};
@@ -100,15 +100,16 @@ impl TextSystem {
 
     /// Add a font's data to the text system.
     pub fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
-        self.platform_text_system.add_fonts(fonts)
+        self.platform_text_system.add_fonts(fonts)?;
+        Ok(())
     }
 
     /// Get the FontId for the configure font family and style.
     fn font_id(&self, font: &Font) -> Result<FontId> {
-        fn clone_font_id_result(font_id: &Result<FontId>) -> Result<FontId> {
-            match font_id {
+        fn clone_font_id_result(result: &Result<FontId>) -> Result<FontId> {
+            match result {
                 Ok(font_id) => Ok(*font_id),
-                Err(err) => Err(anyhow!("{err}")),
+                Err(err) => Err(AppError::Custom(err.to_string().into())),
             }
         }
 
@@ -121,10 +122,14 @@ impl TextSystem {
             font_id
         } else {
             let font_id = self.platform_text_system.font_id(font);
+            let result = match &font_id {
+                Ok(font_id) => Ok(*font_id),
+                Err(err) => Err(AppError::from(err.clone())),
+            };
             self.font_ids_by_font
                 .write()
-                .insert(font.clone(), clone_font_id_result(&font_id));
-            font_id
+                .insert(font.clone(), result.clone());
+            result
         }
     }
 
@@ -182,7 +187,7 @@ impl TextSystem {
         let glyph_id = self
             .platform_text_system
             .glyph_for_char(font_id, character)
-            .with_context(|| format!("glyph not found for character '{character}'"))?;
+            .ok_or(AppError::MissingGlyph(character))?;
         let bounds = self
             .platform_text_system
             .typographic_bounds(font_id, glyph_id)?;
@@ -196,7 +201,7 @@ impl TextSystem {
         let glyph_id = self
             .platform_text_system
             .glyph_for_char(font_id, ch)
-            .with_context(|| format!("glyph not found for character '{ch}'"))?;
+            .ok_or(AppError::MissingGlyph(ch))?;
         let result = self.platform_text_system.advance(font_id, glyph_id)?
             / self.units_per_em(font_id) as f32;
 
@@ -338,8 +343,8 @@ impl TextSystem {
         params: &RenderGlyphParams,
     ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
         let raster_bounds = self.raster_bounds(params)?;
-        self.platform_text_system
-            .rasterize_glyph(params, raster_bounds)
+        Ok(self.platform_text_system
+            .rasterize_glyph(params, raster_bounds)?)
     }
 
     /// Returns the dilation level to use for a glyph painted in the given color.

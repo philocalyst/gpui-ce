@@ -2,7 +2,7 @@
 use std::io::{self, Write};
 use std::process::{Command, Output, Stdio};
 
-use anyhow::{Context as _, Result, bail};
+use crate::error::{Result, XtaskError};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -42,16 +42,16 @@ pub fn run_publish_gpui(args: PublishGpuiArgs) -> Result<()> {
 fn read_gpui_version() -> Result<String> {
     let gpui_cargo_toml_path = "crates/gpui/Cargo.toml";
     let contents = std::fs::read_to_string(gpui_cargo_toml_path)
-        .context("Failed to read crates/gpui/Cargo.toml")?;
+        .map_err(|e| XtaskError::Message { details: format!("Failed to read crates/gpui/Cargo.toml: {e}") })?;
 
     let cargo_toml: toml::Value =
-        toml::from_str(&contents).context("Failed to parse crates/gpui/Cargo.toml")?;
+        toml::from_str(&contents).map_err(|e| XtaskError::Message { details: format!("Failed to parse crates/gpui/Cargo.toml: {e}") })?;
 
     let version = cargo_toml
         .get("package")
         .and_then(|p| p.get("version"))
         .and_then(|v| v.as_str())
-        .context("Failed to find version in crates/gpui/Cargo.toml")?;
+        .ok_or_else(|| XtaskError::Message { details: "Failed to find version in crates/gpui/Cargo.toml".into() })?;
 
     Ok(version.to_string())
 }
@@ -100,10 +100,10 @@ fn publish_dependencies(new_version: &str, dry_run: bool, skip_to: Option<&str>)
     }
 
     if should_skip {
-        bail!(
+        return Err(XtaskError::Message { details: format!(
             "Could not find package or crate named '{}' to skip to",
             skip_target
-        );
+        ) });
     }
 
     Ok(())
@@ -125,12 +125,12 @@ fn update_crate_cargo_toml(
 ) -> Result<()> {
     let cargo_toml_path = format!("{}/{}/Cargo.toml", package_dir, package_name);
     let contents = std::fs::read_to_string(&cargo_toml_path)
-        .context(format!("Failed to read {}", cargo_toml_path))?;
+        .map_err(|e| XtaskError::Message { details: format!("Failed to read {}: {e}", cargo_toml_path) })?;
 
     let updated = update_crate_package_fields(&contents, crate_name, new_version)?;
 
     std::fs::write(&cargo_toml_path, updated)
-        .context(format!("Failed to write {}", cargo_toml_path))?;
+        .map_err(|e| XtaskError::Message { details: format!("Failed to write {}: {e}", cargo_toml_path) })?;
 
     Ok(())
 }
@@ -142,12 +142,12 @@ fn update_crate_package_fields(
 ) -> Result<String> {
     let mut doc = toml_contents
         .parse::<toml_edit::DocumentMut>()
-        .context("Failed to parse TOML")?;
+        .map_err(|e| XtaskError::Message { details: format!("Failed to parse TOML: {e}") })?;
 
     let package = doc
         .get_mut("package")
         .and_then(|p| p.as_table_like_mut())
-        .context("Failed to find [package] section")?;
+        .ok_or_else(|| XtaskError::Message { details: "Failed to find [package] section".into() })?;
 
     package.insert("name", toml_edit::value(crate_name));
     package.insert("version", toml_edit::value(new_version));
@@ -172,7 +172,7 @@ fn publish_crate(crate_name: &str, dry_run: bool) -> Result<()> {
 
         run_command(&mut command)?;
 
-        anyhow::Ok(())
+        Ok(())
     };
 
     if dry_run {
@@ -197,17 +197,17 @@ fn update_workspace_dependency_version(
 ) -> Result<()> {
     let workspace_cargo_toml_path = "Cargo.toml";
     let contents = std::fs::read_to_string(workspace_cargo_toml_path)
-        .context("Failed to read workspace Cargo.toml")?;
+        .map_err(|e| XtaskError::Message { details: format!("Failed to read workspace Cargo.toml: {e}") })?;
 
     let mut doc = contents
         .parse::<toml_edit::DocumentMut>()
-        .context("Failed to parse TOML")?;
+        .map_err(|e| XtaskError::Message { details: format!("Failed to parse TOML: {e}") })?;
 
     update_dependency_version_in_doc(&mut doc, package_name, crate_name, new_version)?;
     update_profile_override_in_doc(&mut doc, package_name, crate_name)?;
 
     std::fs::write(workspace_cargo_toml_path, doc.to_string())
-        .context("Failed to write workspace Cargo.toml")?;
+        .map_err(|e| XtaskError::Message { details: format!("Failed to write workspace Cargo.toml: {e}") })?;
 
     Ok(())
 }
@@ -222,16 +222,21 @@ fn update_dependency_version_in_doc(
         .get_mut("workspace")
         .and_then(|w| w.get_mut("dependencies"))
         .and_then(|d| d.get_mut(package_name))
-        .context(format!(
-            "Failed to find {} in workspace dependencies",
-            package_name
-        ))?;
+        .ok_or_else(|| {
+            XtaskError::Message { details: format!(
+                "Failed to find {} in workspace dependencies",
+                package_name
+            ) }
+        })?;
 
     if let Some(dep_table) = dependency.as_table_like_mut() {
         dep_table.insert("version", toml_edit::value(new_version));
         dep_table.insert("package", toml_edit::value(crate_name));
     } else {
-        bail!("{} is not a table in workspace dependencies", package_name);
+        return Err(XtaskError::Message { details: format!(
+            "{} is not a table in workspace dependencies",
+            package_name
+        ) });
     }
 
     Ok(())
@@ -259,24 +264,19 @@ fn update_profile_override_in_doc(
 }
 
 fn check_workspace_root() -> Result<()> {
-    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+    let cwd = std::env::current_dir()?;
 
     // Check if Cargo.toml exists in the current directory
     let cargo_toml_path = cwd.join("Cargo.toml");
     if !cargo_toml_path.exists() {
-        bail!(
-            "Cargo.toml not found in current directory. Please run this command from the workspace root."
-        );
+        return Err(XtaskError::Message { details: "Cargo.toml not found in current directory. Please run this command from the workspace root.".into() });
     }
 
     // Check if it's a workspace by looking for [workspace] section
-    let contents =
-        std::fs::read_to_string(&cargo_toml_path).context("Failed to read Cargo.toml")?;
+    let contents = std::fs::read_to_string(&cargo_toml_path)?;
 
     if !contents.contains("[workspace]") {
-        bail!(
-            "Current directory does not appear to be a workspace root. Please run this command from the workspace root."
-        );
+        return Err(XtaskError::Message { details: "Current directory does not appear to be a workspace root. Please run this command from the workspace root.".into() });
     }
 
     Ok(())
@@ -291,14 +291,12 @@ fn check_git_clean() -> Result<()> {
     )?;
 
     if !output.status.success() {
-        bail!("git status command failed");
+        return Err(XtaskError::Message { details: "git status command failed".into() });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !stdout.trim().is_empty() {
-        bail!(
-            "Working directory is not clean. Please commit or stash your changes before publishing."
-        );
+        return Err(XtaskError::Message { details: "Working directory is not clean. Please commit or stash your changes before publishing.".into() });
     }
 
     Ok(())
@@ -321,14 +319,13 @@ fn run_command(command: &mut Command) -> Result<Output> {
     };
     eprintln!("+ {}", command_str);
 
-    let output = command
-        .spawn()
-        .context("failed to spawn child process")?
-        .wait_with_output()
-        .context("failed to wait for child process")?;
+    let output = command.spawn()?.wait_with_output()?;
 
     if !output.status.success() {
-        bail!("Command failed with status {}", output.status);
+        return Err(XtaskError::CommandFailed {
+            command: command_str,
+            exit_code: output.status.code(),
+        });
     }
 
     Ok(output)

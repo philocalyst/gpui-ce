@@ -11,7 +11,7 @@ use std::{
 };
 
 use ::util::ResultExt;
-use anyhow::{Context as _, Result};
+use crate::error::Result;
 use futures::channel::oneshot::{self, Receiver};
 use raw_window_handle as rwh;
 use smallvec::SmallVec;
@@ -133,7 +133,7 @@ impl WindowsWindowState {
         let border_offset = WindowBorderOffset::default();
         let restore_from_minimized = None;
         let renderer = DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)
-            .context("Creating DirectX renderer")?;
+            .map_err(|e| WindowsError::DirectXRender { details: format!("Creating DirectX renderer: {e}") })?;
         let callbacks = Callbacks::default();
         let input_handler = None;
         let pending_surrogate = None;
@@ -146,7 +146,7 @@ impl WindowsWindowState {
         let initial_placement = None;
 
         let direct_manipulation = DirectManipulationHandler::new(hwnd, scale_factor)
-            .context("initializing Direct Manipulation")?;
+            .map_err(|e| WindowsError::Misc { details: format!("initializing Direct Manipulation: {e}") })?;
 
         Ok(Self {
             origin: Cell::new(origin),
@@ -205,7 +205,7 @@ impl WindowsWindowState {
                 ..Default::default()
             };
             GetWindowPlacement(self.hwnd, &mut placement)
-                .context("failed to get window placement")
+                .map_err(|e| WindowsError::WindowCreation { details: format!("failed to get window placement: {e}") })
                 .log_err();
             placement
         };
@@ -291,7 +291,7 @@ impl WindowsWindowInner {
                             WINDOW_STYLE(unsafe { get_window_long(this.hwnd, GWL_STYLE) } as _);
                         let mut rc = RECT::default();
                         unsafe { GetWindowRect(this.hwnd, &mut rc) }
-                            .context("failed to get window rect")
+                            .map_err(|e| WindowsError::WindowCreation { details: format!("failed to get window rect: {e}") })
                             .log_err();
                         let _ = this.state.fullscreen.set(Some(StyleAndBounds {
                             style,
@@ -341,19 +341,19 @@ impl WindowsWindowInner {
         match open_status.state {
             WindowOpenState::Maximized => unsafe {
                 SetWindowPlacement(self.hwnd, &open_status.placement)
-                    .context("failed to set window placement")?;
+                    .map_err(|e| WindowsError::WindowCreation { details: format!("failed to set window placement: {e}") })?;
                 ShowWindowAsync(self.hwnd, SW_MAXIMIZE).ok()?;
             },
             WindowOpenState::Fullscreen => {
-                unsafe {
-                    SetWindowPlacement(self.hwnd, &open_status.placement)
-                        .context("failed to set window placement")?
-                };
+                    unsafe {
+                        SetWindowPlacement(self.hwnd, &open_status.placement)
+                            .map_err(|e| WindowsError::WindowCreation { details: format!("failed to set window placement: {e}") })?
+                    };
                 self.toggle_fullscreen();
             }
             WindowOpenState::Windowed => unsafe {
                 SetWindowPlacement(self.hwnd, &open_status.placement)
-                    .context("failed to set window placement")?;
+                    .map_err(|e| WindowsError::WindowCreation { details: format!("failed to set window placement: {e}") })?;
             },
         }
         Ok(())
@@ -479,7 +479,7 @@ impl WindowsWindow {
             None
         }
         .or_else(WindowsDisplay::primary_monitor)
-        .context("failed to find any monitor")?;
+        .ok_or_else(|| WindowsError::WindowCreation { details: "failed to find any monitor".into() })?;
         let appearance = system_appearance().unwrap_or_default();
         let mut context = WindowCreateContext {
             inner: None,
@@ -620,7 +620,7 @@ impl PlatformWindow for WindowsWindow {
                         rect.bottom - rect.top,
                         SWP_NOMOVE,
                     )
-                    .context("unable to set window content size")
+                    .map_err(|e| WindowsError::WindowCreation { details: format!("unable to set window content size: {e}") })
                     .log_err();
                 }
             })
@@ -644,7 +644,7 @@ impl PlatformWindow for WindowsWindow {
         let point = unsafe {
             let mut point: POINT = std::mem::zeroed();
             GetCursorPos(&mut point)
-                .context("unable to get cursor position")
+                .map_err(|e| WindowsError::WindowCreation { details: format!("unable to get cursor position: {e}") })
                 .log_err();
             ScreenToClient(self.0.hwnd, &mut point).ok().log_err();
             point
@@ -737,7 +737,7 @@ impl PlatformWindow for WindowsWindow {
                     config.pfCallback = None;
                     let mut res = std::mem::zeroed();
                     let _ = TaskDialogIndirect(&config, Some(&mut res), None, None)
-                        .context("unable to create task dialog")
+                        .map_err(|e| WindowsError::WindowCreation { details: format!("unable to create task dialog: {e}") })
                         .log_err();
 
                     if let Some(clicked) =
@@ -1298,7 +1298,7 @@ pub(crate) struct WindowBorderOffset {
 }
 
 impl WindowBorderOffset {
-    pub(crate) fn update(&self, hwnd: HWND) -> anyhow::Result<()> {
+    pub(crate) fn update(&self, hwnd: HWND) -> Result<()> {
         let window_rect = unsafe {
             let mut rect = std::mem::zeroed();
             GetWindowRect(hwnd, &mut rect)?;
@@ -1428,7 +1428,7 @@ fn register_drag_drop(window: &Rc<WindowsWindowInner>) -> Result<()> {
     let drag_drop_handler: IDropTarget = handler.into();
     unsafe {
         RegisterDragDrop(window_handle, &drag_drop_handler)
-            .context("unable to register drag-drop event")?;
+            .map_err(|e| WindowsError::WindowCreation { details: format!("unable to register drag-drop event: {e}") })?;
     }
     Ok(())
 }
@@ -1538,7 +1538,7 @@ fn set_window_composition_attribute(hwnd: HWND, color: Option<Color>, state: u32
             unsafe extern "system" fn(HWND, *mut WINDOWCOMPOSITIONATTRIBDATA) -> BOOL;
         let module_name = PCSTR::from_raw(c"user32.dll".as_ptr() as *const u8);
         if let Some(user32) = GetModuleHandleA(module_name)
-            .context("Unable to get user32.dll handle")
+            .map_err(|e| WindowsError::Misc { details: format!("Unable to get user32.dll handle: {e}") })
             .log_err()
         {
             let func_name = PCSTR::from_raw(c"SetWindowCompositionAttribute".as_ptr() as *const u8);

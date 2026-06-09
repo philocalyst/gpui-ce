@@ -15,6 +15,7 @@ use windows::{
     core::*,
 };
 
+use crate::error::{WindowsError, Result};
 use crate::logical_point;
 use gpui::{Bounds, DevicePixels, DisplayId, Pixels, PlatformDisplay, point, size};
 
@@ -132,7 +133,7 @@ impl PlatformDisplay for WindowsDisplay {
         self.display_id
     }
 
-    fn uuid(&self) -> anyhow::Result<Uuid> {
+    fn uuid(&self) -> gpui::platform::Result<Uuid> {
         Ok(self.uuid)
     }
 
@@ -171,7 +172,7 @@ unsafe extern "system" fn monitor_enum_proc(
     BOOL(1)
 }
 
-fn get_monitor_info(hmonitor: HMONITOR) -> anyhow::Result<MONITORINFOEXW> {
+fn get_monitor_info(hmonitor: HMONITOR) -> Result<MONITORINFOEXW> {
     let mut monitor_info: MONITORINFOEXW = unsafe { std::mem::zeroed() };
     monitor_info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
     let status = unsafe {
@@ -183,7 +184,7 @@ fn get_monitor_info(hmonitor: HMONITOR) -> anyhow::Result<MONITORINFOEXW> {
     if status.as_bool() {
         Ok(monitor_info)
     } else {
-        Err(anyhow::anyhow!(std::io::Error::last_os_error()))
+        Err(WindowsError::PathTessellation(std::io::Error::last_os_error().to_string()))
     }
 }
 

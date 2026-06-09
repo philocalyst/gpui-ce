@@ -15,7 +15,7 @@ use crate::{
     Window, WindowBounds, WindowHandle, WindowOptions,
     app::{GpuiBorrow, GpuiMode},
 };
-use anyhow::Result;
+use crate::Result;
 use image::RgbaImage;
 use std::{future::Future, rc::Rc, sync::Arc, time::Duration};
 

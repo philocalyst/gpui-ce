@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Context;
+use crate::error::WindowsError;
 use util::ResultExt;
 use windows::{
     System::Threading::{
@@ -162,7 +162,7 @@ impl PlatformDispatcher for WindowsDispatcher {
 
             // SAFETY: thread_handle is a valid handle to the current thread
             unsafe { SetThreadPriority(thread_handle, THREAD_PRIORITY_TIME_CRITICAL) }
-                .context("thread priority")
+                .map_err(|e| WindowsError::Misc { details: format!("setting thread priority: {e}") })
                 .log_err();
 
             f();

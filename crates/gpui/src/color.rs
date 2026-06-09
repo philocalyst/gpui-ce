@@ -1,4 +1,12 @@
-use anyhow::{Context as _, bail};
+#[derive(Debug, thiserror::Error)]
+pub enum ColorError {
+    #[error("invalid RGBA hex color: '{value}'. Expected #rgb, #rgba, #rrggbb, or #rrggbbaa")]
+    InvalidHexColor { value: String },
+    #[error("invalid unicode in {component} component of {format} for value: '{value}'")]
+    InvalidUnicode { component: &'static str, format: &'static str, value: String },
+    #[error("invalid hex digit: {0}")]
+    ParseInt(#[from] std::num::ParseIntError),
+}
 use schemars::{JsonSchema, json_schema};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
@@ -160,7 +168,7 @@ impl From<Hsla> for Rgba {
 }
 
 impl TryFrom<&'_ str> for Rgba {
-    type Error = anyhow::Error;
+    type Error = ColorError;
 
     fn try_from(value: &'_ str) -> Result<Self, Self::Error> {
         const RGB: usize = "rgb".len();
@@ -172,33 +180,41 @@ impl TryFrom<&'_ str> for Rgba {
         const INVALID_UNICODE: &str = "invalid unicode characters in color";
 
         let Some(("", hex)) = value.trim().split_once('#') else {
-            bail!("invalid RGBA hex color: '{value}'. {EXPECTED_FORMATS}");
+            return Err(ColorError::InvalidHexColor { value: value.to_string() });
         };
 
         let (r, g, b, a) = match hex.len() {
             RGB | RGBA => {
                 let r = u8::from_str_radix(
-                    hex.get(0..1).with_context(|| {
-                        format!("{INVALID_UNICODE}: r component of #rgb/#rgba for value: '{value}'")
+                    hex.get(0..1).ok_or_else(|| ColorError::InvalidUnicode {
+                        component: "r",
+                        format: "#rgb/#rgba",
+                        value: value.to_string(),
                     })?,
                     16,
                 )?;
                 let g = u8::from_str_radix(
-                    hex.get(1..2).with_context(|| {
-                        format!("{INVALID_UNICODE}: g component of #rgb/#rgba for value: '{value}'")
+                    hex.get(1..2).ok_or_else(|| ColorError::InvalidUnicode {
+                        component: "g",
+                        format: "#rgb/#rgba",
+                        value: value.to_string(),
                     })?,
                     16,
                 )?;
                 let b = u8::from_str_radix(
-                    hex.get(2..3).with_context(|| {
-                        format!("{INVALID_UNICODE}: b component of #rgb/#rgba for value: '{value}'")
+                    hex.get(2..3).ok_or_else(|| ColorError::InvalidUnicode {
+                        component: "b",
+                        format: "#rgb/#rgba",
+                        value: value.to_string(),
                     })?,
                     16,
                 )?;
                 let a = if hex.len() == RGBA {
                     u8::from_str_radix(
-                        hex.get(3..4).with_context(|| {
-                            format!("{INVALID_UNICODE}: a component of #rgba for value: '{value}'")
+                        hex.get(3..4).ok_or_else(|| ColorError::InvalidUnicode {
+                            component: "a",
+                            format: "#rgba",
+                            value: value.to_string(),
                         })?,
                         16,
                     )?
@@ -216,36 +232,35 @@ impl TryFrom<&'_ str> for Rgba {
             }
             RRGGBB | RRGGBBAA => {
                 let r = u8::from_str_radix(
-                    hex.get(0..2).with_context(|| {
-                        format!(
-                            "{}: r component of #rrggbb/#rrggbbaa for value: '{}'",
-                            INVALID_UNICODE, value
-                        )
+                    hex.get(0..2).ok_or_else(|| ColorError::InvalidUnicode {
+                        component: "r",
+                        format: "#rrggbb/#rrggbbaa",
+                        value: value.to_string(),
                     })?,
                     16,
                 )?;
                 let g = u8::from_str_radix(
-                    hex.get(2..4).with_context(|| {
-                        format!(
-                            "{INVALID_UNICODE}: g component of #rrggbb/#rrggbbaa for value: '{value}'"
-                        )
+                    hex.get(2..4).ok_or_else(|| ColorError::InvalidUnicode {
+                        component: "g",
+                        format: "#rrggbb/#rrggbbaa",
+                        value: value.to_string(),
                     })?,
                     16,
                 )?;
                 let b = u8::from_str_radix(
-                    hex.get(4..6).with_context(|| {
-                        format!(
-                            "{INVALID_UNICODE}: b component of #rrggbb/#rrggbbaa for value: '{value}'"
-                        )
+                    hex.get(4..6).ok_or_else(|| ColorError::InvalidUnicode {
+                        component: "b",
+                        format: "#rrggbb/#rrggbbaa",
+                        value: value.to_string(),
                     })?,
                     16,
                 )?;
                 let a = if hex.len() == RRGGBBAA {
                     u8::from_str_radix(
-                        hex.get(6..8).with_context(|| {
-                            format!(
-                                "{INVALID_UNICODE}: a component of #rrggbbaa for value: '{value}'"
-                            )
+                        hex.get(6..8).ok_or_else(|| ColorError::InvalidUnicode {
+                            component: "a",
+                            format: "#rrggbbaa",
+                            value: value.to_string(),
                         })?,
                         16,
                     )?
@@ -254,7 +269,7 @@ impl TryFrom<&'_ str> for Rgba {
                 };
                 (r, g, b, a)
             }
-            _ => bail!("invalid RGBA hex color: '{value}'. {EXPECTED_FORMATS}"),
+            _ => return Err(ColorError::InvalidHexColor { value: value.to_string() }),
         };
 
         Ok(Rgba {

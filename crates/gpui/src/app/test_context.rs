@@ -7,7 +7,7 @@ use crate::{
     TestScreenCaptureSource, TestWindow, TextSystem, VisualContext, Window, WindowBounds,
     WindowHandle, WindowOptions, app::GpuiMode, window::ElementArenaScope,
 };
-use anyhow::{anyhow, bail};
+use crate::AppError;
 use futures::{Stream, StreamExt, channel::oneshot};
 
 use std::{
@@ -579,7 +579,7 @@ impl TestAppContext {
                     }
                 }
             },
-            timer.map(|_| Err(anyhow!("condition timed out"))),
+            timer.map(|_| Err(AppError::ConditionTimedOut)),
         )
             .race()
             .await

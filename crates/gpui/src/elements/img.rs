@@ -4,7 +4,7 @@ use crate::{
     Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
     SharedString, SharedUri, StyleRefinement, Styled, Task, Window, px,
 };
-use anyhow::Result;
+
 
 use futures::Future;
 use gpui_util::ResultExt;
@@ -619,13 +619,15 @@ impl Asset for ImageAssetLoader {
             let bytes = match source.clone() {
                 Resource::Path(uri) => fs::read(uri.as_ref())?,
                 Resource::Uri(uri) => {
-                    use anyhow::Context as _;
                     use futures::AsyncReadExt as _;
 
                     let mut response = client
                         .get(uri.as_ref(), ().into(), true)
                         .await
-                        .with_context(|| format!("loading image asset from {uri:?}"))?;
+                        .map_err(|e| ImageCacheError::Client {
+                            uri: uri.clone(),
+                            error: e.into(),
+                        })?;
                     let mut body = Vec::new();
                     response.body_mut().read_to_end(&mut body).await?;
                     if !response.status().is_success() {
@@ -676,9 +678,7 @@ impl Asset for ImageAssetLoader {
                         }
 
                         if frames.is_empty() {
-                            return Err(ImageCacheError::Other(Arc::new(anyhow::anyhow!(
-                                "GIF could not be decoded: all frames failed ({source:?})"
-                            ))));
+                            return Err(ImageCacheError::GifDecodeFailed);
                         }
 
                         frames
@@ -708,9 +708,7 @@ impl Asset for ImageAssetLoader {
                             }
 
                             if frames.is_empty() {
-                                return Err(ImageCacheError::Other(Arc::new(anyhow::anyhow!(
-                                    "WebP could not be decoded: all frames failed ({source:?})"
-                                ))));
+                                return Err(ImageCacheError::WebpDecodeFailed);
                             }
 
                             frames
@@ -749,14 +747,22 @@ impl Asset for ImageAssetLoader {
 }
 
 /// An error that can occur when interacting with the image cache.
-#[derive(Debug, Error, Clone)]
+#[derive(Debug, Error)]
 pub enum ImageCacheError {
     /// Some other kind of error occurred
     #[error("error: {0}")]
-    Other(#[from] Arc<anyhow::Error>),
+    Other(#[from] Arc<Box<dyn std::error::Error + Send + Sync>>),
     /// An error that occurred while reading the image from disk.
     #[error("IO error: {0}")]
     Io(Arc<std::io::Error>),
+    /// An error that occurred while fetching the image over HTTP.
+    #[error("http client error for {uri}: {error}")]
+    Client {
+        /// The URI of the image.
+        uri: SharedUri,
+        /// The underlying error.
+        error: Arc<Box<dyn std::error::Error + Send + Sync>>,
+    },
     /// An error that occurred while processing an image.
     #[error("unexpected http status for {uri}: {status}, body: {body}")]
     BadStatus {
@@ -776,11 +782,31 @@ pub enum ImageCacheError {
     /// An error that occurred while processing an SVG.
     #[error("svg error: {0}")]
     Usvg(Arc<usvg::Error>),
+    /// WebP decoding failed because all frames were invalid.
+    #[error("WebP could not be decoded: all frames failed")]
+    WebpDecodeFailed,
+    /// GIF decoding failed because all frames were invalid.
+    #[error("GIF could not be decoded: all frames failed")]
+    GifDecodeFailed,
 }
 
-impl From<anyhow::Error> for ImageCacheError {
-    fn from(value: anyhow::Error) -> Self {
-        Self::Other(Arc::new(value))
+impl Clone for ImageCacheError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Other(err) => Self::Other(err.clone()),
+            Self::Io(err) => Self::Io(err.clone()),
+            Self::Client { uri, error } => Self::Client { uri: uri.clone(), error: error.clone() },
+            Self::BadStatus { uri, status, body } => Self::BadStatus {
+                uri: uri.clone(),
+                status: *status,
+                body: body.clone(),
+            },
+            Self::Asset(err) => Self::Asset(err.clone()),
+            Self::Image(err) => Self::Image(err.clone()),
+            Self::Usvg(err) => Self::Usvg(err.clone()),
+            Self::WebpDecodeFailed => Self::WebpDecodeFailed,
+            Self::GifDecodeFailed => Self::GifDecodeFailed,
+        }
     }
 }
 

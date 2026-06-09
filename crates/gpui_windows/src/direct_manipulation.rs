@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use ::util::ResultExt;
-use anyhow::Result;
+use crate::error::Result;
 use gpui::*;
 use windows::Win32::{
     Foundation::*,

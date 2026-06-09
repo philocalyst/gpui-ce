@@ -9,6 +9,7 @@ use windows::Win32::Graphics::{
     Dxgi::Common::*,
 };
 
+use crate::error::{Result, WindowsError};
 use gpui::{
     AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTextureList, AtlasTile, Bounds, DevicePixels,
     PlatformAtlas, Point, Size,
@@ -74,10 +75,10 @@ impl PlatformAtlas for DirectXAtlas {
     fn get_or_insert_with<'a>(
         &self,
         key: &AtlasKey,
-        build: &mut dyn FnMut() -> anyhow::Result<
+        build: &mut dyn FnMut() -> Result<
             Option<(Size<DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
         >,
-    ) -> anyhow::Result<Option<AtlasTile>> {
+    ) -> Result<Option<AtlasTile>> {
         let mut lock = self.0.lock();
         if let Some(tile) = lock.tiles_by_key.get(key) {
             Ok(Some(*tile))
@@ -87,7 +88,7 @@ impl PlatformAtlas for DirectXAtlas {
             };
             let tile = lock
                 .allocate(size, key.texture_kind())
-                .ok_or_else(|| anyhow::anyhow!("failed to allocate"))?;
+                .ok_or_else(|| WindowsError::AtlasAllocation { kind: key.texture_kind().name(), width: size.width.0 as u32, height: size.height.0 as u32 })?;
             let texture = lock.texture(tile.texture_id);
             texture.upload(&lock.device_context, tile.bounds, &bytes);
             lock.tiles_by_key.insert(key.clone(), tile);

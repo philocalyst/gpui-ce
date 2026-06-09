@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
+use crate::error::{WindowsError, Result};
 use ::util::ResultExt;
-use anyhow::Context;
 use windows::{
     UI::{
         Color,
@@ -179,12 +179,12 @@ where
     F: FnOnce(HMODULE) -> Result<R>,
 {
     let library = unsafe {
-        LoadLibraryA(dll_name).with_context(|| format!("Loading dll: {}", dll_name.display()))?
+        LoadLibraryA(dll_name).map_err(|e| WindowsError::Misc { details: format!("Loading dll {}: {e}", dll_name.display()) })?
     };
     let result = f(library);
     unsafe {
         FreeLibrary(library)
-            .with_context(|| format!("Freeing dll: {}", dll_name.display()))
+            .map_err(|e| WindowsError::Misc { details: format!("Freeing dll {}: {e}", dll_name.display()) })
             .log_err();
     }
     result

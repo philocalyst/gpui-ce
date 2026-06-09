@@ -1,5 +1,5 @@
+use crate::error::MacError;
 use crate::metal_atlas::MetalAtlas;
-use anyhow::Result;
 use block::ConcreteBlock;
 use cocoa::{
     base::{NO, YES},
@@ -521,11 +521,11 @@ impl MetalRenderer {
     /// Note: This requires a layer-backed renderer. For headless rendering,
     /// use `render_scene_to_image()` instead.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn render_to_image(&mut self, scene: &Scene) -> Result<RgbaImage> {
+    pub fn render_to_image(&mut self, scene: &Scene) -> gpui::platform::Result<RgbaImage> {
         let layer = self
             .layer
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("render_to_image requires a layer-backed renderer"))?;
+            .ok_or(MacError::RenderRequiresLayer)?;
         let viewport_size = layer.drawable_size();
         let viewport_size: Size<DevicePixels> = size(
             (viewport_size.width.ceil() as i32).into(),
@@ -533,7 +533,7 @@ impl MetalRenderer {
         );
         let drawable = layer
             .next_drawable()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get drawable for render_to_image"))?;
+            .ok_or(MacError::NoDrawable)?;
 
         loop {
             let mut instance_buffer = self
@@ -590,9 +590,7 @@ impl MetalRenderer {
                         chunk.swap(0, 2);
                     }
 
-                    return RgbaImage::from_raw(width, height, pixels).ok_or_else(|| {
-                        anyhow::anyhow!("Failed to create RgbaImage from pixel data")
-                    });
+                    return RgbaImage::from_raw(width, height, pixels).ok_or_else(|| MacError::InvalidImageData(format!("failed to create {}x{} image from drawable texture", width, height))).map_err(Into::into);
                 }
                 Err(err) => {
                     log::error!(
@@ -602,7 +600,7 @@ impl MetalRenderer {
                     let mut instance_buffer_pool = self.instance_buffer_pool.lock();
                     let buffer_size = instance_buffer_pool.buffer_size;
                     if buffer_size >= 256 * 1024 * 1024 {
-                        anyhow::bail!("instance buffer size grew too large: {}", buffer_size);
+                        return Err(MacError::InstanceBufferTooLarge { size: buffer_size }.into());
                     }
                     instance_buffer_pool.reset(buffer_size * 2);
                     log::info!(
@@ -623,9 +621,9 @@ impl MetalRenderer {
         &mut self,
         scene: &Scene,
         size: Size<DevicePixels>,
-    ) -> Result<RgbaImage> {
+    ) -> gpui::platform::Result<RgbaImage> {
         if size.width.0 <= 0 || size.height.0 <= 0 {
-            anyhow::bail!("Invalid size for render_scene_to_image: {:?}", size);
+            return Err(MacError::InvalidRenderSize { width: size.width.0 as f64, height: size.height.0 as f64 }.into());
         }
 
         // Update path intermediate textures for this size
@@ -705,9 +703,7 @@ impl MetalRenderer {
                         chunk.swap(0, 2);
                     }
 
-                    return RgbaImage::from_raw(width, height, pixels).ok_or_else(|| {
-                        anyhow::anyhow!("Failed to create RgbaImage from pixel data")
-                    });
+                    return RgbaImage::from_raw(width, height, pixels).ok_or_else(|| MacError::InvalidImageData(format!("failed to create {}x{} image from offscreen texture", width, height))).map_err(Into::into);
                 }
                 Err(err) => {
                     log::error!(
@@ -717,7 +713,7 @@ impl MetalRenderer {
                     let mut instance_buffer_pool = self.instance_buffer_pool.lock();
                     let buffer_size = instance_buffer_pool.buffer_size;
                     if buffer_size >= 256 * 1024 * 1024 {
-                        anyhow::bail!("instance buffer size grew too large: {}", buffer_size);
+                        return Err(MacError::InstanceBufferTooLarge { size: buffer_size }.into());
                     }
                     instance_buffer_pool.reset(buffer_size * 2);
                     log::info!(
@@ -735,7 +731,7 @@ impl MetalRenderer {
         instance_buffer: &mut InstanceBuffer,
         drawable: &metal::MetalDrawableRef,
         viewport_size: Size<DevicePixels>,
-    ) -> Result<metal::CommandBuffer> {
+    ) -> std::result::Result<metal::CommandBuffer, MacError> {
         self.draw_primitives_to_texture(scene, instance_buffer, drawable.texture(), viewport_size)
     }
 
@@ -745,7 +741,7 @@ impl MetalRenderer {
         instance_buffer: &mut InstanceBuffer,
         texture: &metal::TextureRef,
         viewport_size: Size<DevicePixels>,
-    ) -> Result<metal::CommandBuffer> {
+    ) -> std::result::Result<metal::CommandBuffer, MacError> {
         let command_queue = self.command_queue.clone();
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.opaque { 1. } else { 0. };
@@ -846,16 +842,11 @@ impl MetalRenderer {
             };
             if !ok {
                 command_encoder.end_encoding();
-                anyhow::bail!(
-                    "scene too large: {} paths, {} shadows, {} quads, {} underlines, {} mono, {} poly, {} surfaces",
-                    scene.paths.len(),
-                    scene.shadows.len(),
-                    scene.quads.len(),
-                    scene.underlines.len(),
-                    scene.monochrome_sprites.len(),
-                    scene.polychrome_sprites.len(),
-                    scene.surfaces.len(),
-                );
+                return Err(MacError::SceneTooLarge {
+                    path_count: scene.paths.len(),
+                    sprite_count: scene.monochrome_sprites.len() + scene.polychrome_sprites.len(),
+                    quad_count: scene.quads.len(),
+                });
             }
         }
 
@@ -1699,7 +1690,7 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
         &mut self,
         scene: &Scene,
         size: Size<DevicePixels>,
-    ) -> anyhow::Result<image::RgbaImage> {
+    ) -> gpui::platform::Result<image::RgbaImage> {
         self.renderer.render_scene_to_image(scene, size)
     }
 

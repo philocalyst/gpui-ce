@@ -1,5 +1,5 @@
-use crate::{Bounds, DisplayId, Pixels, PlatformDisplay, Point, px};
-use anyhow::{Ok, Result};
+use crate::{Bounds, DisplayId, Pixels, PlatformDisplay, Point, px, PlatformError};
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub(crate) struct TestDisplay {
@@ -23,7 +23,7 @@ impl PlatformDisplay for TestDisplay {
         self.id
     }
 
-    fn uuid(&self) -> Result<uuid::Uuid> {
+    fn uuid(&self) -> Result<Uuid, PlatformError> {
         Ok(self.uuid)
     }
 

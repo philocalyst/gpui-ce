@@ -1,5 +1,6 @@
+use crate::error::MacError;
 use crate::ns_string;
-use anyhow::{Result, anyhow};
+use gpui::Result;
 use block::ConcreteBlock;
 use cocoa::{
     base::{YES, id, nil},
@@ -123,7 +124,7 @@ impl ScreenCaptureSource for MacScreenCaptureSource {
                 let message: id = msg_send![error, localizedDescription];
                 let _: () = msg_send![stream, release];
                 let _: () = msg_send![output, release];
-                tx.send(Err(anyhow!("failed to add stream output {message:?}")))
+                tx.send(Err(MacError::ScreenCapture(format!("failed to add stream output {message:?}")).into()))
                     .ok();
                 return rx;
             }
@@ -142,7 +143,7 @@ impl ScreenCaptureSource for MacScreenCaptureSource {
                         let _: () = msg_send![stream, release];
                         let _: () = msg_send![output, release];
                         let message: id = msg_send![error, localizedDescription];
-                        Err(anyhow!("failed to start screen capture stream {message:?}"))
+                        Err(MacError::ScreenCapture(format!("failed to start screen capture stream {message:?}")).into())
                     };
                     if let Some(tx) = tx.borrow_mut().take() {
                         tx.send(result).ok();
@@ -266,10 +267,7 @@ pub(crate) fn get_sources() -> oneshot::Receiver<Result<Vec<Rc<dyn ScreenCapture
                 Ok(result)
             } else {
                 let msg: id = msg_send![error, localizedDescription];
-                Err(anyhow!(
-                    "Screen share failed: {:?}",
-                    NSStringExt::to_str(&msg)
-                ))
+                Err(MacError::ScreenCapture(format!("Screen share failed: {:?}", NSStringExt::to_str(&msg))).into())
             };
             tx.send(result).ok();
         });

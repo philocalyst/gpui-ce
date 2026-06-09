@@ -1,4 +1,3 @@
-use anyhow::Error;
 use etagere::euclid::{Point2D, Vector2D};
 use lyon::geom::Angle;
 use lyon::math::{Vector, vector};
@@ -11,7 +10,7 @@ use lyon::tessellation::{
 pub use lyon::math::Transform;
 pub use lyon::tessellation::{FillOptions, FillRule, StrokeOptions};
 
-use crate::{Path, Pixels, Point, point, px};
+use crate::{AppError, Path, Pixels, Point, Result, point, px};
 
 /// Style of the PathBuilder
 pub enum PathStyle {
@@ -241,7 +240,7 @@ impl PathBuilder {
 
     /// Builds into a [`Path`].
     #[inline]
-    pub fn build(self) -> Result<Path<Pixels>, Error> {
+    pub fn build(self) -> Result<Path<Pixels>> {
         let path = if let Some(transform) = self.transform {
             self.raw.build().transformed(&transform)
         } else {
@@ -257,7 +256,7 @@ impl PathBuilder {
     fn tessellate_fill(
         path: &lyon::path::Path,
         options: &FillOptions,
-    ) -> Result<Path<Pixels>, Error> {
+    ) -> Result<Path<Pixels>> {
         // Will contain the result of the tessellation.
         let mut buf: VertexBuffers<lyon::math::Point, u16> = VertexBuffers::new();
         let mut tessellator = FillTessellator::new();
@@ -276,7 +275,7 @@ impl PathBuilder {
         dash_array: Option<Vec<Pixels>>,
         path: &lyon::path::Path,
         options: &StrokeOptions,
-    ) -> Result<Path<Pixels>, Error> {
+    ) -> Result<Path<Pixels>> {
         let path = if let Some(dash_array) = dash_array {
             let measurements = lyon::algorithms::measure::PathMeasurements::from_path(path, 0.01);
             let mut sampler = measurements

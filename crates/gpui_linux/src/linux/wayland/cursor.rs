@@ -1,6 +1,6 @@
+use crate::error::WaylandError;
 use crate::linux::Globals;
 use crate::linux::{DEFAULT_CURSOR_ICON_NAME, log_cursor_icon_warning};
-use anyhow::{Context as _, anyhow};
 use util::ResultExt;
 
 use wayland_client::Connection;
@@ -62,7 +62,7 @@ impl Cursor {
             CursorTheme::load(&self.connection, self.shm.clone(), self.scaled_size)
         };
         if let Some(theme) = result
-            .context("Wayland: Failed to load cursor theme")
+            .map_err(|e| WaylandError::Cursor(e.to_string()))
             .log_err()
         {
             self.loaded_theme = Some(LoadedTheme {
@@ -117,14 +117,14 @@ impl Cursor {
 
             if let Some(cursor) = theme.get_cursor(DEFAULT_CURSOR_ICON_NAME) {
                 buffer = &cursor[0];
-                log_cursor_icon_warning(anyhow!(
+                log_cursor_icon_warning(format!(
                     "wayland: Unable to get cursor icon {:?}. \
                     Using default cursor icon: '{}'",
                     cursor_icon_names,
                     DEFAULT_CURSOR_ICON_NAME
                 ));
             } else {
-                log_cursor_icon_warning(anyhow!(
+                log_cursor_icon_warning(format!(
                     "wayland: Unable to fallback on default cursor icon '{}' for theme '{}'",
                     DEFAULT_CURSOR_ICON_NAME,
                     loaded_theme.name.as_deref().unwrap_or("default")

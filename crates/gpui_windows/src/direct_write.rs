@@ -5,7 +5,7 @@ use std::{
 };
 
 use ::util::{ResultExt, maybe};
-use anyhow::{Context, Result};
+use crate::error::Result;
 use collections::HashMap;
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use windows::{
@@ -195,7 +195,7 @@ impl DirectWriteTextSystem {
             components
                 .factory
                 .GetSystemFontCollection(false, &mut result, true)?;
-            result.context("Failed to get system font collection")?
+            result.ok_or_else(|| WindowsError::SystemFontCollection)?
         };
         let custom_font_set = unsafe { components.builder.CreateFontSet()? };
         let custom_font_collection = unsafe {
@@ -239,7 +239,7 @@ impl PlatformTextSystem for DirectWriteTextSystem {
         } else {
             RwLockUpgradableReadGuard::upgrade(lock)
                 .select_and_cache_font(&self.components, font)
-                .with_context(|| format!("Failed to select font: {:?}", font))
+                .ok_or_else(|| WindowsError::PathTessellation(format!("Font not found: {:?}", font)))
         }
     }
 
@@ -251,7 +251,7 @@ impl PlatformTextSystem for DirectWriteTextSystem {
         self.state.read().get_typographic_bounds(font_id, glyph_id)
     }
 
-    fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> anyhow::Result<Size<f32>> {
+    fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
         self.state.read().get_advance(font_id, glyph_id)
     }
 
@@ -262,7 +262,7 @@ impl PlatformTextSystem for DirectWriteTextSystem {
     fn glyph_raster_bounds(
         &self,
         params: &RenderGlyphParams,
-    ) -> anyhow::Result<Bounds<DevicePixels>> {
+    ) -> Result<Bounds<DevicePixels>> {
         self.state.read().raster_bounds(&self.components, params)
     }
 
@@ -270,7 +270,7 @@ impl PlatformTextSystem for DirectWriteTextSystem {
         &self,
         params: &RenderGlyphParams,
         raster_bounds: Bounds<DevicePixels>,
-    ) -> anyhow::Result<(Size<DevicePixels>, Vec<u8>)> {
+    ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
         self.state
             .read()
             .rasterize_glyph(&self.components, params, raster_bounds)
@@ -790,7 +790,7 @@ impl DirectWriteState {
         glyph_bounds: Bounds<DevicePixels>,
     ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
         if glyph_bounds.size.width.0 == 0 || glyph_bounds.size.height.0 == 0 {
-            anyhow::bail!("glyph bounds are empty");
+            return Err(WindowsError::GlyphBoundsEmpty);
         }
 
         let bitmap_data = if params.is_emoji {
@@ -1252,7 +1252,7 @@ impl DirectWriteState {
 
     fn handle_gpu_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
         try_to_recover_from_device_lost(|| {
-            GPUState::new(directx_devices).context("Recreating GPU state for DirectWrite")
+            GPUState::new(directx_devices).map_err(|_| WindowsError::DirectWriteGpuState)
         })
         .map(|gpu_state| self.gpu_state = gpu_state)
     }
@@ -1784,7 +1784,9 @@ fn get_name(string: IDWriteLocalizedStrings, locale: &HSTRING) -> Result<String>
                 &mut exists as _,
             )?
         };
-        anyhow::ensure!(exists.as_bool(), "No localised string for {locale}");
+        if !exists.as_bool() {
+            return Err(WindowsError::PathTessellation(format!("No localized string found for locale: {}", locale.to_string())));
+        }
     }
 
     let name_length = unsafe { string.GetStringLength(locale_name_index) }? as usize;

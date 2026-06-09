@@ -2,6 +2,7 @@
 //!
 //! This module uses the [ashpd] crate
 
+use crate::error::LinuxError;
 use ashpd::desktop::settings::{ColorScheme, Settings};
 use calloop::channel::Channel;
 use calloop::{EventSource, Poll, PostAction, Readiness, Token, TokenFactory};
@@ -30,7 +31,7 @@ impl XDPEventSource {
 
         executor
             .spawn(async move {
-                let settings = Settings::new().await?;
+                let settings = Settings::new().await.map_err(LinuxError::Portal)?;
 
                 if let Ok(initial_appearance) = settings.color_scheme().await {
                     sender.send(Event::WindowAppearance(
@@ -70,10 +71,10 @@ impl XDPEventSource {
                     background
                         .spawn(async move {
                             while let Some(theme) = cursor_theme_changed.next().await {
-                                let theme = theme?;
+                                let theme = theme.map_err(LinuxError::Portal)?;
                                 sender.send(Event::CursorTheme(theme))?;
                             }
-                            anyhow::Ok(())
+                            Ok::<(), LinuxError>(())
                         })
                         .detach();
                 }
@@ -89,10 +90,10 @@ impl XDPEventSource {
                     background
                         .spawn(async move {
                             while let Some(size) = cursor_size_changed.next().await {
-                                let size = size?;
+                                let size = size.map_err(LinuxError::Portal)?;
                                 sender.send(Event::CursorSize(size as u32))?;
                             }
-                            anyhow::Ok(())
+                            Ok::<(), LinuxError>(())
                         })
                         .detach();
                 }
@@ -108,22 +109,22 @@ impl XDPEventSource {
                     background
                         .spawn(async move {
                             while let Some(layout) = button_layout_changed.next().await {
-                                let layout = layout?;
+                                let layout = layout.map_err(LinuxError::Portal)?;
                                 sender.send(Event::ButtonLayout(layout))?;
                             }
-                            anyhow::Ok(())
+                            Ok::<(), LinuxError>(())
                         })
                         .detach();
                 }
 
-                let mut appearance_changed = settings.receive_color_scheme_changed().await?;
+                let mut appearance_changed = settings.receive_color_scheme_changed().await.map_err(LinuxError::Portal)?;
                 while let Some(scheme) = appearance_changed.next().await {
                     sender.send(Event::WindowAppearance(
                         window_appearance_from_color_scheme(scheme),
                     ))?;
                 }
 
-                anyhow::Ok(())
+                Ok::<(), LinuxError>(())
             })
             .detach();
 
@@ -135,7 +136,7 @@ impl EventSource for XDPEventSource {
     type Event = Event;
     type Metadata = ();
     type Ret = ();
-    type Error = anyhow::Error;
+    type Error = LinuxError;
 
     fn process_events<F>(
         &mut self,

@@ -1,4 +1,3 @@
-use anyhow::Result;
 use gpui::{Bounds, DisplayId, Pixels, PlatformDisplay, Point, Size, px};
 
 #[derive(Debug)]
@@ -64,7 +63,7 @@ impl PlatformDisplay for WebDisplay {
         self.id
     }
 
-    fn uuid(&self) -> Result<uuid::Uuid> {
+    fn uuid(&self) -> gpui::platform::Result<uuid::Uuid> {
         Ok(self.uuid)
     }
 

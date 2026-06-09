@@ -11,7 +11,96 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as _, Result, anyhow};
+use crate::platform::PlatformError;
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum AppError {
+    #[error("No HttpClient available")]
+    NoHttpClient,
+    #[error("root view's type has changed")]
+    RootViewTypeChanged,
+    #[error("window not found")]
+    WindowNotFound,
+    #[error("app is quitting")]
+    AppIsQuitting,
+    #[error("entity released")]
+    EntityReleased,
+    #[error("entity has no current window")]
+    EntityHasNoCurrentWindow,
+    #[error("borrow mut error: {0}")]
+    BorrowMutError(std::sync::Arc<std::cell::BorrowMutError>),
+    #[error("Other platform error: {0}")]
+    PlatformError(#[from] PlatformError),
+    #[error("tessellation fill error: {0}")]
+    FillError(std::sync::Arc<lyon::tessellation::FillError>),
+    #[error("tessellation stroke error: {0}")]
+    StrokeError(std::sync::Arc<lyon::tessellation::StrokeError>),
+    #[error("usvg error: {0}")]
+    UsvgError(std::sync::Arc<usvg::Error>),
+    #[cfg(feature = "input-latency-histogram")]
+    #[error("histogram error: {0}")]
+    HistogramError(std::sync::Arc<hdrhistogram::CreationError>),
+    #[error("invalid element id (needs to be a string)")]
+    InvalidElementId,
+    #[error("invalid element state type, requested {requested}, actual: {actual:?}")]
+    InvalidElementState {
+        requested: &'static str,
+        actual: Option<&'static str>,
+    },
+    #[error("asset load error: {0}")]
+    AssetLoadError(SharedString),
+    #[error("glyph not found for character {0:?}")]
+    MissingGlyph(char),
+    #[error("zero size")]
+    ZeroSize,
+    #[error("{0}")]
+    Custom(SharedString),
+}
+
+impl From<std::cell::BorrowMutError> for AppError {
+    fn from(err: std::cell::BorrowMutError) -> Self {
+        Self::BorrowMutError(std::sync::Arc::new(err))
+    }
+}
+
+impl From<lyon::tessellation::FillError> for AppError {
+    fn from(err: lyon::tessellation::FillError) -> Self {
+        Self::FillError(std::sync::Arc::new(err))
+    }
+}
+
+impl From<lyon::tessellation::StrokeError> for AppError {
+    fn from(err: lyon::tessellation::StrokeError) -> Self {
+        Self::StrokeError(std::sync::Arc::new(err))
+    }
+}
+
+impl From<usvg::Error> for AppError {
+    fn from(err: usvg::Error) -> Self {
+        Self::UsvgError(std::sync::Arc::new(err))
+    }
+}
+
+#[cfg(feature = "input-latency-histogram")]
+impl From<hdrhistogram::CreationError> for AppError {
+    fn from(err: hdrhistogram::CreationError) -> Self {
+        Self::HistogramError(std::sync::Arc::new(err))
+    }
+}
+
+impl From<String> for AppError {
+    fn from(s: String) -> Self {
+        Self::Custom(s.into())
+    }
+}
+
+impl From<&str> for AppError {
+    fn from(s: &str) -> Self {
+        Self::Custom(s.into())
+    }
+}
+
+pub type Result<T, E = AppError> = std::result::Result<T, E>;
 use derive_more::{Deref, DerefMut};
 use futures::{
     Future, FutureExt,
@@ -1141,7 +1230,7 @@ impl App {
         &mut self,
         options: crate::WindowOptions,
         build_root_view: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
-    ) -> anyhow::Result<WindowHandle<V>> {
+    ) -> Result<WindowHandle<V>> {
         self.update(|cx| {
             let id = cx.windows.insert(None);
             let handle = WindowHandle::new(id);
@@ -1701,7 +1790,7 @@ impl App {
 
             Some(result)
         })
-        .context("window not found")
+        .ok_or(AppError::WindowNotFound)
     }
 
     /// Creates an `AsyncApp`, which can be cloned and has a static lifetime
@@ -2568,14 +2657,14 @@ impl AppContext for App {
         let window = self
             .windows
             .get(window.id)
-            .context("window not found")?
+            .ok_or(AppError::WindowNotFound)?
             .as_deref()
             .expect("attempted to read a window that is already on the stack");
 
         let root_view = window.root.clone().unwrap();
         let view = root_view
             .downcast::<T>()
-            .map_err(|_| anyhow!("root view's type has changed"))?;
+            .map_err(|_| AppError::RootViewTypeChanged)?;
 
         Ok(read(view, self))
     }
@@ -2716,14 +2805,9 @@ impl HttpClient for NullHttpClient {
     fn send(
         &self,
         _req: http_client::Request<http_client::AsyncBody>,
-    ) -> futures::future::BoxFuture<
-        'static,
-        anyhow::Result<http_client::Response<http_client::AsyncBody>>,
-    > {
-        async move {
-            anyhow::bail!("No HttpClient available");
-        }
-        .boxed()
+    ) -> futures::future::BoxFuture<'static, std::result::Result<http_client::Response<http_client::AsyncBody>, anyhow::Error>>
+    {
+        async move { Err(anyhow::anyhow!(AppError::NoHttpClient)) }.boxed()
     }
 
     fn user_agent(&self) -> Option<&http_client::http::HeaderValue> {

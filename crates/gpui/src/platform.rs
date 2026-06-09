@@ -36,9 +36,52 @@ use crate::{
     RenderSvgParams, Scene, ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer,
     SystemWindowTab, Task, ThreadTaskTimings, Window, WindowControlArea, hash, point, px, size,
 };
-use anyhow::Result;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-use anyhow::bail;
+use async_task::Runnable;
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum PlatformError {
+    #[error("gpui was compiled without the screen-capture feature")]
+    ScreenCaptureNotSupported,
+    #[error("render_to_image not implemented for this platform")]
+    RenderToImageNotImplemented,
+    #[error("render_to_image not available: no HeadlessRenderer configured")]
+    NoHeadlessRenderer,
+    #[error("button layout string {layout_string:?} contains no valid buttons (unrecognized: {unrecognized})")]
+    InvalidButtonLayout {
+        layout_string: String,
+        unrecognized: String,
+    },
+    #[error("The screen capture source is not a display")]
+    ScreenCaptureSourceNotADisplay,
+    #[error("Can't call ScapDefaultTargetCaptureSource::stream multiple times")]
+    StreamCalledMultipleTimes,
+    #[error("Failed to get first frame of screenshare to get the size")]
+    FailedToGetFirstFrame,
+    #[error("Unable to determine the target display")]
+    UnableToDetermineTargetDisplay,
+    #[error("GIF could not be decoded: all frames failed")]
+    GifDecodeFailedAllFrames,
+    #[error("Image error: {0}")]
+    ImageError(std::sync::Arc<image::ImageError>),
+    #[error("usvg error: {0}")]
+    UsvgError(std::sync::Arc<usvg::Error>),
+    #[error("Other platform error: {0}")]
+    Other(#[from] std::sync::Arc<Box<dyn std::error::Error + Send + Sync>>),
+}
+
+impl From<image::ImageError> for PlatformError {
+    fn from(err: image::ImageError) -> Self {
+        Self::ImageError(std::sync::Arc::new(err))
+    }
+}
+
+impl From<usvg::Error> for PlatformError {
+    fn from(err: usvg::Error) -> Self {
+        Self::UsvgError(std::sync::Arc::new(err))
+    }
+}
+
+pub type Result<T, E = PlatformError> = std::result::Result<T, E>;
 use async_task::Runnable;
 use futures::channel::oneshot;
 #[cfg(any(test, feature = "test-support"))]
@@ -139,12 +182,10 @@ pub trait Platform: 'static {
 
     fn screen_capture_sources(
         &self,
-    ) -> oneshot::Receiver<anyhow::Result<Vec<Rc<dyn ScreenCaptureSource>>>> {
+    ) -> oneshot::Receiver<Result<Vec<Rc<dyn ScreenCaptureSource>>>> {
         let (sources_tx, sources_rx) = oneshot::channel();
         sources_tx
-            .send(Err(anyhow::anyhow!(
-                "gpui was compiled without the screen-capture feature"
-            )))
+            .send(Err(PlatformError::ScreenCaptureNotSupported))
             .ok();
         sources_rx
     }
@@ -153,7 +194,7 @@ pub trait Platform: 'static {
         &self,
         handle: AnyWindowHandle,
         options: WindowParams,
-    ) -> anyhow::Result<Box<dyn PlatformWindow>>;
+    ) -> Result<Box<dyn PlatformWindow>>;
 
     /// Returns the appearance of the application's windows.
     fn window_appearance(&self) -> WindowAppearance;
@@ -537,11 +578,10 @@ impl WindowButtonLayout {
             && layout.left.iter().all(Option::is_none)
             && layout.right.iter().all(Option::is_none)
         {
-            bail!(
-                "button layout string {:?} contains no valid buttons (unrecognized: {})",
-                layout_string,
-                unrecognized.join(", ")
-            );
+            return Err(PlatformError::InvalidButtonLayout {
+                layout_string: layout_string.to_string(),
+                unrecognized: unrecognized.join(", "),
+            });
         }
 
         Ok(layout)
@@ -703,7 +743,7 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         Decorations::Server
     }
     fn set_app_id(&mut self, _app_id: &str) {}
-    fn map_window(&mut self) -> anyhow::Result<()> {
+    fn map_window(&mut self) -> Result<()> {
         Ok(())
     }
     fn window_controls(&self) -> WindowControls {
@@ -742,7 +782,7 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// to capture what would be rendered without displaying it or requiring the window to be visible.
     #[cfg(any(test, feature = "test-support"))]
     fn render_to_image(&self, _scene: &Scene) -> Result<RgbaImage> {
-        anyhow::bail!("render_to_image not implemented for this platform")
+        Err(PlatformError::RenderToImageNotImplemented)
     }
 }
 
@@ -2164,7 +2204,7 @@ impl Image {
                 }
 
                 if frames.is_empty() {
-                    anyhow::bail!("GIF could not be decoded: all frames failed");
+                    return Err(PlatformError::GifDecodeFailedAllFrames);
                 }
 
                 frames

@@ -1,5 +1,5 @@
 use crate::{
-    AssetSource, DevicePixels, IsZero, RenderImage, Result, SharedString, Size,
+    AppError, AssetSource, DevicePixels, IsZero, RenderImage, Result, SharedString, Size,
     swap_rgba_pa_to_bgra,
 };
 use image::Frame;
@@ -199,7 +199,9 @@ impl SvgRenderer {
         params: &RenderSvgParams,
         bytes: Option<&[u8]>,
     ) -> Result<Option<(Size<DevicePixels>, Vec<u8>)>> {
-        anyhow::ensure!(!params.size.is_zero(), "can't render at a zero size");
+        if params.size.is_zero() {
+            return Err(AppError::ZeroSize);
+        }
 
         let render_pixmap = |bytes| {
             let pixmap = self.render_pixmap(bytes, SvgSize::Size(params.size))?;

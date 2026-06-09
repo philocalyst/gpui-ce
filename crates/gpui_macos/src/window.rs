@@ -4,8 +4,6 @@ use crate::{
     kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
     ns_string, renderer,
 };
-#[cfg(any(test, feature = "test-support"))]
-use anyhow::Result;
 use block::ConcreteBlock;
 use cocoa::{
     appkit::{
@@ -1728,7 +1726,7 @@ impl PlatformWindow for MacWindow {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn render_to_image(&self, scene: &gpui::Scene) -> Result<RgbaImage> {
+    fn render_to_image(&self, scene: &gpui::Scene) -> gpui::platform::Result<RgbaImage> {
         let mut this = self.0.lock();
         this.renderer.render_to_image(scene)
     }

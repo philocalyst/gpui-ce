@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
 use clap::Parser;
 use gh_workflow::Workflow;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use crate::error::{Result, XtaskError};
 
 use crate::tasks::workflow_checks::{self};
 
@@ -43,7 +44,7 @@ impl AsRef<str> for GitSha {
     clippy::disallowed_methods,
     reason = "This runs only in a CLI environment"
 )]
-fn parse_ref(value: &str) -> Result<GitSha, String> {
+fn parse_ref(value: &str) -> std::result::Result<GitSha, String> {
     const GIT_SHA_LENGTH: usize = 40;
     (value.len() == GIT_SHA_LENGTH)
         .then_some(value)
@@ -125,9 +126,7 @@ impl WorkflowFile {
         };
         let workflow_folder = self.r#type.folder_path();
 
-        fs::create_dir_all(&workflow_folder).with_context(|| {
-            format!("Failed to create directory: {}", workflow_folder.display())
-        })?;
+        fs::create_dir_all(&workflow_folder)?;
 
         let workflow_name = workflow
             .name
@@ -140,14 +139,17 @@ impl WorkflowFile {
 
         let workflow_path = workflow_folder.join(filename);
 
-        let content = workflow
-            .to_string()
-            .map_err(|e| anyhow::anyhow!("{:?}: {:?}", workflow_path, e))?;
+        let content = workflow.to_string().map_err(|e| {
+            XtaskError::WorkflowSerialize {
+                path: workflow_path.display().to_string(),
+                details: format!("{e:?}"),
+            }
+        })?;
 
         let disclaimer = self.r#type.disclaimer(workflow_name);
 
         let content = [disclaimer, content].join("\n");
-        fs::write(&workflow_path, content).map_err(Into::into)
+        fs::write(&workflow_path, content)?
     }
 }
 
@@ -188,7 +190,7 @@ impl WorkflowType {
 
 pub fn run_workflows(args: GenerateWorkflowArgs) -> Result<()> {
     if !Path::new("crates/zed/").is_dir() {
-        anyhow::bail!("xtask workflows must be ran from the project root");
+        return Err(XtaskError::Message { details: "xtask workflows must be ran from the project root".into() });
     }
 
     let workflows = [

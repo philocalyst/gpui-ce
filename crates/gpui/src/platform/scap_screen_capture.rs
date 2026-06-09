@@ -3,7 +3,8 @@ use crate::{
     DevicePixels, ForegroundExecutor, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream,
     Size, SourceMetadata, size,
 };
-use anyhow::{Context as _, Result, anyhow};
+use crate::platform::PlatformError;
+type Result<T, E = PlatformError> = std::result::Result<T, E>;
 use futures::channel::oneshot;
 use scap::Target;
 use std::rc::Rc;
@@ -49,7 +50,7 @@ fn get_screen_targets(sources_tx: oneshot::Sender<Result<Vec<ScapCaptureSource>>
         let targets = match scap::get_all_targets() {
             Ok(targets) => targets,
             Err(err) => {
-                sources_tx.send(Err(err)).ok();
+                sources_tx.send(Err(PlatformError::Other(Arc::new(Box::new(err))))).ok();
                 return;
             }
         };
@@ -99,7 +100,7 @@ impl ScreenCaptureSource for ScapCaptureSource {
                     run_capture(capturer, target.clone(), frame_callback, stream_tx);
                 }
                 Err(e) => {
-                    stream_tx.send(Err(e)).ok();
+                    stream_tx.send(Err(PlatformError::Other(Arc::new(Box::new(e))))).ok();
                 }
             }
         });
@@ -126,16 +127,16 @@ fn start_default_target_screen_capture(
 ) {
     // Due to use of blocking APIs, a dedicated thread is used.
     std::thread::spawn(|| {
-        let start_result = gpui_util::maybe!({
-            let mut capturer = new_scap_capturer(None)?;
+        let start_result: Result<_> = gpui_util::maybe!({
+            let mut capturer = new_scap_capturer(None).map_err(|e| PlatformError::Other(Arc::new(Box::new(e))))?;
             capturer.start_capture();
             let first_frame = capturer
                 .get_next_frame()
-                .context("Failed to get first frame of screenshare to get the size.")?;
+                .map_err(|_| PlatformError::FailedToGetFirstFrame)?;
             let size = frame_size(&first_frame);
             let target = capturer
                 .target()
-                .context("Unable to determine the target display.")?;
+                .ok_or(PlatformError::UnableToDetermineTargetDisplay)?;
             let target = target.clone();
             Ok((capturer, size, target))
         });
@@ -160,7 +161,7 @@ fn start_default_target_screen_capture(
             }
             _ => {
                 sources_tx
-                    .send(Err(anyhow!("The screen capture source is not a display")))
+                    .send(Err(PlatformError::ScreenCaptureSourceNotADisplay))
                     .ok();
             }
         }
@@ -188,9 +189,7 @@ impl ScreenCaptureSource for ScapDefaultTargetCaptureSource {
             Err(std::sync::mpsc::TrySendError::Full((tx, _)))
             | Err(std::sync::mpsc::TrySendError::Disconnected((tx, _))) => {
                 // Note: support could be added for being called again after end of prior stream.
-                tx.send(Err(anyhow!(
-                    "Can't call ScapDefaultTargetCaptureSource::stream multiple times."
-                )))
+                tx.send(Err(PlatformError::StreamCalledMultipleTimes))
                 .ok();
             }
         }
@@ -198,7 +197,7 @@ impl ScreenCaptureSource for ScapDefaultTargetCaptureSource {
     }
 }
 
-fn new_scap_capturer(target: Option<scap::Target>) -> Result<scap::capturer::Capturer> {
+fn new_scap_capturer(target: Option<scap::Target>) -> std::result::Result<scap::capturer::Capturer, scap::error::Error> {
     scap::capturer::Capturer::build(scap::capturer::Options {
         fps: 60,
         show_cursor: true,

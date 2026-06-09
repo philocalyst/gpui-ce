@@ -1,7 +1,8 @@
+mod error;
 mod tasks;
 mod workspace;
 
-use anyhow::Result;
+use crate::error::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]

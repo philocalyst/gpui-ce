@@ -25,6 +25,7 @@ gpui.workspace = true
 accesskit.workspace = true
 accesskit_macos.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 async-task = "4.7"
 block = "0.1"
 cocoa.workspace = true

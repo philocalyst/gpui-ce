@@ -13,6 +13,7 @@ use mach2::{
         thread_precedence_policy_data_t, thread_time_constraint_policy_data_t,
     },
 };
+use crate::error::{MacError, Result};
 use util::ResultExt;
 
 use async_task::Runnable;
@@ -94,7 +95,7 @@ impl PlatformDispatcher for MacDispatcher {
     }
 }
 
-fn set_audio_thread_priority() -> anyhow::Result<()> {
+fn set_audio_thread_priority() -> Result<()> {
     // https://chromium.googlesource.com/chromium/chromium/+/master/base/threading/platform_thread_mac.mm#93
 
     // SAFETY: always safe to call
@@ -118,7 +119,7 @@ fn set_audio_thread_priority() -> anyhow::Result<()> {
     };
 
     if result != KERN_SUCCESS {
-        anyhow::bail!("failed to set thread extended policy");
+        return Err(MacError::ThreadPolicy("failed to set thread extended policy".into()));
     }
 
     // relatively high priority
@@ -136,7 +137,7 @@ fn set_audio_thread_priority() -> anyhow::Result<()> {
     };
 
     if result != KERN_SUCCESS {
-        anyhow::bail!("failed to set thread precedence policy");
+        return Err(MacError::ThreadPolicy("failed to set thread precedence policy".into()));
     }
 
     const GUARANTEED_AUDIO_DUTY_CYCLE: f32 = 0.75;
@@ -173,7 +174,7 @@ fn set_audio_thread_priority() -> anyhow::Result<()> {
     };
 
     if result != KERN_SUCCESS {
-        anyhow::bail!("failed to set thread time constraint policy");
+        return Err(MacError::ThreadPolicy("failed to set thread time constraint policy".into()));
     }
 
     Ok(())

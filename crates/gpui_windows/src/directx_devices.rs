@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use crate::error::{WindowsError, Result};
 use itertools::Itertools;
 use util::ResultExt;
 use windows::Win32::{
@@ -32,7 +32,6 @@ pub(crate) fn try_to_recover_from_device_lost<T>(mut f: impl FnMut() -> Result<T
         })
         .find_or_last(Result::is_ok)
         .unwrap()
-        .context("DirectXRenderer failed to recover from lost device after multiple attempts")
 }
 
 #[derive(Clone)]
@@ -46,10 +45,9 @@ pub(crate) struct DirectXDevices {
 impl DirectXDevices {
     pub(crate) fn new() -> Result<Self> {
         let debug_layer_available = check_debug_layer_available();
-        let dxgi_factory =
-            get_dxgi_factory(debug_layer_available).context("Creating DXGI factory")?;
+        let dxgi_factory = get_dxgi_factory(debug_layer_available)?;
         let (adapter, device, device_context, feature_level) =
-            get_adapter(&dxgi_factory, debug_layer_available).context("Getting DXGI adapter")?;
+            get_adapter(&dxgi_factory, debug_layer_available)?;
         match feature_level {
             D3D_FEATURE_LEVEL_11_1 => {
                 log::info!("Created device with Direct3D 11.1 feature level.")
@@ -179,7 +177,7 @@ fn get_device(
                 &mut data as *mut _ as _,
                 std::mem::size_of::<D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS>() as u32,
             )
-            .context("Checking GPU device feature support")?;
+            .map_err(WindowsError::Api)?;
     }
     if data
         .ComputeShaders_Plus_RawAndStructuredBuffers_Via_Shader_4_x
@@ -187,8 +185,6 @@ fn get_device(
     {
         Ok(device)
     } else {
-        Err(anyhow::anyhow!(
-            "Required feature StructuredBuffer is not supported by GPU/driver"
-        ))
+        Err(WindowsError::PathTessellation("Required feature StructuredBuffer is not supported by GPU/driver".into()))
     }
 }

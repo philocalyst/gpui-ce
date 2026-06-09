@@ -10,6 +10,7 @@ members = [
     "./crates/gpui_windows/",
     "./crates/gpui_platform/",
     "./crates/gpui_shared_string/",
+    "./tooling/xtask/",
 ]
 default-members = [
     "./crates/gpui/",
@@ -126,7 +127,6 @@ gpui_wgpu = { path = "./crates/gpui_wgpu/" }
 
 gpui_macros = { path = "./crates/gpui_macros/" }
 gpui_shared_string = { path = "./crates/gpui_shared_string/" }
-gpui_tokio = { path = "./crates/gpui_tokio/" }
 
 [workspace.dependencies.windows]
 version = "0.61"

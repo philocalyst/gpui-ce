@@ -12,7 +12,8 @@ use crate::{
     PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Task,
     TestDispatcher, WindowAppearance, WindowParams,
 };
-use anyhow::Result;
+use crate::PlatformError;
+type Result<T, E = PlatformError> = std::result::Result<T, E>;
 use futures::channel::oneshot;
 use parking_lot::Mutex;
 

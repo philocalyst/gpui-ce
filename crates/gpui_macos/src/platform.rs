@@ -1,9 +1,9 @@
 use crate::{
     BoolExt, MacDispatcher, MacDisplay, MacKeyboardLayout, MacKeyboardMapper, MacWindow,
+    error::MacError,
     events::key_to_native, ns_string, pasteboard::Pasteboard, renderer,
     set_active_window_cursor_style,
 };
-use anyhow::{Context as _, anyhow};
 use block::ConcreteBlock;
 use cocoa::{
     appkit::{
@@ -668,33 +668,30 @@ impl Platform for MacPlatform {
         }
     }
 
-    fn register_url_scheme(&self, scheme: &str) -> Task<anyhow::Result<()>> {
+    fn register_url_scheme(&self, scheme: &str) -> Task<Result<()>> {
         // API only available post Monterey
         // https://developer.apple.com/documentation/appkit/nsworkspace/3753004-setdefaultapplicationaturl
         let (done_tx, done_rx) = oneshot::channel();
         if Self::os_version() < Version::new(12, 0, 0) {
-            return Task::ready(Err(anyhow!(
-                "macOS 12.0 or later is required to register URL schemes"
-            )));
+            return Task::ready(Err(MacError::UrlScheme { scheme: scheme.to_string(), message: "macOS 12.0 or later is required to register URL schemes".to_string() }.into()));
         }
 
+        let scheme_name = scheme.to_string();
         let bundle_id = unsafe {
             let bundle: id = msg_send![class!(NSBundle), mainBundle];
             let bundle_id: id = msg_send![bundle, bundleIdentifier];
             if bundle_id == nil {
-                return Task::ready(Err(anyhow!("Can only register URL scheme in bundled apps")));
+                return Task::ready(Err(MacError::UrlScheme { scheme: scheme_name, message: "Can only register URL scheme in bundled apps".to_string() }.into()));
             }
             bundle_id
         };
 
         unsafe {
             let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-            let scheme: id = ns_string(scheme);
+            let native_scheme: id = ns_string(&scheme_name);
             let app: id = msg_send![workspace, URLForApplicationWithBundleIdentifier: bundle_id];
             if app == nil {
-                return Task::ready(Err(anyhow!(
-                    "Cannot register URL scheme until app is installed"
-                )));
+                return Task::ready(Err(MacError::UrlScheme { scheme: scheme_name, message: "Cannot register URL scheme until app is installed".to_string() }.into()));
             }
             let done_tx = Cell::new(Some(done_tx));
             let block = ConcreteBlock::new(move |error: id| {
@@ -702,7 +699,7 @@ impl Platform for MacPlatform {
                     Ok(())
                 } else {
                     let msg: id = msg_send![error, localizedDescription];
-                    Err(anyhow!("Failed to register: {msg:?}"))
+                    Err(MacError::Message { message: format!("Failed to register URL scheme: {msg:?}") }.into())
                 };
 
                 if let Some(done_tx) = done_tx.take() {
@@ -710,11 +707,11 @@ impl Platform for MacPlatform {
                 }
             });
             let block = block.copy();
-            let _: () = msg_send![workspace, setDefaultApplicationAtURL: app toOpenURLsWithScheme: scheme completionHandler: block];
+            let _: () = msg_send![workspace, setDefaultApplicationAtURL: app toOpenURLsWithScheme: native_scheme completionHandler: block];
         }
 
         self.background_executor()
-            .spawn(async { done_rx.await.map_err(|e| anyhow!(e))? })
+            .spawn(async { done_rx.await.map_err(|e| MacError::Message { message: format!("{e}") })? })
     }
 
     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>) {
@@ -877,7 +874,6 @@ impl Platform for MacPlatform {
                     .arg("--")
                     .arg(path)
                     .spawn()
-                    .context("invoking open command")
                     .log_err()
                 {
                     child.status().await.log_err();
@@ -939,7 +935,9 @@ impl Platform for MacPlatform {
     fn app_path(&self) -> Result<PathBuf> {
         unsafe {
             let bundle: id = NSBundle::mainBundle();
-            anyhow::ensure!(!bundle.is_null(), "app is not running inside a bundle");
+            if bundle.is_null() {
+                return Err(MacError::BundleNotRunning.into());
+            }
             Ok(path_from_objc(msg_send![bundle, bundlePath]))
         }
     }
@@ -986,10 +984,13 @@ impl Platform for MacPlatform {
     fn path_for_auxiliary_executable(&self, name: &str) -> Result<PathBuf> {
         unsafe {
             let bundle: id = NSBundle::mainBundle();
-            anyhow::ensure!(!bundle.is_null(), "app is not running inside a bundle");
-            let name = ns_string(name);
-            let url: id = msg_send![bundle, URLForAuxiliaryExecutable: name];
-            anyhow::ensure!(!url.is_null(), "resource not found");
+            if bundle.is_null() {
+                return Err(MacError::BundleNotRunning.into());
+            }
+            let url: id = msg_send![bundle, URLForAuxiliaryExecutable: ns_string(name)];
+            if url.is_null() {
+                return Err(MacError::ResourceNotFound { resource: name.to_string() }.into());
+            }
             ns_url_to_path(url)
         }
     }
@@ -1081,7 +1082,9 @@ impl Platform for MacPlatform {
                     verb = "creating";
                     status = SecItemAdd(attrs.as_concrete_TypeRef(), ptr::null_mut());
                 }
-                anyhow::ensure!(status == errSecSuccess, "{verb} password failed: {status}");
+                if status != errSecSuccess {
+                    return Err(MacError::Security { status, operation: format!("{verb} password failed") }.into());
+                }
             }
             Ok(())
         })
@@ -1108,24 +1111,24 @@ impl Platform for MacPlatform {
                 match status {
                     security::errSecSuccess => {}
                     security::errSecItemNotFound | security::errSecUserCanceled => return Ok(None),
-                    _ => anyhow::bail!("reading password failed: {status}"),
+                    _ => return Err(MacError::Security { status, operation: "reading password failed".into() }.into()),
                 }
 
                 let result = CFType::wrap_under_create_rule(result)
                     .downcast::<CFDictionary>()
-                    .context("keychain item was not a dictionary")?;
+                    .ok_or(MacError::Message { message: "keychain item was not a dictionary".into() })?;
                 let username = result
                     .find(kSecAttrAccount as *const _)
-                    .context("account was missing from keychain item")?;
+                    .ok_or(MacError::Message { message: "account was missing from keychain item".into() })?;
                 let username = CFType::wrap_under_get_rule(*username)
                     .downcast::<CFString>()
-                    .context("account was not a string")?;
+                    .ok_or(MacError::Message { message: "account was not a string".into() })?;
                 let password = result
                     .find(kSecValueData as *const _)
-                    .context("password was missing from keychain item")?;
+                    .ok_or(MacError::Message { message: "password was missing from keychain item".into() })?;
                 let password = CFType::wrap_under_get_rule(*password)
                     .downcast::<CFData>()
-                    .context("password was not a string")?;
+                    .ok_or(MacError::Message { message: "password was not a string".into() })?;
 
                 Ok(Some((username.to_string(), password.bytes().to_vec())))
             }
@@ -1145,7 +1148,9 @@ impl Platform for MacPlatform {
                 query_attrs.set(kSecAttrServer as *const _, url.as_CFTypeRef());
 
                 let status = SecItemDelete(query_attrs.as_concrete_TypeRef());
-                anyhow::ensure!(status == errSecSuccess, "delete password failed: {status}");
+                if status != errSecSuccess {
+                    return Err(MacError::Security { status, operation: "delete password failed".into() }.into());
+                }
             }
             Ok(())
         })
@@ -1367,9 +1372,11 @@ extern "C" fn handle_dock_menu(this: &mut Object, _: Sel, _: id) -> id {
 
 unsafe fn ns_url_to_path(url: id) -> Result<PathBuf> {
     let path: *mut c_char = msg_send![url, fileSystemRepresentation];
-    anyhow::ensure!(!path.is_null(), "url is not a file path: {}", unsafe {
-        CStr::from_ptr(url.absoluteString().UTF8String()).to_string_lossy()
-    });
+    if path.is_null() {
+        return Err(MacError::Message { message: format!("url is not a file path: {}", unsafe {
+            CStr::from_ptr(url.absoluteString().UTF8String()).to_string_lossy()
+        }) }.into());
+    }
     Ok(PathBuf::from(OsStr::from_bytes(unsafe {
         CStr::from_ptr(path).to_bytes()
     })))

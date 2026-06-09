@@ -1,4 +1,4 @@
-use anyhow::{Context as _, anyhow};
+use crate::error::{LinuxError, X11Error};
 use ashpd::WindowIdentifier;
 use calloop::{
     EventLoop, LoopHandle, RegistrationToken,
@@ -307,7 +307,7 @@ impl X11ClientStatePtr {
 pub(crate) struct X11Client(pub(crate) Rc<RefCell<X11ClientState>>);
 
 impl X11Client {
-    pub(crate) fn new() -> anyhow::Result<Self> {
+    pub(crate) fn new() -> crate::error::Result<Self> {
         let event_loop = EventLoop::try_new()?;
 
         let (common, main_receiver) = LinuxCommon::new(event_loop.get_signal());
@@ -341,22 +341,29 @@ impl X11Client {
                     }
                 }
             })
-            .map_err(|err| {
-                anyhow!("Failed to initialize event loop handling of foreground tasks: {err:?}")
-            })?;
+            .map_err(LinuxError::Calloop)?;
 
-        let (xcb_connection, x_root_index) = XCBConnection::connect(None)?;
-        xcb_connection.prefetch_extension_information(xkb::X11_EXTENSION_NAME)?;
-        xcb_connection.prefetch_extension_information(randr::X11_EXTENSION_NAME)?;
-        xcb_connection.prefetch_extension_information(render::X11_EXTENSION_NAME)?;
-        xcb_connection.prefetch_extension_information(xinput::X11_EXTENSION_NAME)?;
+        let (xcb_connection, x_root_index) =
+            XCBConnection::connect(None).map_err(X11Error::Connection)?;
+        xcb_connection
+            .prefetch_extension_information(xkb::X11_EXTENSION_NAME)
+            .map_err(X11Error::Connection)?;
+        xcb_connection
+            .prefetch_extension_information(randr::X11_EXTENSION_NAME)
+            .map_err(X11Error::Connection)?;
+        xcb_connection
+            .prefetch_extension_information(render::X11_EXTENSION_NAME)
+            .map_err(X11Error::Connection)?;
+        xcb_connection
+            .prefetch_extension_information(xinput::X11_EXTENSION_NAME)
+            .map_err(X11Error::Connection)?;
 
         // Announce to X server that XInput up to 2.4 is supported.
         // Version 2.4 is needed for gesture events (GesturePinchBegin/Update/End).
         // The server responds with the highest version it supports; if < 2.4,
         // we must not request gesture event masks in XISelectEvents.
         let xinput_version = get_reply(
-            || "XInput XiQueryVersion failed",
+            "XiQueryVersion",
             xcb_connection.xinput_xi_query_version(2, 4),
         )?;
         assert!(
@@ -376,9 +383,9 @@ impl X11Client {
             current_pointer_device_states(&xcb_connection, &BTreeMap::new()).unwrap_or_default();
 
         let atoms = XcbAtoms::new(&xcb_connection)
-            .context("Failed to get XCB atoms")?
+            .map_err(X11Error::ReplyOrId)?
             .reply()
-            .context("Failed to get XCB atoms")?;
+            .map_err(X11Error::Reply)?;
 
         let root = xcb_connection.setup().roots[0].root;
         let compositor_present = check_compositor_present(&xcb_connection, root);
@@ -392,7 +399,7 @@ impl X11Client {
         );
 
         let xkb = get_reply(
-            || "Failed to initialize XKB extension",
+            "xkb_use_extension",
             xcb_connection
                 .xkb_use_extension(XKB_X11_MIN_MAJOR_XKB_VERSION, XKB_X11_MIN_MINOR_XKB_VERSION),
         )?;
@@ -410,7 +417,7 @@ impl X11Client {
             | xkb::MapPart::VIRTUAL_MODS
             | xkb::MapPart::VIRTUAL_MOD_MAP;
         check_reply(
-            || "Failed to select XKB events",
+            "xkb_select_events",
             xcb_connection.xkb_select_events(
                 xkb::ID::USE_CORE_KBD.into(),
                 0u8.into(),
@@ -441,14 +448,15 @@ impl X11Client {
         let keyboard_layout = LinuxKeyboardLayout::new(layout_name.into());
 
         let resource_database = x11rb::resource_manager::new_from_default(&xcb_connection)
-            .context("Failed to create resource database")?;
+            .map_err(X11Error::Parse)?;
         let scale_factor = get_scale_factor(&xcb_connection, &resource_database, x_root_index);
         let cursor_handle = cursor::Handle::new(&xcb_connection, x_root_index, &resource_database)
-            .context("Failed to initialize cursor theme handler")?
+            .map_err(X11Error::ReplyOrId)?
             .reply()
-            .context("Failed to initialize cursor theme handler")?;
+            .map_err(X11Error::Reply)?;
 
-        let clipboard = Clipboard::new().context("Failed to initialize clipboard")?;
+        let clipboard = Clipboard::new()
+            .map_err(|e| X11Error::Clipboard(e.to_string()))?;
 
         let screen = &xcb_connection.setup().roots[x_root_index];
         let compositor_gpu = detect_compositor_gpu(&xcb_connection, screen);
@@ -480,7 +488,9 @@ impl X11Client {
                     }
                 },
             )
-            .map_err(|err| anyhow!("Failed to initialize X11 event source: {err:?}"))?;
+            .map_err(|err| {
+                LinuxError::Calloop(err)
+            })?;
 
         handle
             .insert_source(XDPEventSource::new(&common.background_executor), {
@@ -505,7 +515,9 @@ impl X11Client {
                     }
                 }
             })
-            .map_err(|err| anyhow!("Failed to initialize XDP event source: {err:?}"))?;
+            .map_err(|err| {
+                LinuxError::Calloop(err)
+            })?;
 
         xcb_flush(&xcb_connection);
 
@@ -946,17 +958,15 @@ impl X11Client {
                     },
                 };
                 let window = self.get_window(event.window)?;
-                window
-                    .set_bounds(bounds)
-                    .context("X11: Failed to set window bounds")
-                    .log_err();
+                if let Err(e) = window.set_bounds(bounds) {
+                    log::warn!("X11: Failed to set window bounds: {e:?}");
+                }
             }
             Event::PropertyNotify(event) => {
                 let window = self.get_window(event.window)?;
-                window
-                    .property_notify(event)
-                    .context("X11: Failed to handle property notify")
-                    .log_err();
+                if let Err(e) = window.property_notify(event) {
+                    log::warn!("X11: Failed to handle property notify: {e:?}");
+                }
             }
             Event::FocusIn(event) => {
                 let window = self.get_window(event.event)?;
@@ -1434,14 +1444,14 @@ impl X11Client {
                 let (mut ximc, mut xim_handler) = state.take_xim()?;
                 drop(state);
                 xim_handler.window = event.event;
-                ximc.forward_event(
+                if let Err(e) = ximc.forward_event(
                     xim_handler.im_id,
                     xim_handler.ic_id,
                     xim::ForwardEventFlag::empty(),
                     &event,
-                )
-                .context("X11: Failed to forward XIM event")
-                .log_err();
+                ) {
+                    log::warn!("X11: Failed to forward XIM event: {e:?}");
+                }
                 let mut state = self.0.borrow_mut();
                 state.restore_xim(ximc, xim_handler);
                 drop(state);
@@ -1583,7 +1593,7 @@ impl LinuxClient for X11Client {
     #[cfg(feature = "screen-capture")]
     fn screen_capture_sources(
         &self,
-    ) -> futures::channel::oneshot::Receiver<anyhow::Result<Vec<Rc<dyn gpui::ScreenCaptureSource>>>>
+    ) -> futures::channel::oneshot::Receiver<crate::error::Result<Vec<Rc<dyn gpui::ScreenCaptureSource>>>>
     {
         gpui::scap_screen_capture::scap_screen_sources(&self.0.borrow().common.foreground_executor)
     }
@@ -1600,7 +1610,7 @@ impl LinuxClient for X11Client {
         &self,
         handle: AnyWindowHandle,
         params: WindowParams,
-    ) -> anyhow::Result<Box<dyn PlatformWindow>> {
+    ) -> crate::error::Result<Box<dyn PlatformWindow>> {
         let mut state = self.0.borrow_mut();
         let parent_window = state
             .keyboard_focused_window
@@ -1609,7 +1619,7 @@ impl LinuxClient for X11Client {
         let x_window = state
             .xcb_connection
             .generate_id()
-            .context("X11: Failed to generate window ID")?;
+            .map_err(X11Error::ReplyOrId)?;
 
         let xcb_connection = state.xcb_connection.clone();
         let client_side_decorations_supported = state.client_side_decorations_supported;
@@ -1749,7 +1759,6 @@ impl LinuxClient for X11Client {
                 clipboard::ClipboardKind::Primary,
                 clipboard::WaitConfig::None,
             )
-            .context("X11 Failed to write to clipboard (primary)")
             .log_with_level(log::Level::Debug);
     }
 
@@ -1762,7 +1771,6 @@ impl LinuxClient for X11Client {
                 clipboard::ClipboardKind::Clipboard,
                 clipboard::WaitConfig::None,
             )
-            .context("X11: Failed to write to clipboard (clipboard)")
             .log_with_level(log::Level::Debug);
         state.clipboard_item.replace(item);
     }
@@ -1772,7 +1780,6 @@ impl LinuxClient for X11Client {
         state
             .clipboard
             .get_any(clipboard::ClipboardKind::Primary)
-            .context("X11: Failed to read from clipboard (primary)")
             .log_with_level(log::Level::Debug)
     }
 
@@ -1789,7 +1796,6 @@ impl LinuxClient for X11Client {
         state
             .clipboard
             .get_any(clipboard::ClipboardKind::Clipboard)
-            .context("X11: Failed to read from clipboard (clipboard)")
             .log_with_level(log::Level::Debug)
     }
 
@@ -1799,9 +1805,8 @@ impl LinuxClient for X11Client {
             .borrow_mut()
             .event_loop
             .take()
-            .context("X11Client::run called but it's already running")
-            .log_err()
         else {
+            log::error!("X11Client::run called but it's already running");
             return;
         };
 
@@ -1880,7 +1885,7 @@ impl X11ClientState {
         let ximc = self
             .ximc
             .take()
-            .ok_or(anyhow!("bug: XIM connection not set"))
+            .ok_or(X11Error::Ime("bug: XIM connection not set".into()))
             .log_err()?;
         if let Some(xim_handler) = self.xim_handler.take() {
             Some((ximc, xim_handler))
@@ -2022,7 +2027,7 @@ impl X11ClientState {
             return *cursor;
         }
 
-        let result = 'outer: {
+        let result: crate::error::Result<xproto::Cursor> = 'outer: {
             let mut errors = String::new();
             let cursor_icon_names = cursor_style_to_icon_names(style);
             for cursor_icon_name in cursor_icon_names {
@@ -2042,39 +2047,41 @@ impl X11ClientState {
                 }
             }
             if errors.is_empty() {
-                Err(anyhow!(
-                    "errors while loading cursor icons {:?}:\n{}",
-                    cursor_icon_names,
-                    errors
-                ))
+                Err(LinuxError::X11(X11Error::Cursor {
+                    requested: format!("{:?}", cursor_icon_names),
+                    fallback: DEFAULT_CURSOR_ICON_NAME.to_string(),
+                }))
             } else {
-                Err(anyhow!("did not find cursor icons {:?}", cursor_icon_names))
+                Err(LinuxError::X11(X11Error::Cursor {
+                    requested: format!("{:?} (errors: {})", cursor_icon_names, errors.trim()),
+                    fallback: DEFAULT_CURSOR_ICON_NAME.to_string(),
+                }))
             }
         };
 
         let cursor = match result {
             Ok(cursor) => Some(cursor),
-            Err(err) => {
-                match self
-                    .cursor_handle
-                    .load_cursor(&self.xcb_connection, DEFAULT_CURSOR_ICON_NAME)
-                {
-                    Ok(default) => {
-                        log_cursor_icon_warning(err.context(format!(
-                            "X11: error loading cursor icon, falling back on default icon '{}'",
-                            DEFAULT_CURSOR_ICON_NAME
-                        )));
-                        Some(default)
+                    Err(err) => {
+                        match self
+                            .cursor_handle
+                            .load_cursor(&self.xcb_connection, DEFAULT_CURSOR_ICON_NAME)
+                        {
+                            Ok(default) => {
+                                log_cursor_icon_warning(format!(
+                                    "X11: error loading cursor icon, falling back on default icon '{}': {}",
+                                    DEFAULT_CURSOR_ICON_NAME, err
+                                ));
+                                Some(default)
+                            }
+                            Err(default_err) => {
+                                log_cursor_icon_warning(format!(
+                                    "X11: error loading default cursor fallback '{}': {}: {}",
+                                    DEFAULT_CURSOR_ICON_NAME, default_err, err
+                                ));
+                                None
+                            }
+                        }
                     }
-                    Err(default_err) => {
-                        log_cursor_icon_warning(err.context(default_err).context(format!(
-                            "X11: error loading default cursor fallback '{}'",
-                            DEFAULT_CURSOR_ICON_NAME
-                        )));
-                        None
-                    }
-                }
-            }
         };
 
         self.cursor_cache.insert(style, cursor);
@@ -2086,7 +2093,10 @@ impl X11ClientState {
             return Some(cursor);
         }
         let cursor = create_invisible_cursor(&self.xcb_connection)
-            .context("X11: error while creating invisible cursor")
+            .map_err(|e| {
+                log::error!("X11: error while creating invisible cursor: {e:?}");
+                e
+            })
             .log_err()?;
         self.invisible_cursor_cache = Some(cursor);
         Some(cursor)
@@ -2510,7 +2520,7 @@ fn make_scroll_wheel_event(
 
 fn create_invisible_cursor(
     connection: &XCBConnection,
-) -> anyhow::Result<crate::linux::x11::client::xproto::Cursor> {
+) -> crate::error::Result<xproto::Cursor> {
     let empty_pixmap = connection.generate_id()?;
     let root = connection.setup().roots[0].root;
     connection.create_pixmap(1, empty_pixmap, root, 1, 1)?;

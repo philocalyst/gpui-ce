@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::error::{WindowsError, Result};
 use collections::HashMap;
 use windows::Win32::UI::{
     Input::KeyboardAndMouse::{

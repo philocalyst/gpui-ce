@@ -5,7 +5,7 @@ use crate::{
     Platform, Point, Render, Result, Size, Task, TestDispatcher, TextSystem, VisualTestPlatform,
     Window, WindowBounds, WindowHandle, WindowOptions, app::GpuiMode,
 };
-use anyhow::anyhow;
+use crate::AppError;
 use image::RgbaImage;
 use std::{future::Future, rc::Rc, sync::Arc, time::Duration};
 
@@ -366,7 +366,7 @@ impl VisualTestAppContext {
             }
 
             if start.elapsed() > timeout {
-                return Err(anyhow!("Timed out waiting for condition"));
+                return Err(AppError::ConditionTimedOut);
             }
 
             self.run_until_parked();

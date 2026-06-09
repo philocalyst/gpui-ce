@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use anyhow::Result;
+use crate::error::{WindowsError, Result};
 use collections::FxHashMap;
 use itertools::Itertools;
 use windows::Win32::{
@@ -151,7 +151,9 @@ fn set_clipboard_bytes<T>(data: &[T], format: u32) -> Result<()> {
     unsafe {
         let global = Owned::new(GlobalAlloc(GMEM_MOVEABLE, std::mem::size_of_val(data))?);
         let ptr = GlobalLock(*global);
-        anyhow::ensure!(!ptr.is_null(), "GlobalLock returned null");
+        if ptr.is_null() {
+            return Err(WindowsError::Clipboard { details: "GlobalLock returned null".into() });
+        }
         std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as _, data.len());
         GlobalUnlock(*global).ok();
         SetClipboardData(format, Some(HANDLE(global.0)))?;

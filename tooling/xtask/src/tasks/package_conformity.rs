@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
+use crate::error::{Result, XtaskError};
 use cargo_toml::{Dependency, Manifest};
 use clap::Parser;
 
@@ -71,5 +71,5 @@ fn read_cargo_toml(path: impl AsRef<Path>) -> Result<Manifest> {
     let path = path.as_ref();
     let cargo_toml_bytes = fs::read(path)?;
     Manifest::from_slice(&cargo_toml_bytes)
-        .with_context(|| format!("reading Cargo.toml at {path:?}"))
+        .map_err(|e| XtaskError::Message { details: format!("reading Cargo.toml at {path:?}: {e}") })
 }

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::error::{MacError, Result};
 use core_graphics::display::CGDirectDisplayID;
 use dispatch2::{
     _dispatch_source_type_data_add, DispatchObject, DispatchQueue, DispatchRetained, DispatchSource,
@@ -92,7 +92,7 @@ mod sys {
     //! Apple docs: [CVDisplayLink](https://developer.apple.com/documentation/corevideo/cvdisplaylinkoutputcallback?language=objc)
     #![allow(dead_code, non_upper_case_globals)]
 
-    use anyhow::Result;
+    use crate::error::{MacError, Result};
     use core_graphics::display::CGDirectDisplayID;
     use foreign_types::{ForeignType, foreign_type};
     use std::{
@@ -225,19 +225,21 @@ mod sys {
                 let mut display_link: *mut CVDisplayLink = 0 as _;
 
                 let code = CVDisplayLinkCreateWithActiveCGDisplays(&mut display_link);
-                anyhow::ensure!(code == 0, "could not create display link, code: {}", code);
+                if code != 0 {
+                    return Err(MacError::CoreVideo { code, operation: "CVDisplayLinkCreateWithActiveCGDisplays" });
+                }
 
                 let mut display_link = DisplayLink::from_ptr(display_link);
 
                 let code = CVDisplayLinkSetOutputCallback(&mut display_link, callback, user_info);
-                anyhow::ensure!(code == 0, "could not set output callback, code: {}", code);
+                if code != 0 {
+                    return Err(MacError::CoreVideo { code, operation: "CVDisplayLinkSetOutputCallback" });
+                }
 
                 let code = CVDisplayLinkSetCurrentCGDisplay(&mut display_link, display_id);
-                anyhow::ensure!(
-                    code == 0,
-                    "could not assign display to display link, code: {}",
-                    code
-                );
+                if code != 0 {
+                    return Err(MacError::CoreVideo { code, operation: "CVDisplayLinkSetCurrentCGDisplay" });
+                }
 
                 Ok(display_link)
             }
@@ -249,7 +251,9 @@ mod sys {
         pub unsafe fn start(&mut self) -> Result<()> {
             unsafe {
                 let code = CVDisplayLinkStart(self);
-                anyhow::ensure!(code == 0, "could not start display link, code: {}", code);
+                if code != 0 {
+                    return Err(MacError::CoreVideo { code, operation: "CVDisplayLinkStart" });
+                }
                 Ok(())
             }
         }
@@ -258,7 +262,9 @@ mod sys {
         pub unsafe fn stop(&mut self) -> Result<()> {
             unsafe {
                 let code = CVDisplayLinkStop(self);
-                anyhow::ensure!(code == 0, "could not stop display link, code: {}", code);
+                if code != 0 {
+                    return Err(MacError::CoreVideo { code, operation: "CVDisplayLinkStop" });
+                }
                 Ok(())
             }
         }

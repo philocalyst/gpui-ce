@@ -1,13 +1,13 @@
 use crate::dispatcher::WebDispatcher;
 use crate::display::WebDisplay;
+use crate::error::WebError;
 use crate::keyboard::WebKeyboardLayout;
 use crate::window::WebWindow;
-use anyhow::Result;
 use futures::channel::oneshot;
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DummyKeyboardMapper,
     ForegroundExecutor, Keymap, Menu, MenuItem, PathPromptOptions, Platform, PlatformDisplay,
-    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Task,
+    PlatformError, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, Task,
     ThermalState, WindowAppearance, WindowParams,
 };
 use gpui_wgpu::WgpuContext;
@@ -165,13 +165,14 @@ impl Platform for WebPlatform {
         &self,
         handle: AnyWindowHandle,
         params: WindowParams,
-    ) -> anyhow::Result<Box<dyn PlatformWindow>> {
+    ) -> gpui::platform::Result<Box<dyn PlatformWindow>> {
         let context_ref = self.wgpu_context.borrow();
         let context = context_ref.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("WebGPU context not initialized. Was Platform::run() called?")
+            PlatformError::Other(Arc::new(Box::new(WebError::FeatureNotAvailable { feature: "WebGPU context" })))
         })?;
 
-        let window = WebWindow::new(handle, params, context, self.browser_window.clone())?;
+        let window = WebWindow::new(handle, params, context, self.browser_window.clone())
+            .map_err(|e| PlatformError::Other(Arc::new(Box::new(e))))?;
         *self.active_window.borrow_mut() = Some(handle);
         Ok(Box::new(window))
     }
@@ -200,18 +201,16 @@ impl Platform for WebPlatform {
         self.callbacks.borrow_mut().open_urls = Some(callback);
     }
 
-    fn register_url_scheme(&self, _url: &str) -> Task<Result<()>> {
+    fn register_url_scheme(&self, _url: &str) -> Task<gpui::platform::Result<()>> {
         Task::ready(Ok(()))
     }
 
     fn prompt_for_paths(
         &self,
         _options: PathPromptOptions,
-    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+    ) -> oneshot::Receiver<gpui::platform::Result<Option<Vec<PathBuf>>>> {
         let (tx, rx) = oneshot::channel();
-        tx.send(Err(anyhow::anyhow!(
-            "prompt_for_paths is not supported on the web"
-        )))
+        tx.send(Err(PlatformError::Other(Arc::new(Box::new(WebError::FeatureNotAvailable { feature: "file prompts" })))))
         .ok();
         rx
     }
@@ -220,12 +219,10 @@ impl Platform for WebPlatform {
         &self,
         _directory: &Path,
         _suggested_name: Option<&str>,
-    ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
+    ) -> oneshot::Receiver<gpui::platform::Result<Option<PathBuf>>> {
         let (sender, receiver) = oneshot::channel();
         sender
-            .send(Err(anyhow::anyhow!(
-                "prompt_for_new_path is not supported on the web"
-            )))
+            .send(Err(PlatformError::Other(Arc::new(Box::new(WebError::FeatureNotAvailable { feature: "file prompts" })))))
             .ok();
         receiver
     }
@@ -274,14 +271,12 @@ impl Platform for WebPlatform {
         "Web"
     }
 
-    fn app_path(&self) -> Result<PathBuf> {
-        Err(anyhow::anyhow!("app_path is not available on the web"))
+    fn app_path(&self) -> gpui::platform::Result<PathBuf> {
+        Err(PlatformError::Other(Arc::new(Box::new(WebError::FeatureNotAvailable { feature: "app_path" }))))
     }
 
-    fn path_for_auxiliary_executable(&self, _name: &str) -> Result<PathBuf> {
-        Err(anyhow::anyhow!(
-            "path_for_auxiliary_executable is not available on the web"
-        ))
+    fn path_for_auxiliary_executable(&self, _name: &str) -> gpui::platform::Result<PathBuf> {
+        Err(PlatformError::Other(Arc::new(Box::new(WebError::FeatureNotAvailable { feature: "path_for_auxiliary_executable" }))))
     }
 
     fn set_cursor_style(&self, style: CursorStyle) {
@@ -336,20 +331,16 @@ impl Platform for WebPlatform {
 
     fn write_to_clipboard(&self, _item: ClipboardItem) {}
 
-    fn write_credentials(&self, _url: &str, _username: &str, _password: &[u8]) -> Task<Result<()>> {
-        Task::ready(Err(anyhow::anyhow!(
-            "credential storage is not available on the web"
-        )))
+    fn write_credentials(&self, _url: &str, _username: &str, _password: &[u8]) -> Task<gpui::platform::Result<()>> {
+        Task::ready(Err(PlatformError::Other(Arc::new(Box::new(WebError::FeatureNotAvailable { feature: "credential storage" })))))
     }
 
-    fn read_credentials(&self, _url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
+    fn read_credentials(&self, _url: &str) -> Task<gpui::platform::Result<Option<(String, Vec<u8>)>>> {
         Task::ready(Ok(None))
     }
 
-    fn delete_credentials(&self, _url: &str) -> Task<Result<()>> {
-        Task::ready(Err(anyhow::anyhow!(
-            "credential storage is not available on the web"
-        )))
+    fn delete_credentials(&self, _url: &str) -> Task<gpui::platform::Result<()>> {
+        Task::ready(Err(PlatformError::Other(Arc::new(Box::new(WebError::FeatureNotAvailable { feature: "credential storage" })))))
     }
 
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout> {

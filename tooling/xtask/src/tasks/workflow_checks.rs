@@ -3,11 +3,12 @@ mod check_run_patterns;
 use std::{fs, path::PathBuf};
 
 use annotate_snippets::Renderer;
-use anyhow::{Result, anyhow};
 use clap::Parser;
 use itertools::{Either, Itertools};
 use serde_yaml::Value;
 use strum::IntoEnumIterator;
+
+use crate::error::{self, XtaskError};
 
 use crate::tasks::{
     workflow_checks::check_run_patterns::{
@@ -21,7 +22,7 @@ pub use check_run_patterns::validate_run_command;
 #[derive(Default, Parser)]
 pub struct WorkflowValidationArgs {}
 
-pub fn validate(_: WorkflowValidationArgs) -> Result<()> {
+pub fn validate(_: WorkflowValidationArgs) -> error::Result<()> {
     let (parsing_errors, file_errors): (Vec<_>, Vec<_>) = get_all_workflow_files()
         .map(check_workflow)
         .flat_map(Result::err)
@@ -31,10 +32,7 @@ pub fn validate(_: WorkflowValidationArgs) -> Result<()> {
         });
 
     if !parsing_errors.is_empty() {
-        Err(anyhow!(
-            "Failed to read or parse some workflow files: {}",
-            parsing_errors.into_iter().join("\n")
-        ))
+        Err(XtaskError::WorkflowParseSummary { details: parsing_errors.into_iter().join("\n") })
     } else if !file_errors.is_empty() {
         let errors: Vec<_> = file_errors
             .iter()
@@ -45,14 +43,14 @@ pub fn validate(_: WorkflowValidationArgs) -> Result<()> {
             Renderer::styled().decor_style(annotate_snippets::renderer::DecorStyle::Ascii);
         println!("{}", renderer.render(errors.as_slice()));
 
-        Err(anyhow!("Workflow checks failed!"))
+        Err(XtaskError::WorkflowCheckFailed)
     } else {
         Ok(())
     }
 }
 
 enum WorkflowError {
-    ParseError(anyhow::Error),
+    ParseError(XtaskError),
     ValidationError(Box<WorkflowValidationError>),
 }
 
@@ -72,16 +70,16 @@ fn get_all_workflow_files() -> impl Iterator<Item = PathBuf> {
         })
 }
 
-fn check_workflow(workflow_file_path: PathBuf) -> Result<(), WorkflowError> {
+fn check_workflow(workflow_file_path: PathBuf) -> std::result::Result<(), WorkflowError> {
     fn collect_errors(
-        iter: impl Iterator<Item = Result<(), Vec<RunValidationError>>>,
-    ) -> Result<(), Vec<RunValidationError>> {
-        Some(iter.flat_map(Result::err).flatten().collect::<Vec<_>>())
+        iter: impl Iterator<Item = std::result::Result<(), Vec<RunValidationError>>>,
+    ) -> std::result::Result<(), Vec<RunValidationError>> {
+        Some(iter.flat_map(std::result::Result::err).flatten().collect::<Vec<_>>())
             .filter(|errors| !errors.is_empty())
             .map_or(Ok(()), Err)
     }
 
-    fn check_recursive(key: &Value, value: &Value) -> Result<(), Vec<RunValidationError>> {
+    fn check_recursive(key: &Value, value: &Value) -> std::result::Result<(), Vec<RunValidationError>> {
         match value {
             Value::Mapping(mapping) => collect_errors(
                 mapping
@@ -110,7 +108,7 @@ fn check_workflow(workflow_file_path: PathBuf) -> Result<(), WorkflowError> {
     })
 }
 
-fn check_string(key: &Value, value: &str) -> Result<(), RunValidationError> {
+fn check_string(key: &Value, value: &str) -> std::result::Result<(), RunValidationError> {
     match key {
         Value::String(key) if key == "run" => validate_run_command(value),
         _ => Ok(()),
