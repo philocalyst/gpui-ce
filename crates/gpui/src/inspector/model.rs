@@ -524,11 +524,14 @@ pub enum InputKind {
 pub struct ActionRecord {
     /// `Action::name()`.
     pub name: &'static str,
-    /// Whether a listener handled it.
+    /// Whether a listener handled it: an action listener ran and didn't call
+    /// `cx.propagate()` (bubble-phase listeners stop propagation by default).
     pub handled: bool,
-    /// The keystrokes that produced it, when dispatched from a binding.
+    /// The keystrokes of the binding that produced it, e.g. `ctrl-k ctrl-t`,
+    /// when dispatched from a binding.
     pub keystrokes: Option<SharedString>,
-    /// The key context that the winning binding matched, if any.
+    /// The context predicate of that binding as written, e.g. `Editor && mode == full`.
+    /// `None` for bindings without one and for actions not dispatched from a binding.
     pub context: Option<SharedString>,
 }
 
@@ -550,21 +553,29 @@ pub struct InputRecord {
     pub position: Option<Point<Pixels>>,
     /// Keystroke, for key events.
     pub keystroke: Option<Keystroke>,
-    /// Elements under the pointer, topmost first (from the rendered frame).
+    /// Elements under the pointer, topmost first, from the latest captured
+    /// element tree (at most 8; empty before a tree was captured).
     pub hit_path: SmallVec<[ElementKey; 8]>,
-    /// Key context stack at dispatch time, outermost first (key events).
+    /// Key context stack of the dispatch target, outermost first: the focused
+    /// element for key events, the target element for [`InputKind::Action`].
     pub context_stack: SmallVec<[KeyContext; 4]>,
-    /// Actions dispatched while handling this event.
+    /// Actions dispatched while handling this event, in the order they completed.
     pub actions: SmallVec<[ActionRecord; 1]>,
-    /// Whether any listener handled the event / stopped propagation.
+    /// Whether the event was handled, as reported back to the platform: a
+    /// listener stopped propagation (action handlers do by default, and the
+    /// keymap does while it holds a pending multi-stroke prefix) or called
+    /// `window.prevent_default()`. For [`InputKind::Action`], whether the
+    /// action was handled.
     pub handled: bool,
-    /// Handling time.
+    /// Handling time; for coalesced moves, the total over all merged events.
     pub duration: Duration,
-    /// Whether handling it invalidated the window.
+    /// Whether handling it invalidated the window (a view notified or the
+    /// window refreshed before dispatch returned).
     pub caused_redraw: bool,
     /// Number of events merged into this record (mouse moves).
     pub coalesced: u32,
-    /// The event was consumed by the inspector (picking or its own dock).
+    /// The event was consumed by the inspector: pointer events inside its dock
+    /// or while picking, key events and actions targeting an element inside it.
     pub inspector: bool,
 }
 
