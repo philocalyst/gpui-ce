@@ -7,6 +7,7 @@
 //! bottom-up tables, insights, audit findings, trace exports and style
 //! patches.
 
+pub mod flame;
 pub mod format;
 pub mod stats;
 pub mod why_size;
