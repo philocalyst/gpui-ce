@@ -645,7 +645,8 @@ pub struct BindingCandidate {
     /// The binding's context predicate as written, if any.
     pub predicate: Option<SharedString>,
     /// Depth in the context stack at which the predicate matched
-    /// (0 = innermost), when it matched.
+    /// (0 = innermost), when it matched. Bindings without a predicate match
+    /// at 0, where the keymap ranks them.
     pub matched_depth: Option<usize>,
     /// Why it wins or loses.
     pub verdict: BindingVerdict,
@@ -666,13 +667,15 @@ pub enum BindingVerdict {
     },
     /// The keystrokes match but the context predicate is false here.
     ContextMismatch,
-    /// Matches, but the action is `NoAction` / unbound, which disables lower bindings.
+    /// Matches, but the action is `NoAction` / `Unbind`, which disables the
+    /// bindings it outranks (they are [`Self::Shadowed`] by it).
     Disabled,
     /// The input is a prefix of this binding: GPUI would wait for more keys.
     Pending,
-    /// Matches and outranks the winner, but nothing on the focus path (and no
-    /// global listener) handles its action, so dispatch falls through to the
-    /// next binding.
+    /// Matches, but nothing on the focus path (and no global listener)
+    /// handles its action, so dispatch falls through to the next binding.
+    /// Applies to the matches ranked above the winner, or to every match when
+    /// nothing wins; matches ranked below the winner are [`Self::Shadowed`].
     Unhandled,
 }
 
