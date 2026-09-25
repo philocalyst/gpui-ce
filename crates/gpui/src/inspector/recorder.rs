@@ -180,6 +180,7 @@ struct Splice {
 /// A view that re-rendered recently; the overlay flashes its bounds.
 pub(crate) struct Flash {
     pub(crate) bounds: Bounds<Pixels>,
+    /// When the view rendered, on the capture's clock.
     pub(crate) started: Instant,
 }
 
@@ -192,7 +193,10 @@ pub(crate) struct Recorder {
     pub(crate) mode: RecordMode,
     /// Set while the inspector draws its own root and overlays.
     pub(crate) suspended: bool,
+    /// When the frame began, on the system clock its phases are timed with.
     frame_start: Instant,
+    /// When the frame began, on the capture's clock.
+    frame_at: Instant,
     clock: PhaseClock,
 
     // The tree under construction.
@@ -271,6 +275,7 @@ impl Default for Recorder {
             mode: RecordMode::Off,
             suspended: false,
             frame_start: now,
+            frame_at: now,
             clock: PhaseClock::new(now),
             elements: Vec::new(),
             prepainted: Vec::new(),
@@ -329,12 +334,14 @@ impl Default for Recorder {
 const MAX_ELEMENT_LABELS: usize = 4096;
 
 impl Recorder {
-    /// Starts recording a frame.
-    pub(crate) fn begin_frame(&mut self, mode: RecordMode, now: Instant) {
+    /// Starts recording a frame that begins `now` (on the system clock) and
+    /// `at` (on the capture's clock).
+    pub(crate) fn begin_frame(&mut self, mode: RecordMode, now: Instant, at: Instant) {
         self.mode = mode;
         self.frame_serial += 1;
         self.suspended = false;
         self.frame_start = now;
+        self.frame_at = at;
         self.clock = PhaseClock::new(now);
         let capacity = self.elements.capacity().max(self.element_count as usize);
         self.elements = Vec::with_capacity(if mode.builds_tree() { capacity } else { 0 });
@@ -366,6 +373,11 @@ impl Recorder {
 
     pub(crate) fn frame_start(&self) -> Instant {
         self.frame_start
+    }
+
+    /// When the frame began, on the capture's clock.
+    pub(crate) fn frame_at(&self) -> Instant {
+        self.frame_at
     }
 
     /// Whether element records are being built right now.

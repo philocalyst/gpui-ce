@@ -443,7 +443,8 @@ impl SceneStats {
 pub struct FrameRecord {
     /// Monotonic frame number for the window.
     pub id: u64,
-    /// Start time as an offset from the capture epoch.
+    /// Start time as an offset from the capture epoch, on the capture's
+    /// clock ([`crate::inspector::InspectorCapture::now`]).
     pub start: Duration,
     /// Viewport size when drawn (excluding the dock).
     pub viewport: Size<Pixels>,
@@ -567,7 +568,8 @@ pub struct ActionRecord {
 pub struct InputRecord {
     /// Monotonic sequence number.
     pub seq: u64,
-    /// Offset from the capture epoch.
+    /// Offset from the capture epoch, on the capture's clock
+    /// ([`crate::inspector::InspectorCapture::now`]).
     pub at: Duration,
     /// Frame drawn after this input (the frame whose `input` range contains `seq`),
     /// filled in when that frame completes.

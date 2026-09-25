@@ -6,9 +6,7 @@ use super::{
     bottom_up::{Scope, cell, columns, compare, max_self, scope_frames, table_column},
     export::PERFETTO_URL,
     flame::{BarDetails, FlameData, Geometry, bar_color, bar_details, kind_name, legend},
-    model::{
-        StatsLine, capture_now, cause_lines, frame_title, grade_pill, input_summary, shown_frame,
-    },
+    model::{StatsLine, cause_lines, frame_title, grade_pill, input_summary, shown_frame},
     over_budget_badge,
     phase_bar::{PhaseBar, PhaseBarView},
 };
@@ -235,7 +233,7 @@ impl FramesLens {
             capture,
             frame,
             pinned,
-            now: capture_now(capture),
+            now: capture.now(),
             budget,
             stats,
             rows,

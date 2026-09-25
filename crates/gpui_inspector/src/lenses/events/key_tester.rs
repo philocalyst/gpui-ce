@@ -24,7 +24,6 @@ use gpui::{
     prelude::*,
     px,
 };
-use std::time::Instant;
 
 /// What the key tester tells the Events lens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,13 +96,13 @@ impl KeyTester {
             return;
         }
         cx.stop_propagation();
+        // The executor's clock, like the timer that ends GPUI's wait for more keys.
+        let now = cx.background_executor().now();
         let app_focus = self.app_focus.as_ref().and_then(WeakFocusHandle::upgrade);
         let app: &gpui::App = cx;
-        let press = self
-            .sequence
-            .press(event.keystroke.clone(), Instant::now(), |keys| {
-                window.inspector_resolve_keystrokes_for(keys, app_focus.as_ref(), app)
-            });
+        let press = self.sequence.press(event.keystroke.clone(), now, |keys| {
+            window.inspector_resolve_keystrokes_for(keys, app_focus.as_ref(), app)
+        });
         if press == Press::Leave {
             cx.emit(KeyTesterEvent::Left);
         }

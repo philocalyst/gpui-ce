@@ -18,16 +18,6 @@ use gpui::{
 };
 use std::{collections::VecDeque, ops::Range, panic::Location, time::Duration};
 
-/// "Now" on the capture's clock: the wall time since its epoch, or the end of
-/// the latest recorded frame if that is later (fixtures replay frames
-/// stamped in the future of a freshly made capture).
-pub(crate) fn capture_now(capture: &InspectorCapture) -> Duration {
-    let latest = capture
-        .latest_frame()
-        .map_or(Duration::ZERO, stats::frame_end);
-    capture.epoch().elapsed().max(latest)
-}
-
 /// The numbers at the top of the lens, over the whole ring.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StatsLine {
@@ -400,7 +390,7 @@ mod tests {
     fn stats_line_reads_fps_percentiles_and_overhead() {
         let capture = steady_frames(120, 4.0);
         let line = StatsLine::of(&capture);
-        assert_eq!(line.fps_text(capture_now(&capture)), "60");
+        assert_eq!(line.fps_text(capture.now()), "60");
         assert_eq!(line.p95, ms(4.0));
         assert_eq!(line.over_budget_text(), "all within budget");
         assert_eq!(line.grade_shares(), [1.0, 0.0, 0.0]);

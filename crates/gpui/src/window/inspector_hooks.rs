@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::inspector::{
-    CaptureLevel, CauseKind, ElementDetails, ElementFlags, ElementKey, FrameRecord,
+    CaptureClock, CaptureLevel, CauseKind, ElementDetails, ElementFlags, ElementKey, FrameRecord,
     InspectorCapture, InspectorEvent, OverlayModes, SceneStats, SelectedStyle, ViewOutcome,
     causes::{self, CauseLog},
     recorder::{FLASH_DURATION, Flash, Phase, RecordMode, RecordSlot},
@@ -99,10 +99,13 @@ impl Window {
             return;
         };
         let now = Instant::now();
+        // When, on the capture's clock (the executor's: a test's fake time).
+        let at = capture.clock.instant();
+        let offset = capture.clock.offset(at);
         let mode = RecordMode::for_level(capture.config.level, capture.overlays_need_tree());
         let recording = capture.is_recording();
         let recorder = &mut capture.recorder;
-        recorder.begin_frame(mode, now);
+        recorder.begin_frame(mode, now, at);
 
         self.invalidator
             .drain_causes(&mut recorder.pending_causes, &mut recorder.pending_notifies);
@@ -118,7 +121,7 @@ impl Window {
             recorder.pending_causes.push(causes::PendingCause {
                 kind: CauseKind::Resize,
                 site: None,
-                at: now,
+                at,
                 from_inspector: false,
                 entity: None,
             });
@@ -126,7 +129,7 @@ impl Window {
         recorder.last_viewport = Some(viewport);
         recorder.causes = causes::resolve_causes(
             &mut recorder.pending_causes,
-            now,
+            at,
             &recorder.inspector_entities,
             &recorder.view_types,
         );
@@ -139,8 +142,7 @@ impl Window {
                 &mut capture.notify_stats,
                 &mut recorder.notify_bucket,
                 &mut recorder.pending_notifies,
-                capture.epoch,
-                now,
+                offset,
             );
         }
 
@@ -225,11 +227,11 @@ impl Window {
         let frame = capture.next_frame_id;
         let tree = capture.recorder.finish_tree(frame);
         let flashing = capture.overlay.modes.contains(OverlayModes::PAINT_FLASH);
+        let now = capture.clock.instant();
         let recorder = &mut capture.recorder;
-        let now = Instant::now();
-        recorder
-            .flashes
-            .retain(|flash| flashing && now.duration_since(flash.started) < FLASH_DURATION);
+        recorder.flashes.retain(|flash| {
+            flashing && now.saturating_duration_since(flash.started) < FLASH_DURATION
+        });
         if flashing
             && !recorder.inspector_only
             && let Some(tree) = tree
@@ -273,7 +275,7 @@ impl Window {
             .filter(|_| capture.config.level >= CaptureLevel::Tree);
         let frame = FrameRecord {
             id: 0,
-            start: frame_start.saturating_duration_since(capture.epoch),
+            start: capture.clock.offset(recorder.frame_at()),
             viewport: recorder.last_viewport.unwrap_or_default(),
             timings,
             causes: mem::take(&mut recorder.causes),
@@ -283,7 +285,7 @@ impl Window {
             element_count: recorder.element_count(),
             tree,
             input,
-            foreground: foreground_slices(recorder, capture.epoch),
+            foreground: foreground_slices(recorder, &capture.clock),
             inspector_only: recorder.inspector_only,
         };
         recorder.mode = RecordMode::Off;
@@ -607,8 +609,10 @@ impl Window {
 
     /// Creates the capture when the inspector opens.
     pub(super) fn open_inspector_capture(&mut self, cx: &mut App) {
-        let capture = InspectorCapture::new(self.inspector_dock);
-        let log = CauseLog::new(capture.epoch());
+        let executor = cx.background_executor().clone();
+        let clock = CaptureClock::new(Rc::new(move || executor.now()));
+        let log = CauseLog::new(clock.clone());
+        let capture = InspectorCapture::new(self.inspector_dock, clock);
         self.reset_app_replay();
         self.inspector_capture = Some(Box::new(capture));
         self.invalidator.set_cause_log(Some(Box::new(log)));
@@ -715,10 +719,12 @@ fn input_time(capture: &InspectorCapture, seqs: &Range<u64>) -> Duration {
 }
 
 /// Main-thread work since the previous frame, from the profiler journal.
+/// The journal reads the system clock, which is the capture's clock outside
+/// tests with fake time.
 #[cfg(feature = "profiler")]
 fn foreground_slices(
     recorder: &mut crate::inspector::recorder::Recorder,
-    epoch: Instant,
+    clock: &CaptureClock,
 ) -> Vec<crate::inspector::ForegroundSlice> {
     use crate::inspector::{ForegroundKind, ForegroundSlice};
     use crate::profiler::journal::{ForegroundEvent, ForegroundJournalEntry};
@@ -766,7 +772,7 @@ fn foreground_slices(
             };
             Some(ForegroundSlice {
                 kind,
-                start: event.start_time().saturating_duration_since(epoch),
+                start: clock.offset(event.start_time()),
                 duration,
             })
         })
@@ -777,7 +783,7 @@ fn foreground_slices(
 #[cfg(not(feature = "profiler"))]
 fn foreground_slices(
     _recorder: &mut crate::inspector::recorder::Recorder,
-    _epoch: Instant,
+    _clock: &CaptureClock,
 ) -> Vec<crate::inspector::ForegroundSlice> {
     Vec::new()
 }

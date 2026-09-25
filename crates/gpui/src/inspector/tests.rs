@@ -11,7 +11,7 @@ use crate::{
     proptest::{collection::vec, prelude::*},
     px, red, size, uniform_list,
 };
-use std::{cell::RefCell, panic::Location, rc::Rc, sync::Arc};
+use std::{cell::RefCell, panic::Location, rc::Rc, sync::Arc, time::Duration};
 
 // Harness.
 
@@ -998,7 +998,7 @@ fn input_ranges_are_assigned_to_frames(cx: &mut TestAppContext) {
         context_stack: Default::default(),
         actions: Default::default(),
         handled: false,
-        duration: std::time::Duration::from_millis(2),
+        duration: Duration::from_millis(2),
         caused_redraw: true,
         coalesced: 1,
         inspector: false,
@@ -1010,7 +1010,7 @@ fn input_ranges_are_assigned_to_frames(cx: &mut TestAppContext) {
     redraw(cx);
     let frame = latest_frame(cx);
     assert_eq!(frame.input, 0..2);
-    assert_eq!(frame.timings.input, std::time::Duration::from_millis(4));
+    assert_eq!(frame.timings.input, Duration::from_millis(4));
     let frames: Vec<_> = read(cx, |capture| {
         capture.input().iter().map(|record| record.frame).collect()
     });
@@ -1044,6 +1044,40 @@ fn capture_levels(cx: &mut TestAppContext) {
     assert!(frame.tree.is_none());
     assert!(frame.element_count >= 5, "elements are still counted");
     assert!(!frame.views.is_empty());
+}
+
+#[gpui::test]
+fn the_capture_clock_is_the_executors(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    let opened = read(cx, |capture| capture.now());
+    assert_eq!(latest_frame(cx).start, opened, "fake time stood still");
+
+    cx.executor().advance_clock(Duration::from_millis(2_500));
+    let now = read(cx, |capture| capture.now());
+    assert_eq!(now, opened + Duration::from_millis(2_500));
+    view.update(cx, |_, cx| cx.notify());
+    let frame = latest_frame(cx);
+    assert_eq!(frame.start, now, "frames start on the same clock");
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.simulate_click(point(px(20.), px(30.)), Modifiers::none());
+    let clicked = read(cx, |capture| capture.input().back().unwrap().at);
+    assert_eq!(clicked, now + Duration::from_millis(400));
+
+    // An installed fixture goes on from the end of its recording.
+    let mut fixture = InspectorCapture::new_for_test();
+    let mut recorded = frame.clone();
+    recorded.start = Duration::from_secs(12);
+    recorded.timings.total = Duration::from_millis(5);
+    fixture.push_frame_for_test(recorded);
+    cx.update(|window, _| window.replace_inspector_capture_for_test(fixture));
+    let end = Duration::from_millis(12_005);
+    assert_eq!(read(cx, |capture| capture.now()), end);
+    cx.executor().advance_clock(Duration::from_secs(3));
+    assert_eq!(
+        read(cx, |capture| capture.now()),
+        end + Duration::from_secs(3)
+    );
 }
 
 // Details.
@@ -1406,6 +1440,50 @@ fn paint_flash_fades_in_inspector_only_frames(cx: &mut TestAppContext) {
             .iter()
             .all(|cause| cause.kind == CauseKind::Animation)
     );
+}
+
+#[gpui::test]
+fn paint_flashes_fade_on_the_executor_clock(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    write(cx, |capture| {
+        capture.overlay_mut().modes = OverlayModes::PAINT_FLASH
+    });
+    view.update(cx, |_, cx| cx.notify());
+    let tree = latest_tree(cx);
+    let view_bounds = tree.get(tree.roots[0]).unwrap().bounds;
+    // The flash over the view that rendered (nothing else paints there): its
+    // opacity, if painted.
+    let flash = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            let bounds = view_bounds.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .iter()
+                .find(|quad| quad.bounds == bounds)
+                .and_then(|quad| quad.background.as_solid())
+                .map(|color| color.alpha)
+        })
+    };
+    let fresh = flash(cx).expect("the flash is painted");
+    assert!((fresh - 0.45).abs() < 1e-6, "{fresh}");
+
+    // Half the fade later, on fake time, exactly half as opaque.
+    cx.executor().advance_clock(recorder::FLASH_DURATION / 2);
+    redraw_inspector_only(cx);
+    let half = flash(cx).expect("still fading");
+    assert!((half - 0.225).abs() < 1e-6, "{half}");
+
+    cx.executor().advance_clock(recorder::FLASH_DURATION / 2);
+    redraw_inspector_only(cx);
+    assert_eq!(flash(cx), None, "faded out");
+}
+
+/// Draws the frame a fading paint flash asks for: the inspector's alone.
+fn redraw_inspector_only(cx: &mut VisualTestContext) {
+    assert!(cx.update(|window, _| window.invalidator.is_dirty()));
+    cx.update(|_, _| {});
+    assert!(latest_frame(cx).inspector_only);
 }
 
 // Lifetime, freezing, dock.
@@ -1878,8 +1956,7 @@ fn replay_keeps_deferred_draws_and_tooltips(cx: &mut TestAppContext) {
     let dock = dock.borrow().clone().expect("the dock rendered");
     let trigger = record(&latest_tree(cx), "trigger").bounds;
     cx.simulate_mouse_move(trigger.center(), None, Modifiers::none());
-    cx.executor()
-        .advance_clock(std::time::Duration::from_millis(600));
+    cx.executor().advance_clock(Duration::from_millis(600));
     cx.run_until_parked();
     let before = drawn(cx);
     let tooltip = before.tooltip.expect("the tooltip shows");
@@ -2066,8 +2143,7 @@ fn holding_from_the_keyboard_keeps_the_hover_state_on_screen(cx: &mut TestAppCon
     };
     let button = record(&latest_tree(cx), "button").bounds;
     cx.simulate_mouse_move(button.center(), None, Modifiers::none());
-    cx.executor()
-        .advance_clock(std::time::Duration::from_millis(600));
+    cx.executor().advance_clock(Duration::from_millis(600));
     cx.run_until_parked();
     let hovered = drawn(cx);
     assert!(hovered.tooltip.is_some(), "the tooltip shows");

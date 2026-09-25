@@ -45,7 +45,7 @@ impl InputInFlight {
         Self {
             record: InputRecord {
                 seq: 0,
-                at: started.saturating_duration_since(capture.epoch()),
+                at: capture.now(),
                 frame: None,
                 kind,
                 detail,

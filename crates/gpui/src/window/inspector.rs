@@ -30,7 +30,9 @@ impl Window {
     /// the current dock), so inspector UI can be rendered against fixtures.
     /// Does nothing while the inspector is closed.
     /// The installed capture replays: live frames and input are not added to
-    /// it, while overlays, picking and overrides keep working against it.
+    /// it, while overlays, picking and overrides keep working against it. Its
+    /// clock goes on from the end of its recording on the window's clock
+    /// (see [`crate::inspector::InspectorCapture::now`]).
     #[cfg(any(test, feature = "test-support"))]
     pub fn replace_inspector_capture_for_test(
         &mut self,
@@ -38,6 +40,7 @@ impl Window {
     ) {
         if let Some(current) = self.inspector_capture.as_deref_mut() {
             capture.set_dock(current.dock());
+            capture.continue_on(&current.clock);
             capture.replaying = true;
             *current = capture;
             self.refresh_for(RefreshReason::Inspector);

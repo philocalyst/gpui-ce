@@ -5,7 +5,7 @@
 //! leased out for an update. The window drains it when it starts drawing.
 
 use super::{
-    capture::NotifyStats,
+    capture::{CaptureClock, NotifyStats},
     model::{CauseKind, RenderCause},
 };
 use crate::EntityId;
@@ -26,6 +26,7 @@ const MAX_PENDING_CAUSES: usize = 256;
 pub(crate) struct PendingCause {
     pub(crate) kind: CauseKind,
     pub(crate) site: Option<&'static Location<'static>>,
+    /// When it happened, on the capture's clock.
     pub(crate) at: Instant,
     pub(crate) from_inspector: bool,
     /// The notified entity, for notifies and animation frames.
@@ -36,22 +37,23 @@ pub(crate) struct PendingCause {
 #[derive(Default)]
 pub(crate) struct NotifyDelta {
     total: u64,
-    /// `(bucket index since the capture epoch, count)`, oldest first.
+    /// `(bucket index on the capture's time line, count)`, oldest first.
     buckets: SmallVec<[(u64, u32); 2]>,
     last_site: Option<&'static Location<'static>>,
 }
 
 /// Causes and notifies recorded since the window last drew.
 pub(crate) struct CauseLog {
-    epoch: Instant,
+    clock: CaptureClock,
     causes: Vec<PendingCause>,
     notifies: FxHashMap<EntityId, NotifyDelta>,
 }
 
 impl CauseLog {
-    pub(crate) fn new(epoch: Instant) -> Self {
+    /// A log that times causes on the capture's `clock`.
+    pub(crate) fn new(clock: CaptureClock) -> Self {
         Self {
-            epoch,
+            clock,
             causes: Vec::new(),
             notifies: FxHashMap::default(),
         }
@@ -84,7 +86,7 @@ impl CauseLog {
             self.causes.push(PendingCause {
                 kind,
                 site,
-                at: Instant::now(),
+                at: self.clock.instant(),
                 from_inspector,
                 entity,
             });
@@ -101,7 +103,7 @@ impl CauseLog {
         site: &'static Location<'static>,
     ) {
         self.push_cause(kind, Some(site), false, Some(entity));
-        let bucket = bucket_index(self.epoch, Instant::now());
+        let bucket = bucket_index(self.clock.now());
         let delta = self.notifies.entry(entity).or_default();
         delta.total += 1;
         delta.last_site = Some(site);
@@ -160,16 +162,16 @@ pub(crate) fn resolve_causes(
 }
 
 /// Folds drained notifies into per-entity statistics whose last bucket is the
-/// one containing `now`. Buckets of entities that were not notified still
-/// advance, so every entity's sparkline ends at the same instant.
+/// one containing `now` (an offset on the capture's time line). Buckets of
+/// entities that were not notified still advance, so every entity's
+/// sparkline ends at the same instant.
 pub(crate) fn fold_notify_stats(
     stats: &mut FxHashMap<EntityId, NotifyStats>,
     current_bucket: &mut u64,
     deltas: &mut FxHashMap<EntityId, NotifyDelta>,
-    epoch: Instant,
-    now: Instant,
+    now: Duration,
 ) {
-    let now_bucket = bucket_index(epoch, now);
+    let now_bucket = bucket_index(now);
     if now_bucket > *current_bucket {
         let elapsed = (now_bucket - *current_bucket).min(NOTIFY_BUCKETS as u64) as usize;
         for entity_stats in stats.values_mut() {
@@ -206,8 +208,9 @@ fn advance_buckets(buckets: &mut VecDeque<u32>, elapsed: usize) {
     }
 }
 
-fn bucket_index(epoch: Instant, at: Instant) -> u64 {
-    (at.saturating_duration_since(epoch).as_millis() / NOTIFY_BUCKET.as_millis()) as u64
+/// The bucket containing `at`, an offset on the capture's time line.
+fn bucket_index(at: Duration) -> u64 {
+    (at.as_millis() / NOTIFY_BUCKET.as_millis()) as u64
 }
 
 #[cfg(test)]
@@ -220,7 +223,7 @@ mod tests {
 
     #[test]
     fn identical_causes_merge() {
-        let mut log = CauseLog::new(Instant::now());
+        let mut log = CauseLog::new(CaptureClock::new(std::rc::Rc::new(Instant::now)));
         let site = Location::caller();
         log.push(CauseKind::Refresh, Some(site), false);
         log.push(CauseKind::Refresh, Some(site), false);
@@ -232,7 +235,6 @@ mod tests {
 
     #[test]
     fn notify_buckets_end_at_now() {
-        let epoch = Instant::now();
         let mut stats = FxHashMap::default();
         let mut current = 0;
         let mut deltas = FxHashMap::default();
@@ -245,13 +247,7 @@ mod tests {
                 last_site: Some(site),
             },
         );
-        fold_notify_stats(
-            &mut stats,
-            &mut current,
-            &mut deltas,
-            epoch,
-            epoch + NOTIFY_BUCKET * 4,
-        );
+        fold_notify_stats(&mut stats, &mut current, &mut deltas, NOTIFY_BUCKET * 4);
         let entity_stats = &stats[&entity(1)];
         assert_eq!(entity_stats.total, 5);
         assert_eq!(entity_stats.last_site, Some(site));
@@ -261,13 +257,7 @@ mod tests {
         );
 
         // Two buckets later, with no notifies, the sparkline shifts left.
-        fold_notify_stats(
-            &mut stats,
-            &mut current,
-            &mut deltas,
-            epoch,
-            epoch + NOTIFY_BUCKET * 6,
-        );
+        fold_notify_stats(&mut stats, &mut current, &mut deltas, NOTIFY_BUCKET * 6);
         assert_eq!(
             stats[&entity(1)]
                 .buckets
@@ -280,7 +270,6 @@ mod tests {
 
     #[test]
     fn notify_buckets_are_capped() {
-        let epoch = Instant::now();
         let mut stats = FxHashMap::default();
         let mut current = 0;
         let mut deltas = FxHashMap::default();
@@ -292,14 +281,8 @@ mod tests {
                 last_site: None,
             },
         );
-        fold_notify_stats(&mut stats, &mut current, &mut deltas, epoch, epoch);
-        fold_notify_stats(
-            &mut stats,
-            &mut current,
-            &mut deltas,
-            epoch,
-            epoch + NOTIFY_BUCKET * 500,
-        );
+        fold_notify_stats(&mut stats, &mut current, &mut deltas, Duration::ZERO);
+        fold_notify_stats(&mut stats, &mut current, &mut deltas, NOTIFY_BUCKET * 500);
         let buckets = &stats[&entity(1)].buckets;
         assert_eq!(buckets.len(), NOTIFY_BUCKETS);
         assert!(buckets.iter().all(|&count| count == 0));

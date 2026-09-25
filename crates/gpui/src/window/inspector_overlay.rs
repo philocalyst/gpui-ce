@@ -281,13 +281,13 @@ impl OverlayPass {
                 add_target(overlay.hovered, false);
             }
         }
-        let now = Instant::now();
+        let now = capture.clock.instant();
         let flashes = recorder
             .flashes
             .iter()
             .map(|flash| {
-                let progress =
-                    now.duration_since(flash.started).as_secs_f32() / FLASH_DURATION.as_secs_f32();
+                let progress = now.saturating_duration_since(flash.started).as_secs_f32()
+                    / FLASH_DURATION.as_secs_f32();
                 (flash.bounds, 0.45 * (1. - progress).clamp(0., 1.))
             })
             .collect();

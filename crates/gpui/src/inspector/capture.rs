@@ -210,9 +210,66 @@ pub struct SelectedStyle {
     pub base: Box<StyleRefinement>,
 }
 
+/// The capture's time line: offsets from its epoch, read from the app's
+/// executor clock, so a test's fake time drives everything the inspector
+/// shows that depends on time (ages, idleness, fading overlays). Durations
+/// the inspector measures (phases, renders, input handling) use the system
+/// clock instead: they are costs, which fake time cannot measure.
+#[derive(Clone)]
+pub(crate) struct CaptureClock {
+    now: Rc<dyn Fn() -> Instant>,
+    epoch: Instant,
+    /// Where the time line stood at `epoch`: zero for a live capture, the
+    /// end of the recording for a fixture that goes on from where it ended.
+    base: Duration,
+}
+
+impl CaptureClock {
+    /// A time line starting now on the clock `now` reads.
+    pub(crate) fn new(now: Rc<dyn Fn() -> Instant>) -> Self {
+        let epoch = now();
+        Self {
+            now,
+            epoch,
+            base: Duration::ZERO,
+        }
+    }
+
+    /// A time line on the system clock, for captures built without an app.
+    #[cfg(any(test, feature = "test-support"))]
+    fn system() -> Self {
+        Self::new(Rc::new(Instant::now))
+    }
+
+    /// A time line on the same clock that stands at `base` now.
+    #[cfg(any(test, feature = "test-support"))]
+    fn continuing_at(&self, base: Duration) -> Self {
+        Self {
+            now: self.now.clone(),
+            epoch: (self.now)(),
+            base,
+        }
+    }
+
+    /// The clock's current instant.
+    pub(crate) fn instant(&self) -> Instant {
+        (self.now)()
+    }
+
+    /// `at`, read from this clock, as an offset on the time line.
+    pub(crate) fn offset(&self, at: Instant) -> Duration {
+        self.base + at.saturating_duration_since(self.epoch)
+    }
+
+    /// Now, as an offset on the time line.
+    pub(crate) fn now(&self) -> Duration {
+        self.offset(self.instant())
+    }
+}
+
 /// The recording for one window.
 pub struct InspectorCapture {
-    pub(crate) epoch: Instant,
+    pub(crate) clock: CaptureClock,
     pub(crate) config: CaptureConfig,
     pub(crate) frames: VecDeque<FrameRecord>,
     pub(crate) input: VecDeque<InputRecord>,
@@ -240,9 +297,9 @@ pub struct InspectorCapture {
 }
 
 impl InspectorCapture {
-    pub(crate) fn new(dock: InspectorDock) -> Self {
+    pub(crate) fn new(dock: InspectorDock, clock: CaptureClock) -> Self {
         Self {
-            epoch: Instant::now(),
+            clock,
             config: CaptureConfig::default(),
             frames: VecDeque::new(),
             input: VecDeque::new(),
@@ -358,10 +415,26 @@ impl InspectorCapture {
         seq
     }
 
-    /// Records fabricated frames and input, for tests of code that reads a capture.
+    /// Records fabricated frames and input, for tests of code that reads a
+    /// capture. Its clock is the system clock until the capture is installed
+    /// with `Window::replace_inspector_capture_for_test`.
     #[cfg(any(test, feature = "test-support"))]
     pub fn new_for_test() -> Self {
-        Self::new(InspectorDock::default())
+        Self::new(InspectorDock::default(), CaptureClock::system())
+    }
+
+    /// Makes this fixture's recording end now on `clock`: [`Self::now`]
+    /// reads the end of its latest frame or input record, then moves on with
+    /// `clock` (a test's fake time).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn continue_on(&mut self, clock: &CaptureClock) {
+        let latest_frame = self
+            .frames
+            .back()
+            .map(|frame| frame.start + frame.timings.total);
+        let latest_input = self.input.back().map(|record| record.at + record.duration);
+        let recorded_until = latest_frame.max(latest_input).unwrap_or_default();
+        self.clock = clock.continuing_at(recorded_until);
     }
 
     /// Appends a fabricated frame, as if the window had drawn it. Returns its id.
@@ -447,9 +520,14 @@ impl InspectorCapture {
         &self.notify_stats
     }
 
-    /// Time origin of every `Duration` offset in the capture.
-    pub fn epoch(&self) -> Instant {
-        self.epoch
+    /// Now, as an offset from the capture epoch: the time line of every
+    /// offset the capture records ([`FrameRecord::start`],
+    /// [`InputRecord::at`]...). It reads the app's executor clock, so a
+    /// test's fake time drives it; a fixture installed with
+    /// `Window::replace_inspector_capture_for_test` goes on from the end of
+    /// its recording.
+    pub fn now(&self) -> Duration {
+        self.clock.now()
     }
 
     /// Bumped whenever new app data lands (a frame or input record). The UI
