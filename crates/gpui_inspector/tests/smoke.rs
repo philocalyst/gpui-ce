@@ -30,7 +30,7 @@ fn loupe_docks_and_renders() {
         .unwrap();
     cx.update_window(window.into(), |_, window, cx| {
         window.toggle_inspector(cx);
-        window.draw(cx);
+        window.draw(cx).clear(cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -44,9 +44,32 @@ fn loupe_docks_and_renders() {
     let dock_pixel = image.get_pixel(900 * scale, 300 * scale);
     assert_eq!(app_pixel.0, [255, 255, 255, 255]);
     assert_eq!(dock_pixel.0, [0x16, 0x17, 0x1a, 255]);
-    cx.update_window(window.into(), |_, window, _| {
+    cx.update_window(window.into(), |_, window, cx| {
         assert_eq!(window.app_bounds().size.width, px(440.));
         assert!(window.inspector_capture().is_some());
+        assert_painted_text(window);
+
+        // A second frame reuses the cached Loupe view; its text must still be reported.
+        window.refresh();
+        window.draw(cx).clear(cx);
+        assert_painted_text(window);
     })
     .unwrap();
+}
+
+fn assert_painted_text(window: &Window) {
+    let text = window.painted_text();
+    let hello = text
+        .iter()
+        .find(|line| line.text == "Hello")
+        .expect("Hello painted");
+    assert_eq!(hello.font_family.as_ref(), ".SystemUIFont");
+    assert!(hello.bounds.origin.x >= px(16.) && hello.bounds.right() < px(440.));
+    assert!(!hello.is_clipped());
+    let loupe = text
+        .iter()
+        .find(|line| line.text == "Loupe")
+        .expect("Loupe painted");
+    assert!(loupe.bounds.origin.x >= px(440.));
+    assert_eq!(loupe.font_family.as_ref(), gpui_inspector::UI_FONT);
 }

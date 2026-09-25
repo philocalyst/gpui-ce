@@ -1066,6 +1066,40 @@ pub(crate) struct DeferredDraw {
     paint_range: Range<PaintIndex>,
 }
 
+/// A line of text painted during a frame, as reported by [`Window::painted_text`].
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaintedText {
+    /// The text of the line (all wrapped rows of it).
+    pub text: SharedString,
+    /// The line's bounds in window coordinates, covering every wrapped row.
+    pub bounds: Bounds<Pixels>,
+    /// Family of the line's first run, as requested by the element (virtual
+    /// families such as `.SystemUIFont` are reported unresolved).
+    pub font_family: SharedString,
+    /// Font size.
+    pub font_size: Pixels,
+    /// Weight of the font the line's first run was shaped with.
+    pub font_weight: crate::FontWeight,
+    /// Color of the line's first run.
+    pub color: Hsla,
+    /// The content mask the line was painted under; text outside it is clipped.
+    pub clip: Bounds<Pixels>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl PaintedText {
+    /// The part of the line that is actually visible.
+    pub fn visible_bounds(&self) -> Bounds<Pixels> {
+        self.bounds.intersect(&self.clip)
+    }
+
+    /// Whether part of the line is hidden by its clip.
+    pub fn is_clipped(&self) -> bool {
+        self.visible_bounds() != self.bounds
+    }
+}
+
 pub(crate) struct Frame {
     pub(crate) focus: Option<FocusId>,
     pub(crate) window_active: bool,
@@ -1082,6 +1116,8 @@ pub(crate) struct Frame {
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) painted_text: Vec<PaintedText>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1108,6 +1144,8 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+    #[cfg(any(test, feature = "test-support"))]
+    painted_text_index: usize,
 }
 
 impl Frame {
@@ -1129,6 +1167,8 @@ impl Frame {
 
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds: FxHashMap::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            painted_text: Vec::new(),
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             next_inspector_instance_ids: FxHashMap::default(),
@@ -1157,6 +1197,7 @@ impl Frame {
         #[cfg(any(test, feature = "test-support"))]
         {
             self.debug_bounds.clear();
+            self.painted_text.clear();
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -2583,6 +2624,19 @@ impl Window {
         self.rendered_frame.scene.quads.clone()
     }
 
+    /// Every line of text painted in the most recently rendered frame, in paint
+    /// order, with the font it was shaped in and the clip it was drawn under.
+    /// Lets tests find, assert on and click text without rasterizing.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_text(&self) -> &[PaintedText] {
+        &self.rendered_frame.painted_text
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn record_painted_text(&mut self, text: PaintedText) {
+        self.next_frame.painted_text.push(text);
+    }
+
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);
@@ -3601,6 +3655,8 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
+            #[cfg(any(test, feature = "test-support"))]
+            painted_text_index: self.next_frame.painted_text.len(),
         }
     }
 
@@ -3632,6 +3688,12 @@ impl Window {
         self.next_frame.tab_stops.replay(
             &self.rendered_frame.tab_stops.insertion_history
                 [range.start.tab_handle_index..range.end.tab_handle_index],
+        );
+
+        #[cfg(any(test, feature = "test-support"))]
+        self.next_frame.painted_text.extend_from_slice(
+            &self.rendered_frame.painted_text
+                [range.start.painted_text_index..range.end.painted_text_index],
         );
 
         self.text_system

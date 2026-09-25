@@ -101,6 +101,16 @@ impl ShapedLine {
             cx,
         )?;
 
+        #[cfg(any(test, feature = "test-support"))]
+        record_painted_text(
+            &self.text,
+            Bounds::new(origin, size(self.layout.width, line_height)),
+            &self.layout,
+            &self.decoration_runs,
+            window,
+            cx,
+        );
+
         Ok(())
     }
 
@@ -307,6 +317,16 @@ impl WrappedLine {
             cx,
         )?;
 
+        #[cfg(any(test, feature = "test-support"))]
+        record_painted_text(
+            &self.text,
+            Bounds::new(origin, self.layout.size(line_height)),
+            &self.layout.unwrapped_layout,
+            &self.decoration_runs,
+            window,
+            cx,
+        );
+
         Ok(())
     }
 
@@ -339,6 +359,33 @@ impl WrappedLine {
 
         Ok(())
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn record_painted_text(
+    text: &SharedString,
+    bounds: Bounds<Pixels>,
+    layout: &LineLayout,
+    decoration_runs: &[DecorationRun],
+    window: &mut Window,
+    cx: &App,
+) {
+    let font = layout
+        .runs
+        .first()
+        .and_then(|run| cx.text_system().get_font_for_id(run.font_id));
+    window.record_painted_text(crate::PaintedText {
+        text: text.clone(),
+        bounds,
+        font_family: font
+            .as_ref()
+            .map(|font| font.family.clone())
+            .unwrap_or_default(),
+        font_size: layout.font_size,
+        font_weight: font.map(|font| font.weight).unwrap_or_default(),
+        color: decoration_runs.first().map_or(black(), |run| run.color),
+        clip: window.content_mask().bounds,
+    });
 }
 
 fn paint_line(
