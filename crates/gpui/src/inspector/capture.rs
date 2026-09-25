@@ -336,6 +336,12 @@ impl InspectorCapture {
         key
     }
 
+    /// Sets fabricated notify statistics for an entity.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_notify_stats_for_test(&mut self, entity: crate::EntityId, stats: NotifyStats) {
+        self.notify_stats.insert(entity, stats);
+    }
+
     /// Recorded frames, oldest first.
     pub fn frames(&self) -> &VecDeque<FrameRecord> {
         &self.frames

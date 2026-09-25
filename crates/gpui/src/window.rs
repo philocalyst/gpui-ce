@@ -2631,6 +2631,14 @@ impl Window {
         self.next_frame.painted_text.push(text);
     }
 
+    /// Bounds of the element tagged with `.debug_selector(|| selector)` in the
+    /// most recently rendered frame. Elements of cached views that were reused
+    /// rather than repainted are not recorded; refresh the window first.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn debug_bounds(&self, selector: &str) -> Option<Bounds<Pixels>> {
+        self.rendered_frame.debug_bounds.get(selector).copied()
+    }
+
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);
@@ -6910,6 +6918,24 @@ impl Window {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn inspector_capture_mut(&mut self) -> Option<&mut crate::inspector::InspectorCapture> {
         self.inspector_capture.as_deref_mut()
+    }
+
+    /// Replaces the open inspector's recording with a fabricated one (keeping
+    /// the current dock), so inspector UI can be rendered against fixtures.
+    /// Does nothing while the inspector is closed.
+    #[cfg(all(
+        any(feature = "inspector", debug_assertions),
+        any(test, feature = "test-support")
+    ))]
+    pub fn replace_inspector_capture_for_test(
+        &mut self,
+        mut capture: crate::inspector::InspectorCapture,
+    ) {
+        if let Some(current) = self.inspector_capture.as_deref_mut() {
+            capture.set_dock(current.dock());
+            *current = capture;
+            self.refresh();
+        }
     }
 
     /// The part of the window the app draws into: the whole viewport, minus
