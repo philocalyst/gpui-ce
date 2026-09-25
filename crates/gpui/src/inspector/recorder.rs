@@ -205,6 +205,8 @@ pub(crate) struct Recorder {
     paint_counter: u32,
     element_count: u32,
     pub(crate) hitbox_owners: Vec<(HitboxId, ElementIndex)>,
+    /// Scratch for finishing the tree, reused across frames.
+    scratch: TreeScratch,
 
     // Everything else recorded for the frame.
     views: Vec<ViewSpan>,
@@ -265,6 +267,7 @@ impl Default for Recorder {
             paint_counter: 0,
             element_count: 0,
             hitbox_owners: Vec::new(),
+            scratch: TreeScratch::default(),
             views: Vec::new(),
             open_views: Vec::new(),
             causes: Vec::new(),
@@ -697,9 +700,8 @@ impl Recorder {
             return None;
         }
         self.order_reused_deferred();
-        let remap = self.prune_unprepainted();
-        if let Some(remap) = &remap {
-            self.remap_frame_indices(remap);
+        if self.prune_unprepainted() {
+            self.remap_frame_indices();
         }
         let mut tree = ElementTree {
             frame,
@@ -731,13 +733,15 @@ impl Recorder {
         }
     }
 
-    /// Removes records whose element was never prepainted, returning the
-    /// old-to-new index map when anything was removed.
-    fn prune_unprepainted(&mut self) -> Option<Vec<ElementIndex>> {
+    /// Removes records whose element was never prepainted, leaving the
+    /// old-to-new index map in the scratch. Returns whether anything moved.
+    fn prune_unprepainted(&mut self) -> bool {
         if self.prepainted.iter().all(|&prepainted| prepainted) {
-            return None;
+            return false;
         }
-        let mut remap = vec![REMOVED; self.elements.len()];
+        let remap = &mut self.scratch.remap;
+        remap.clear();
+        remap.resize(self.elements.len(), REMOVED);
         let mut write = 0;
         for read in 0..self.elements.len() {
             if !self.prepainted[read] {
@@ -753,10 +757,11 @@ impl Recorder {
             write += 1;
         }
         self.elements.truncate(write);
-        Some(remap)
+        true
     }
 
-    fn remap_frame_indices(&mut self, remap: &[ElementIndex]) {
+    fn remap_frame_indices(&mut self) {
+        let remap = &self.scratch.remap;
         let map = |ix: ElementIndex| Some(remap[ix as usize]).filter(|&ix| ix != REMOVED);
         self.deferred_from = mem::take(&mut self.deferred_from)
             .into_iter()
@@ -796,7 +801,9 @@ impl Recorder {
         };
 
         // The innermost cached view that contains each record.
-        let mut owner: Vec<Option<usize>> = vec![None; records.len()];
+        let owner = &mut self.scratch.owner;
+        owner.clear();
+        owner.resize(records.len(), None);
         for ix in 0..records.len() {
             owner[ix] = logical_parent(ix as ElementIndex)
                 .and_then(|parent| slot_of.get(&parent).copied().or(owner[parent as usize]));
@@ -815,14 +822,16 @@ impl Recorder {
             }
         }
 
-        let mut local = vec![u32::MAX; records.len()];
+        let local = &mut self.scratch.local;
+        local.clear();
+        local.resize(records.len(), u32::MAX);
         for (slot, members) in members.into_iter().enumerate() {
             let (global_id, view) = &self.fresh_cached_views[slot];
             for (position, &ix) in members.iter().enumerate() {
                 local[ix as usize] = position as u32;
             }
             let subtree =
-                CachedSubtree::from_members(records, &members, *view, &local, logical_parent);
+                CachedSubtree::from_members(records, &members, *view, local, logical_parent);
             for &ix in &members {
                 local[ix as usize] = u32::MAX;
             }
@@ -868,6 +877,18 @@ impl Recorder {
 }
 
 const REMOVED: ElementIndex = ElementIndex::MAX;
+
+/// Buffers used while finishing a tree, kept to avoid reallocating them
+/// every frame.
+#[derive(Default)]
+struct TreeScratch {
+    /// Old-to-new record indices after pruning.
+    remap: Vec<ElementIndex>,
+    /// Per record, the innermost cached view (slot) that contains it.
+    owner: Vec<Option<usize>>,
+    /// Per record, its index within the cached subtree being stored.
+    local: Vec<u32>,
+}
 
 impl CachedSubtree {
     fn from_members(
