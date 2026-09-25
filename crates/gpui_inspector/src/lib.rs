@@ -6,6 +6,7 @@
 //! [`gpui::inspector::InspectorCapture`], which records frames, element trees
 //! and input only while Loupe is open. See `DESIGN.md` for the architecture.
 
+pub mod analysis;
 mod commands;
 mod lenses;
 mod loupe;
