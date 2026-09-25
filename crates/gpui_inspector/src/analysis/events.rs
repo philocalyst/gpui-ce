@@ -374,7 +374,8 @@ pub fn record_sentence(record: &InputRecord, target: Option<&str>) -> Sentence {
             .code(context_path(&record.context_stack));
     }
 
-    let took = format::duration(record.duration);
+    // A no-break space keeps the number with its unit when the sentence wraps.
+    let took = format::duration(record.duration).replace(' ', "\u{a0}");
     let outcome = match record.kind {
         InputKind::MouseMove if record.coalesced > 1 => format!(" · {took} in total"),
         InputKind::MouseMove => format!(" · {took}"),
@@ -577,14 +578,14 @@ mod tests {
         record.duration = Duration::from_micros(400);
         assert_eq!(
             record_sentence(&record, None).to_string(),
-            "`ctrl-k` → `workspace::OpenPalette` in `Workspace > Pane` · handled in 400 µs"
+            "`ctrl-k` → `workspace::OpenPalette` in `Workspace > Pane` · handled in 400\u{a0}µs"
         );
 
         let mut unhandled = with_action(key(1, "ctrl-u"), "mail::Orphan", false);
         contexts(&mut unhandled, &["Editor"]);
         assert_eq!(
             record_sentence(&unhandled, None).to_string(),
-            "`ctrl-u` → no handler for `mail::Orphan` in `Editor` · not handled (80 µs)"
+            "`ctrl-u` → no handler for `mail::Orphan` in `Editor` · not handled (80\u{a0}µs)"
         );
 
         let mut pending = key(2, "ctrl-k");
@@ -592,7 +593,7 @@ mod tests {
         pending.handled = true;
         assert_eq!(
             record_sentence(&pending, None).to_string(),
-            "`ctrl-k` → waiting for the next key of a longer binding · handled in 80 µs"
+            "`ctrl-k` → waiting for the next key of a longer binding · handled in 80\u{a0}µs"
         );
 
         let typed = InputRecord {
@@ -624,7 +625,7 @@ mod tests {
         let record = with_action(click(0), "inbox::OpenIssue", true);
         assert_eq!(
             record_sentence(&record, Some("div#row-3")).to_string(),
-            "Left ×1 at (120, 44) on `div#row-3` → `inbox::OpenIssue` · handled in 80 µs"
+            "Left ×1 at (120, 44) on `div#row-3` → `inbox::OpenIssue` · handled in 80\u{a0}µs"
         );
 
         let mut moves = blank(1, InputKind::MouseMove);
@@ -633,7 +634,7 @@ mod tests {
         moves.coalesced = 12;
         assert_eq!(
             record_sentence(&moves, Some("IssueList")).to_string(),
-            "12 moves to (300, 400) over `IssueList` · 80 µs in total"
+            "12 moves to (300, 400) over `IssueList` · 80\u{a0}µs in total"
         );
         moves.coalesced = 1;
         assert!(
@@ -645,7 +646,7 @@ mod tests {
         assert!(
             record_sentence(&unhandled, None)
                 .to_string()
-                .ends_with("· not handled (80 µs)")
+                .ends_with("· not handled (80\u{a0}µs)")
         );
     }
 
@@ -656,7 +657,7 @@ mod tests {
         contexts(&mut record, &["Workspace", "Pane"]);
         assert_eq!(
             record_sentence(&record, None).to_string(),
-            "`mail::Compose` dispatched in `Workspace > Pane` · handled in 80 µs"
+            "`mail::Compose` dispatched in `Workspace > Pane` · handled in 80\u{a0}µs"
         );
         record.handled = false;
         assert!(

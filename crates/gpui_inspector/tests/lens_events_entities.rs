@@ -784,6 +784,16 @@ fn the_key_tester_explains_keys_without_dispatching_anything() {
     harness.type_keys("escape");
     harness.assert_text_visible("Press keys to see what they do here…");
 
+    // Clicking anything else stops listening, even what takes no focus: a
+    // lens tab hides the tester, and Loupe's own keys work again.
+    harness.click_selector("events-key-tester");
+    harness.assert_text_visible("Listening… press keys");
+    harness.click_text("Frames");
+    assert_eq!(harness.state(|state| state.lens()), Lens::Frames);
+    harness.type_keys("alt-3");
+    assert_eq!(harness.state(|state| state.lens()), Lens::Events);
+    harness.assert_text_visible("Press keys to see what they do here…");
+
     // Real dispatch agrees with every verdict.
     mail.focus_editor();
     let mut expected = Vec::new();

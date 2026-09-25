@@ -166,8 +166,12 @@ impl KeyTester {
                     cx.notify();
                 }),
             )
+            // A click anywhere else stops listening, even on something that
+            // takes no focus (a lens tab that hides the tester, say): drop the
+            // focus so whatever was clicked, or Loupe itself, can take it.
             .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                 if this.focus.is_focused(window) {
+                    window.blur(cx);
                     cx.notify();
                 }
             }))
