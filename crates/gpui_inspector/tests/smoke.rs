@@ -2,6 +2,7 @@ use gpui::{
     AppContext as _, Context, HeadlessAppContext, IntoElement, ParentElement as _, Render,
     Styled as _, Window, div, px, rgb, size,
 };
+use gpui_inspector::theme::{Density, Theme};
 use gpui_wgpu::{CosmicTextSystem, WgpuHeadlessRenderer};
 use std::sync::Arc;
 
@@ -30,7 +31,7 @@ fn loupe_docks_and_renders() {
         .unwrap();
     cx.update_window(window.into(), |_, window, cx| {
         window.toggle_inspector(cx);
-        window.draw(cx);
+        window.draw(cx).clear(cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -38,12 +39,23 @@ fn loupe_docks_and_renders() {
     let out = std::env::var("LOUPE_SHOTS").unwrap_or_else(|_| "target/loupe-shots".into());
     std::fs::create_dir_all(&out).unwrap();
     image.save(format!("{out}/smoke.png")).unwrap();
-    // The dock is on the right: its background differs from the app's white.
+    // The dock is on the right: its chrome (here the status bar, in the
+    // light theme the test window asks for) differs from the app's white.
     let scale = image.width() / 1000;
     let app_pixel = image.get_pixel(100 * scale, 300 * scale);
-    let dock_pixel = image.get_pixel(900 * scale, 300 * scale);
+    let dock_pixel = image.get_pixel(445 * scale, 590 * scale);
     assert_eq!(app_pixel.0, [255, 255, 255, 255]);
-    assert_eq!(dock_pixel.0, [0x16, 0x17, 0x1a, 255]);
+    let surface = gpui::hsla_to_rgba(Theme::get(false, Density::Compact).colors.surface);
+    let channel = |value: f32| (value * 255.).round() as u8;
+    assert_eq!(
+        dock_pixel.0,
+        [
+            channel(surface.red),
+            channel(surface.green),
+            channel(surface.blue),
+            255
+        ]
+    );
     cx.update_window(window.into(), |_, window, cx| {
         assert_eq!(window.app_bounds().size.width, px(440.));
         assert!(window.inspector_capture().is_some());
@@ -51,7 +63,7 @@ fn loupe_docks_and_renders() {
 
         // A second frame reuses the cached Loupe view; its text must still be reported.
         window.refresh();
-        window.draw(cx);
+        window.draw(cx).clear(cx);
         assert_painted_text(window);
     })
     .unwrap();
@@ -66,10 +78,10 @@ fn assert_painted_text(window: &Window) {
     assert_eq!(hello.font_family.as_ref(), ".SystemUIFont");
     assert!(hello.bounds.origin.x >= px(16.) && hello.bounds.right() < px(440.));
     assert!(!hello.is_clipped());
-    let loupe = text
+    let freeze = text
         .iter()
-        .find(|line| line.text == "Loupe")
-        .expect("Loupe painted");
-    assert!(loupe.bounds.origin.x >= px(440.));
-    assert_eq!(loupe.font_family.as_ref(), gpui_inspector::UI_FONT);
+        .find(|line| line.text == "Freeze")
+        .expect("Loupe's toolbar painted");
+    assert!(freeze.bounds.origin.x >= px(440.));
+    assert_eq!(freeze.font_family.as_ref(), gpui_inspector::UI_FONT);
 }

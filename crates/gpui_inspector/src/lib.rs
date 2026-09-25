@@ -15,6 +15,10 @@ mod state;
 pub mod theme;
 pub mod widgets;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixtures;
+#[cfg(any(test, feature = "test-support"))]
+pub mod harness;
 
 use gpui::{
     App, AppContext as _, IntoElement as _, KeyBinding, StyleRefinement, Styled as _, actions,
