@@ -22,7 +22,7 @@ use gpui_elements::editable_text::{
 pub const PIXELS_PER_STEP: f32 = 2.;
 
 /// The value after scrubbing `dx` from `start`: one `step` per
-/// [`PIXELS_PER_STEP`] pixels, ×10 with shift, ×0.1 with alt, snapped to the
+/// `PIXELS_PER_STEP` pixels, ×10 with shift, ×0.1 with alt, snapped to the
 /// finer of the two steps.
 pub fn scrub_value(start: f32, dx: Pixels, step: f32, modifiers: Modifiers) -> f32 {
     let scaled = step * step_scale(modifiers);
