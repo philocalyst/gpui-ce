@@ -114,6 +114,10 @@ pub(crate) fn health(counts: &Counts, elements: usize, frames: usize) -> String 
         )
     } else if counts.info > 0 {
         "Nothing broken, a few notes".to_string()
+    } else if frames == 0 {
+        "Nothing recorded yet: the checks run as the app draws".to_string()
+    } else if elements == 0 {
+        format!("Nothing to fix in {}", plural(frames, "frame", "frames"))
     } else {
         format!(
             "Nothing to fix: {} and {} pass every check",
@@ -290,6 +294,14 @@ mod tests {
         assert_eq!(
             health(&Counts::default(), 1_284, 1),
             "Nothing to fix: 1,284 elements and 1 frame pass every check"
+        );
+        assert_eq!(
+            health(&Counts::default(), 0, 0),
+            "Nothing recorded yet: the checks run as the app draws"
+        );
+        assert_eq!(
+            health(&Counts::default(), 0, 3),
+            "Nothing to fix in 3 frames"
         );
         assert_eq!(Filter::Only(Severity::Warning).label(&counts), "Warnings 3");
         assert_eq!(Filter::All.label(&counts), "All 5");

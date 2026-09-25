@@ -290,6 +290,11 @@ fn the_flame_chart_zooms_pans_hovers_and_selects() {
         harness.state(|state| state.selected_element()),
         Some(elements.issue_list)
     );
+    assert_eq!(
+        harness.capture(|capture| capture.overlay().selected),
+        Some(elements.issue_list),
+        "the app outlines it too"
+    );
     harness.assert_text_visible("Zoom to bar");
     harness.assert_text_visible("Reveal in Elements");
     harness.screenshot("flame-selected-bar");
@@ -509,7 +514,7 @@ fn empty_and_idle_states_say_so() {
     idle.screenshot("frames-idle");
 
     let mut audit = fixture(1280., 800., Lens::Audit, InspectorCapture::new_for_test());
-    audit.assert_text_visible("Nothing to fix");
+    audit.assert_text_visible("Nothing recorded yet");
     audit.assert_text_visible("Element checks need a retained element tree");
     audit.screenshot("audit-empty");
 }

@@ -583,15 +583,14 @@ impl AuditLens {
         let findings = self.findings(capture);
         let tree = capture.latest_tree();
         let groups = group(&findings, self.filter);
+        if findings.is_empty() {
+            // The summary already says there is nothing to fix.
+            return div().into_any_element();
+        }
         if groups.is_empty() {
-            let message = if findings.is_empty() {
-                "Nothing to fix"
-            } else {
-                "No findings of this severity"
-            };
             return div()
                 .h(px(96.))
-                .child(EmptyState::new(message).icon(IconName::Check))
+                .child(EmptyState::new("No findings of this severity").icon(IconName::Check))
                 .into_any_element();
         }
         div()
