@@ -217,6 +217,8 @@ pub struct InspectorCapture {
     pub(crate) replaying: bool,
     /// The entities a replaying capture reports instead of the live registry.
     pub(crate) replay_entities: Vec<EntityInfo>,
+    /// While set, frames replay the app instead of rendering it.
+    pub(crate) holding: bool,
     pub(crate) generation: u64,
     pub(crate) overlay: OverlayState,
     pub(crate) pick: PickState,
@@ -242,6 +244,7 @@ impl InspectorCapture {
             frozen: false,
             replaying: false,
             replay_entities: Vec::new(),
+            holding: false,
             generation: 0,
             overlay: OverlayState::default(),
             pick: PickState::default(),
@@ -469,6 +472,32 @@ impl InspectorCapture {
     /// Freezes or resumes recording.
     pub fn set_frozen(&mut self, frozen: bool) {
         self.frozen = frozen;
+    }
+
+    /// Whether the app is held (see [`Self::set_holding`]).
+    pub fn is_holding(&self) -> bool {
+        self.holding
+    }
+
+    /// Holds or releases the app.
+    ///
+    /// The window never renders the app for frames the inspector draws for
+    /// itself: it replays the app's layers from the previous frame instead
+    /// (the app shows as [`ViewOutcome::Cached`] and the frame has no tree).
+    /// Holding extends this to every frame, even when app views are notified,
+    /// so a hover menu or a tooltip stays on screen while it is inspected.
+    /// The app keeps running; the invalidations it receives while held wait,
+    /// and the first frame after release renders the app with all of them
+    /// (like any change made here, a release shows on the next frame drawn).
+    /// A frame that cannot replay the app still renders it, applying the
+    /// invalidations kept so far: after a resize or a scale change, or when
+    /// the capture asks for more than the app's last render recorded (a
+    /// tree, at [`CaptureLevel::Frames`], for an overlay turned on since).
+    pub fn set_holding(&mut self, holding: bool) {
+        if self.holding && !holding {
+            self.recorder.release_pending = true;
+        }
+        self.holding = holding;
     }
 
     /// Overlay settings.
