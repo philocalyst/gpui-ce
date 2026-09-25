@@ -49,3 +49,12 @@ backgrund = "backgrund"
 wtach = "wtach"
 netwrok = "netwrok"
 workspce = "workspce"
+# Loupe/Lightbox tests: deliberately truncated or misspelled strings used to
+# exercise text-truncation display and "no exact match" / "unknown field"
+# error messages.
+Issu = "Issu"
+Sav = "Sav"
+contrst = "contrst"
+# "PNGs" (plural of the PNG acronym) is split into "PN" + "Gs" by typos'
+# tokenizer, and "PN" alone is flagged as a typo of "ON".
+PN = "PN"
