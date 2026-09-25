@@ -237,6 +237,11 @@ impl HeadlessAppContext {
     pub fn foreground_executor(&self) -> &ForegroundExecutor {
         &self.foreground_executor
     }
+
+    /// The last URL opened with `cx.open_url()`.
+    pub fn opened_url(&self) -> Option<String> {
+        self.platform.opened_url.borrow().clone()
+    }
 }
 
 impl Drop for HeadlessAppContext {
