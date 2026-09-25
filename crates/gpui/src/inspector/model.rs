@@ -588,7 +588,8 @@ pub struct EntityInfo {
     pub type_name: &'static str,
     /// Strong handle count.
     pub strong_count: usize,
-    /// Whether the entity has been rendered as a view in any window.
+    /// Whether the entity is drawn as a view (an `Entity<V: Render>` used as an
+    /// element, cached or not) in the latest rendered frame of an open window.
     pub is_view: bool,
     /// Registered `observe` callbacks watching it.
     pub observers: usize,

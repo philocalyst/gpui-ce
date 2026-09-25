@@ -86,6 +86,20 @@ where
         (subscription, move || active.set(true))
     }
 
+    /// How many callbacks are registered for `emitter` and not yet dropped,
+    /// including ones that activate at the end of the current effect cycle.
+    /// Callbacks that are running for `emitter` right now are not counted.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn count(&self, emitter: &EmitterKey) -> usize {
+        match self.0.borrow().subscribers.get(emitter) {
+            Some(Some(subscribers)) => subscribers
+                .values()
+                .filter(|subscriber| !subscriber.dropped.get())
+                .count(),
+            Some(None) | None => 0,
+        }
+    }
+
     pub fn remove(
         &self,
         emitter: &EmitterKey,

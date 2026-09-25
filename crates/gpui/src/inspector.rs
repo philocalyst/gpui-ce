@@ -21,6 +21,8 @@ pub use conditional::*;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod capture;
 #[cfg(any(feature = "inspector", debug_assertions))]
+mod entities;
+#[cfg(any(feature = "inspector", debug_assertions))]
 mod input;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod keys;
@@ -32,6 +34,7 @@ pub use capture::*;
 pub use model::*;
 #[cfg(any(feature = "inspector", debug_assertions))]
 pub(crate) use {
+    entities::live_entities,
     input::{InputInFlight, InputScope},
     keys::resolve_keystrokes,
 };

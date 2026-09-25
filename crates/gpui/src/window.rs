@@ -6940,6 +6940,19 @@ impl Window {
         })
     }
 
+    /// Every live entity with its type, handle count, observers and notify
+    /// counts, sorted by id. Like [`App::inspector_entities`], but also sees
+    /// this window while it is being updated (for example during render).
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn inspector_entities(&self, cx: &App) -> Vec<crate::inspector::EntityInfo> {
+        let other_windows = cx
+            .windows
+            .values()
+            .filter_map(Option::as_deref)
+            .filter(|window| window.handle.window_id() != self.handle.window_id());
+        crate::inspector::live_entities(cx, std::iter::once(self).chain(other_windows))
+    }
+
     /// Where the inspector UI is drawn, while it is open.
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn inspector_bounds(&self) -> Option<Bounds<Pixels>> {
