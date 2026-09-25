@@ -513,9 +513,12 @@ impl Stage {
         let (image, texts, quads, meta, clickables) = self.read(|window| {
             let scale = window.scale_factor();
             let viewport = window.viewport_size();
-            let image = window
-                .render_to_image()
-                .unwrap_or_else(|error| panic!("lightbox: rendering {name:?}: {error:#}"));
+            let image = window.render_to_image().unwrap_or_else(|error| {
+                panic!(
+                    "lightbox: rendering {name:?}: {error:#}\n  Lightbox renders through wgpu; \
+                         without a GPU, install a software Vulkan driver (Mesa lavapipe)."
+                )
+            });
             let texts = window
                 .painted_text()
                 .iter()

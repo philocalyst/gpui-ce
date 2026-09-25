@@ -7,7 +7,7 @@ mod strip;
 
 use crate::{
     compose::Compositor,
-    manifest::{Assertion, FilmRecord, Finding, FindingKind, Origin, Record},
+    manifest::{Assertion, FilmRecord, Finding, Origin, Record},
     output::{Suite, slug},
     shot::{Rect, Shot, trim},
     stage::Stage,
@@ -555,14 +555,6 @@ pub(crate) fn motion(previous: &RgbaImage, current: &RgbaImage) -> Motion {
         changed_pixels: changed,
         bounds: (changed > 0).then(|| (x0, y0, x1 - x0 + 1, y1 - y0 + 1)),
         energy: (total as f64 / 255. / channels) as f32,
-    }
-}
-
-impl FindingKind {
-    /// Whether this kind of finding usually means something is wrong (a
-    /// spring's overshoot, say, is often intended).
-    pub fn is_problem(self) -> bool {
-        matches!(self, FindingKind::Frozen | FindingKind::Jump)
     }
 }
 

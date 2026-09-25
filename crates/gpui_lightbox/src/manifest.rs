@@ -185,6 +185,12 @@ impl FindingKind {
             FindingKind::Overshoot => "overshoot",
         }
     }
+
+    /// Whether this kind of finding usually means something is wrong (a
+    /// spring's overshoot, say, is often intended).
+    pub fn is_problem(self) -> bool {
+        matches!(self, FindingKind::Frozen | FindingKind::Jump)
+    }
 }
 
 /// The outcome of one assertion, kept so the report can show what was checked.

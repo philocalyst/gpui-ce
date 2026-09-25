@@ -430,7 +430,7 @@ fn chart(
                         if line.len() < 2 {
                             return;
                         }
-                        let mut path = PathBuilder::stroke(px(1.5));
+                        let mut path = PathBuilder::stroke(px(2.));
                         for (ix, (x, y)) in line.iter().enumerate() {
                             let at = point(
                                 bounds.origin.x + px(x - area.x),
@@ -456,15 +456,17 @@ fn chart(
             .iter()
             .find(|(frame, _)| *frame == ix)
             .map(|(_, color)| *color);
-        let radius = if mark.is_some() { 4. } else { 2. };
-        let dot = placed(Rect::new(x - radius, y - radius, radius * 2., radius * 2.))
-            .rounded(px(radius))
-            .bg(mark.unwrap_or(color));
-        children.push(if mark.is_some() {
-            dot.border_1().border_color(DARK.bg).into_any_element()
-        } else {
-            dot.into_any_element()
-        });
+        // Every frame is a marker with a 2 px ring in the chart's surface
+        // color; flagged frames are larger and wear their finding's color.
+        let radius = if mark.is_some() { 6. } else { 4. };
+        children.push(
+            placed(Rect::new(x - radius, y - radius, radius * 2., radius * 2.))
+                .rounded(px(radius))
+                .bg(mark.unwrap_or(color))
+                .border_2()
+                .border_color(DARK.surface)
+                .into_any_element(),
+        );
     }
     children
 }
