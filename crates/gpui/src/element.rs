@@ -244,6 +244,7 @@ pub trait ParentElement {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>);
 
     /// Add a single child element to this element.
+    #[track_caller]
     fn child(mut self, child: impl IntoElement) -> Self
     where
         Self: Sized,

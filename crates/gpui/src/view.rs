@@ -108,6 +108,8 @@ impl View for AnyView {
 impl<V: 'static + Render> IntoElement for Entity<V> {
     type Element = ViewElement<Entity<V>>;
 
+    /// The view element is sited where the view is embedded.
+    #[track_caller]
     fn into_element(self) -> Self::Element {
         ViewElement::new(self)
     }
@@ -116,6 +118,8 @@ impl<V: 'static + Render> IntoElement for Entity<V> {
 impl IntoElement for AnyView {
     type Element = ViewElement<AnyView>;
 
+    /// The view element is sited where the view is embedded.
+    #[track_caller]
     fn into_element(self) -> Self::Element {
         ViewElement::new(self)
     }

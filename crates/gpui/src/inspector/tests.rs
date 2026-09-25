@@ -314,6 +314,14 @@ fn views_and_components_are_boundaries(cx: &mut TestAppContext) {
         Some(leaf_view)
     );
     assert_eq!(tree.owning_view(find_id(&tree, "leaf")), Some(leaf_view));
+    let view_key = tree.get(leaf_view).unwrap().key.expect("views have keys");
+    let view_site = read(cx, |capture| {
+        capture.path_info(view_key.path).unwrap().source
+    });
+    assert!(
+        view_site.file().ends_with("inspector/tests.rs"),
+        "a view is sited where it is embedded, not in gpui: {view_site}"
+    );
 
     let badge = find_id(&tree, "badge");
     let component = tree.get(badge).unwrap().parent.unwrap();
