@@ -141,7 +141,6 @@ impl KeyTester {
             .px(px(10.))
             .py(px(6.))
             .flex()
-            .flex_wrap()
             .items_center()
             .gap_2()
             .rounded(theme.metrics.radius)
@@ -180,22 +179,30 @@ impl KeyTester {
             } else {
                 colors.text_muted
             }))
-            .when(strokes.is_empty(), |this| {
-                this.child(
-                    div()
-                        .text_color(if listening {
-                            colors.text
-                        } else {
-                            colors.text_muted
-                        })
-                        .child(prompt),
-                )
+            // The prompt (wrapping) or the keys so far.
+            .child(if strokes.is_empty() {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_color(if listening {
+                        colors.text
+                    } else {
+                        colors.text_muted
+                    })
+                    .child(prompt)
+            } else {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1()
+                    .children(strokes.iter().map(|stroke| Kbd::new(stroke.unparse())))
+                    .when(waiting, |this| {
+                        this.child(div().text_color(colors.text_faint).child("…"))
+                    })
             })
-            .children(strokes.iter().map(|stroke| Kbd::new(stroke.unparse())))
-            .when(waiting, |this| {
-                this.child(div().text_color(colors.text_faint).child("…"))
-            })
-            .child(div().flex_1())
             .when(listening && strokes.is_empty(), |this| {
                 this.child(
                     div()

@@ -80,6 +80,19 @@ fn push_input(harness: &mut LoupeHarness, build: impl FnOnce(&mut InspectorCaptu
     seq
 }
 
+/// Screenshots that also check the layout.
+trait Shots {
+    /// Saves a screenshot named `name`, then checks that no text is clipped.
+    fn shot(&mut self, name: &str);
+}
+
+impl Shots for LoupeHarness {
+    fn shot(&mut self, name: &str) {
+        self.screenshot(name);
+        assert_nothing_overflows(self);
+    }
+}
+
 /// Panics unless every line Loupe painted fits its container across: text
 /// too long for its box must be truncated with an ellipsis, never clipped.
 fn assert_nothing_overflows(harness: &mut LoupeHarness) {
@@ -112,8 +125,7 @@ fn the_log_lists_inbox_input_with_kind_text_and_loupe_filters() {
     // Following: the newest record is on screen.
     let newest = input.last().unwrap();
     assert!(harness.find_text(&clock(newest.at)).is_some());
-    harness.screenshot("events-log-dark");
-    assert_nothing_overflows(&mut harness);
+    harness.shot("events-log-dark");
 
     // Kind chips.
     let keys = input
@@ -126,7 +138,7 @@ fn the_log_lists_inbox_input_with_kind_text_and_loupe_filters() {
         harness.find_text("left ×1 at").is_none(),
         "clicks are hidden"
     );
-    harness.screenshot("events-filter-keys");
+    harness.shot("events-filter-keys");
     let with_actions = input
         .iter()
         .filter(|record| !record.actions.is_empty())
@@ -150,7 +162,7 @@ fn the_log_lists_inbox_input_with_kind_text_and_loupe_filters() {
         .count();
     harness.assert_text_visible(&format!("{archived} of {} events", input.len()));
     assert!(harness.find_text("SelectNext").is_none());
-    harness.screenshot("events-filter-exclusion");
+    harness.shot("events-filter-exclusion");
     assert_eq!(
         harness.state(|state| state.filters().events.to_string()),
         "key -select"
@@ -163,7 +175,7 @@ fn the_log_lists_inbox_input_with_kind_text_and_loupe_filters() {
     harness.assert_text_visible(&format!("{} events", input.len()));
     harness.click_text("Show Loupe's input");
     harness.assert_text_visible(&format!("{} events", input.len() + loupe));
-    harness.screenshot("events-loupe-input");
+    harness.shot("events-loupe-input");
 }
 
 /// `12.480`, as the log's time column shows it.
@@ -194,7 +206,7 @@ fn the_log_follows_new_input_until_the_user_selects_or_scrolls_up() {
         });
     }
     harness.assert_text_visible("Paused · 3 new");
-    harness.screenshot("events-paused");
+    harness.shot("events-paused");
 
     // j/k move the selection through the listed rows (Loupe's own are hidden).
     let listed: Vec<u64> = app_input(&mut harness)
@@ -254,8 +266,7 @@ fn the_detail_tells_where_a_fixture_click_went() {
     harness.click_selector(&format!("events-row-{}", click.seq));
     harness.assert_text_visible(" on div#row-3 → inbox::OpenIssue · handled in ");
     harness.assert_text_visible("HIT PATH");
-    harness.screenshot("events-detail-click");
-    assert_nothing_overflows(&mut harness);
+    harness.shot("events-detail-click");
 
     // Hovering a hit-path row highlights it in the app; clicking selects it.
     let hit = harness.bounds_of("events-hit-0");
@@ -283,7 +294,7 @@ fn the_detail_tells_where_a_fixture_click_went() {
 
     harness.set_appearance(Appearance::Light);
     show(&mut harness, Lens::Events);
-    harness.screenshot("events-detail-click-light");
+    harness.shot("events-detail-click-light");
 }
 
 // ---------------------------------------------------------------------------
@@ -600,7 +611,7 @@ fn live_clicks_and_keys_land_in_the_log_with_where_they_went() {
     harness.click_selector(&format!("events-row-{}", down.seq));
     harness.assert_text_visible(" on div#compose-button · ");
     harness.assert_text_visible("div#compose-button");
-    harness.screenshot("events-live-click");
+    harness.shot("events-live-click");
     harness.click_selector("events-hit-0");
     assert_eq!(
         harness.state(|state| state.selected_element()),
@@ -608,8 +619,7 @@ fn live_clicks_and_keys_land_in_the_log_with_where_they_went() {
     );
     harness.click_selector(&format!("events-row-{}", action.seq));
     harness.assert_text_visible("mail::Compose dispatched in Workspace > Pane > Editor mode=full");
-    harness.screenshot("events-live-action");
-    assert_nothing_overflows(harness);
+    harness.shot("events-live-action");
 
     // Real keys, typed into the focused editor.
     mail.focus_editor();
@@ -636,14 +646,13 @@ fn live_clicks_and_keys_land_in_the_log_with_where_they_went() {
     for context in ["Workspace", "Pane", "Editor mode=full"] {
         harness.assert_text_visible(context);
     }
-    harness.screenshot("events-live-key");
-    assert_nothing_overflows(harness);
+    harness.shot("events-live-key");
 
     // The unhandled binding fell through to the workspace's.
     harness.click_selector(&format!("events-row-{}", archive.seq));
     harness.assert_text_visible("ctrl-u → mail::Archive (+1 more) in ");
     harness.assert_text_visible("mail::Orphan");
-    harness.screenshot("events-live-fallthrough");
+    harness.shot("events-live-fallthrough");
     // NoAction turned ctrl-d off: nothing handled it.
     harness.click_selector(&format!("events-row-{}", delete.seq));
     harness.assert_text_visible("ctrl-d → no binding; nothing handled it in ");
@@ -674,11 +683,11 @@ fn the_key_tester_explains_keys_without_dispatching_anything() {
     show(harness, Lens::Events);
     harness.click_text("Key tester");
     harness.assert_text_visible("Press keys to see what they do here…");
-    harness.screenshot("key-tester-idle");
+    harness.shot("key-tester-idle");
 
     harness.click_selector("events-key-tester");
     harness.assert_text_visible("Listening… press keys");
-    harness.screenshot("key-tester-listening");
+    harness.shot("key-tester-listening");
     let frozen = harness.capture(|capture| capture.is_frozen());
     // The first key after the click switches GPUI's input modality from
     // mouse to keyboard, which refreshes the whole window once (before any
@@ -732,8 +741,7 @@ fn the_key_tester_explains_keys_without_dispatching_anything() {
             *winner,
             "{input}"
         );
-        harness.screenshot(shot);
-        assert_nothing_overflows(harness);
+        harness.shot(shot);
     }
     let harness = &mut mail.harness;
     // Every loser is explained.
@@ -754,15 +762,14 @@ fn the_key_tester_explains_keys_without_dispatching_anything() {
     harness.type_keys("ctrl-k");
     harness.assert_text_visible("Waiting for more keys");
     harness.assert_text_visible("ctrl-t runs mail::Trim");
-    harness.screenshot("key-tester-pending");
-    assert_nothing_overflows(harness);
+    harness.shot("key-tester-pending");
     harness.type_keys("ctrl-t");
     harness.assert_text_visible("Runs mail::Trim");
     assert_eq!(
         engine_winner(harness, "ctrl-k ctrl-t", &editor_focus).as_deref(),
         Some("mail::Trim")
     );
-    harness.screenshot("key-tester-multi-key");
+    harness.shot("key-tester-multi-key");
 
     // Loupe's own shortcuts were captured too: no lens switch, no freeze,
     // no palette, and Loupe is still open.
@@ -826,12 +833,10 @@ fn the_key_tester_looks_right_in_light_and_narrow_docks() {
     harness.click_selector("events-key-tester");
     harness.type_keys("ctrl-s");
     harness.assert_text_visible("Runs mail::Save");
-    harness.screenshot("key-tester-narrow-dark");
-    assert_nothing_overflows(harness);
+    harness.shot("key-tester-narrow-dark");
     harness.set_appearance(Appearance::Light);
     harness.type_keys("ctrl-d");
-    harness.screenshot("key-tester-narrow-light");
-    assert_nothing_overflows(harness);
+    harness.shot("key-tester-narrow-light");
 }
 
 // ---------------------------------------------------------------------------
@@ -855,8 +860,7 @@ fn the_entities_table_sorts_filters_and_explains_the_inbox() {
     assert!(top_of(&mut harness, "IssueStore") < top_of(&mut harness, "IssueList"));
     assert!(top_of(&mut harness, "IssueList") < top_of(&mut harness, "InboxApp"));
     harness.assert_text_visible("7 entities · 5 views · 5 notifying");
-    harness.screenshot("entities-dark");
-    assert_nothing_overflows(&mut harness);
+    harness.shot("entities-dark");
 
     // Sort by type, then views only, then a filter with an exclusion.
     harness.click_text("Type");
@@ -864,7 +868,7 @@ fn the_entities_table_sorts_filters_and_explains_the_inbox() {
     harness.click_selector("entities-kind-1");
     assert!(harness.find_text("IssueStore").is_none());
     harness.assert_text_visible("5 entities · 5 views");
-    harness.screenshot("entities-views");
+    harness.shot("entities-views");
     harness.click_selector("entities-kind-0");
     harness.click_text("Filter entities · -exclude");
     harness.type_text("issue -list");
@@ -882,8 +886,7 @@ fn the_entities_table_sorts_filters_and_explains_the_inbox() {
     harness.assert_text_visible("3 observers run on each notify, 2 subscribers listen");
     harness.assert_text_visible(" · peak ");
     harness.assert_text_visible("fixtures.rs:");
-    harness.screenshot("entities-store");
-    assert_nothing_overflows(&mut harness);
+    harness.shot("entities-store");
     harness.click_selector("entities-site");
     harness.assert_text_visible("Copied");
     let copied = harness.app(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
@@ -892,8 +895,7 @@ fn the_entities_table_sorts_filters_and_explains_the_inbox() {
     // A view reveals its element in Elements.
     harness.click_selector("entities-row-3");
     harness.assert_text_visible("It is drawn as a view, so each notify re-renders it");
-    harness.screenshot("entities-view");
-    assert_nothing_overflows(&mut harness);
+    harness.shot("entities-view");
     harness.click_text("Reveal in Elements");
     assert_eq!(harness.state(|state| state.lens()), Lens::Elements);
     assert_eq!(
@@ -903,7 +905,7 @@ fn the_entities_table_sorts_filters_and_explains_the_inbox() {
 
     harness.set_appearance(Appearance::Light);
     show(&mut harness, Lens::Entities);
-    harness.screenshot("entities-light");
+    harness.shot("entities-light");
 }
 
 #[test]
@@ -935,8 +937,7 @@ fn live_entities_match_the_app_and_notify_forces_a_render() {
          handles keep it alive.",
     );
     harness.assert_text_visible("Store hasn't notified since recording started");
-    harness.screenshot("entities-live-store");
-    assert_nothing_overflows(harness);
+    harness.shot("entities-live-store");
 
     // Notify the editor: the next frame is caused by it, and it re-renders.
     let editor_label = format!("entities-row-{}", editor.as_u64() & 0xffff_ffff);
@@ -996,14 +997,12 @@ fn narrow_and_bottom_docks_lay_both_lenses_out_without_overflow() {
         (Lens::Entities, "entities-narrow"),
     ] {
         show(&mut narrow, lens);
-        narrow.screenshot(shot);
-        assert_nothing_overflows(&mut narrow);
+        narrow.shot(shot);
     }
     let seq = app_input(&mut narrow).last().unwrap().seq;
     show(&mut narrow, Lens::Events);
     narrow.click_selector(&format!("events-row-{seq}"));
-    narrow.screenshot("events-narrow-detail");
-    assert_nothing_overflows(&mut narrow);
+    narrow.shot("events-narrow-detail");
 
     let (mut bottom, _) = inbox_harness(1280., 800.);
     bottom.update(|window, _| {
@@ -1018,12 +1017,10 @@ fn narrow_and_bottom_docks_lay_both_lenses_out_without_overflow() {
         (Lens::Entities, "entities-bottom"),
     ] {
         show(&mut bottom, lens);
-        bottom.screenshot(shot);
-        assert_nothing_overflows(&mut bottom);
+        bottom.shot(shot);
     }
     bottom.click_selector("entities-row-6");
-    bottom.screenshot("entities-bottom-detail");
-    assert_nothing_overflows(&mut bottom);
+    bottom.shot("entities-bottom-detail");
 }
 
 /// A capture with `records` input records and `entities` live entities
@@ -1105,7 +1102,7 @@ fn the_lenses_stay_fast_with_a_thousand_events_and_two_thousand_entities() {
         .filter(|line| line.text.as_ref() == "SelectNext")
         .count();
     assert!((10..80).contains(&rows), "{rows} rows painted");
-    harness.screenshot("events-thousand");
+    harness.shot("events-thousand");
 
     assert!(timed(&mut harness, "open Entities", &|h| show(h, Lens::Entities)) < budget);
     harness.assert_text_visible("2,000 entities");
@@ -1122,5 +1119,5 @@ fn the_lenses_stay_fast_with_a_thousand_events_and_two_thousand_entities() {
             h.advance(REFRESH_INTERVAL);
         }) < budget
     );
-    harness.screenshot("entities-two-thousand");
+    harness.shot("entities-two-thousand");
 }
