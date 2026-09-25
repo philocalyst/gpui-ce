@@ -337,7 +337,7 @@ impl Element for Img {
                                 state.frame_index = state.frame_index.min(max_frame_index);
                                 if frame_count > 1 && !cx.reduce_motion() {
                                     if window.is_window_active() {
-                                        let current_time = Instant::now();
+                                        let current_time = cx.background_executor().now();
                                         if let Some(last_frame_time) = state.last_frame_time {
                                             let elapsed = current_time - last_frame_time;
                                             let frame_duration =
@@ -417,7 +417,9 @@ impl Element for Img {
                         None => {
                             if let Some(state) = &mut state {
                                 if let Some((started_loading, _)) = state.started_loading {
-                                    if started_loading.elapsed() > LOADING_DELAY
+                                    let now = cx.background_executor().now();
+                                    if now.saturating_duration_since(started_loading)
+                                        > LOADING_DELAY
                                         && let Some(loading) = self.style.loading.as_ref()
                                     {
                                         let mut element = loading();
@@ -433,7 +435,8 @@ impl Element for Img {
                                         })
                                         .ok();
                                     });
-                                    state.started_loading = Some((Instant::now(), task));
+                                    state.started_loading =
+                                        Some((cx.background_executor().now(), task));
                                 }
                             }
                         }

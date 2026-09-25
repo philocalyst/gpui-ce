@@ -48,6 +48,7 @@ pub(crate) struct TestWindowState {
     visible: bool,
     is_fullscreen: bool,
     appearance: WindowAppearance,
+    scale_factor: f32,
     external_drag_files: Vec<(PathBuf, bool)>,
     start_external_drag_result: bool,
 }
@@ -85,6 +86,11 @@ impl TestWindow {
             Some(r) => r.sprite_atlas(),
             None => Arc::new(TestAtlas::new()),
         };
+        let (appearance, scale_factor) = platform
+            .upgrade()
+            .map_or((WindowAppearance::Light, 2.0), |platform| {
+                platform.window_defaults()
+            });
         Self(Rc::new(Mutex::new(TestWindowState {
             bounds: params.bounds,
             display,
@@ -112,7 +118,8 @@ impl TestWindow {
             text_input_state_changes: Vec::new(),
             visible: params.show,
             is_fullscreen: false,
-            appearance: WindowAppearance::Light,
+            appearance,
+            scale_factor,
             external_drag_files: Vec::new(),
             start_external_drag_result: false,
         })))
@@ -165,6 +172,14 @@ impl TestWindow {
         drop(lock);
         callback(size, scale_factor);
         self.0.lock().resize_callback = Some(callback);
+    }
+
+    /// Changes the display scale factor (2.0 by default), as moving the window
+    /// to another display would, and notifies the window of the change.
+    pub fn simulate_scale_factor_change(&mut self, scale_factor: f32) {
+        self.0.lock().scale_factor = scale_factor;
+        let size = self.bounds().size;
+        self.simulate_resize(size);
     }
 
     pub(crate) fn simulate_active_status_change(&self, active: bool) {
@@ -248,7 +263,7 @@ impl PlatformWindow for TestWindow {
     }
 
     fn scale_factor(&self) -> f32 {
-        2.0
+        self.0.lock().scale_factor
     }
 
     fn appearance(&self) -> WindowAppearance {

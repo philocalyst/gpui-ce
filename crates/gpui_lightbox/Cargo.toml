@@ -1,0 +1,31 @@
+[package]
+name = "gpui_ce_lightbox"
+version = "0.1.0"
+description = "Lightbox: screenshots, filmstrips, style lint, golden images and UI benchmarks for gpui"
+edition.workspace = true
+publish = false
+license = "Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+name = "gpui_lightbox"
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "lightbox"
+path = "src/bin/lightbox.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+gpui = { workspace = true, features = ["inspector", "test-support"] }
+gpui_wgpu = { workspace = true, features = ["test-support"] }
+image.workspace = true
+log.workspace = true
+palette.workspace = true
+png.workspace = true
+serde.workspace = true
+serde_json.workspace = true

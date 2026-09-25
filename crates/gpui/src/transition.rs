@@ -1,7 +1,5 @@
-use std::{
-    cell::{Ref, RefCell},
-    time::Instant,
-};
+use scheduler::Instant;
+use std::cell::{Ref, RefCell};
 
 use crate::{Animated, App, Entity, EntityId, Motion, Progress, Window, lerp::Lerp};
 
@@ -106,8 +104,9 @@ impl<T: Lerp + Clone + PartialEq + 'static> Transition<T> {
 
     fn sample(&self, cx: &mut App) -> Ref<'_, TransitionCache<T>> {
         if self.cache.borrow().value.is_none() {
+            let now = cx.background_executor().now();
             let mut state = self.state.as_mut(cx);
-            let sample = state.sample(Instant::now());
+            let sample = state.sample(now);
 
             *self.cache.borrow_mut() = TransitionCache {
                 value: Some(sample.value),
@@ -161,7 +160,8 @@ impl<T: Lerp + Clone + PartialEq + 'static> Transition<T> {
             return self.cache.borrow().progress.get();
         }
 
-        self.state.read(cx).progress_at(Instant::now()).get()
+        let now = cx.background_executor().now();
+        self.state.read(cx).progress_at(now).get()
     }
 
     /// Updates the goal value for the transition.
@@ -182,14 +182,15 @@ impl<T: Lerp + Clone + PartialEq + 'static> Transition<T> {
         update: impl FnOnce(&mut T, &mut crate::Context<TransitionState<T>>) -> R,
     ) -> bool {
         let mut was_updated = false;
+        let now = cx.background_executor().now();
 
         self.state.update(cx, |state, cx| {
             let mut value = state.value().clone();
             update(&mut value, cx);
             was_updated = if self.continuous {
-                state.set(value, &self.motion, Instant::now())
+                state.set(value, &self.motion, now)
             } else {
-                state.restart(value, &self.motion, Instant::now())
+                state.restart(value, &self.motion, now)
             };
         });
 
@@ -243,6 +244,9 @@ impl<T: Lerp + Clone + PartialEq + 'static> Transition<T> {
 }
 
 /// The animated value stored by the legacy transition hooks.
+///
+/// Times come from the executor clock (`cx.background_executor().now()`), so
+/// test clocks advanced with `advance_clock` drive transitions exactly.
 pub type TransitionState<T> = Animated<T, Instant>;
 
 #[cfg(all(test, feature = "test-support"))]
@@ -348,6 +352,41 @@ mod tests {
             assert_eq!(*mutators.read_goal(cx), 2.0);
             assert!(mutators.read_cache().is_none());
         });
+    }
+
+    #[gpui::test]
+    fn transition_samples_the_executor_clock_exactly(cx: &mut TestAppContext) {
+        let transition = cx.update(|cx| create_transition(cx, Duration::from_secs(1), 0.0_f32));
+        cx.update(|cx| assert!(transition.update(cx, |value, _| *value = 100.0)));
+        let rendered_values = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.open_window(size(px(100.0), px(100.0)), {
+            let transition = transition.clone();
+            let rendered_values = rendered_values.clone();
+            move |_, _| TransitionTestView {
+                transition,
+                rendered_values,
+            }
+        });
+        cx.run_until_parked();
+        assert_eq!(*rendered_values.borrow(), vec![0.0]);
+
+        // Each frame samples the test clock, so +100 ms of a linear 1 s
+        // transition is exactly a tenth of the way, however long the test takes.
+        let mut expected = vec![0.0];
+        for (advance_ms, value) in [(100, 10.0), (150, 25.0), (750, 100.0)] {
+            cx.executor()
+                .advance_clock(Duration::from_millis(advance_ms));
+            assert_eq!(
+                window
+                    .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+                    .unwrap(),
+                1
+            );
+            cx.run_until_parked();
+            expected.push(value);
+            assert_eq!(*rendered_values.borrow(), expected);
+        }
+        cx.update(|cx| assert_eq!(transition.evaluate_delta(cx), 1.0));
     }
 
     #[gpui::test]
