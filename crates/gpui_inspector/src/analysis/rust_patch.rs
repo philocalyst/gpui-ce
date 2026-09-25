@@ -9,7 +9,7 @@
 use super::style_grid;
 use gpui::{
     AbsoluteLength, AlignContent, AlignItems, BorderStyle, CursorStyle, DefiniteLength, Display,
-    Fill, Filter, FlexDirection, FlexWrap, FontStyle, FontWeight, GridTemplate,
+    EdgesRefinement, Fill, Filter, FlexDirection, FlexWrap, FontStyle, FontWeight, GridTemplate,
     GridTemplateMinSize, Hsla, Length, Overflow, Pixels, Position, Refineable as _, RingColor,
     SizeRefinement, StrikethroughStyle, StyleRefinement, Styled, TextAlign, TextOverflow,
     UnderlineStyle, Visibility, WhiteSpace, hsla_to_rgba, px, relative, rems,
@@ -640,37 +640,19 @@ impl<'a> Emitter<'a> {
                 Position::Absolute => "absolute()",
             });
         }
-        let inset = &mut self.rest.inset;
-        let sides = [
-            inset.top.take(),
-            inset.right.take(),
-            inset.bottom.take(),
-            inset.left.take(),
-        ];
-        self.edges(&INSET, sides, |prefix, length| {
+        let inset = take_edges(&mut self.rest.inset);
+        self.edges(&INSET, inset, |prefix, length| {
             length_call(prefix, length, true)
         });
     }
 
     fn spacing(&mut self) {
-        let margin = &mut self.rest.margin;
-        let sides = [
-            margin.top.take(),
-            margin.right.take(),
-            margin.bottom.take(),
-            margin.left.take(),
-        ];
-        self.edges(&MARGIN, sides, |prefix, length| {
+        let margin = take_edges(&mut self.rest.margin);
+        self.edges(&MARGIN, margin, |prefix, length| {
             length_call(prefix, length, true)
         });
-        let padding = &mut self.rest.padding;
-        let sides = [
-            padding.top.take(),
-            padding.right.take(),
-            padding.bottom.take(),
-            padding.left.take(),
-        ];
-        self.edges(&PADDING, sides, definite_call);
+        let padding = take_edges(&mut self.rest.padding);
+        self.edges(&PADDING, padding, definite_call);
     }
 
     fn visual(&mut self) {
@@ -679,14 +661,8 @@ impl<'a> Emitter<'a> {
             self.rest.background = None;
             self.call(format!("bg({})", color_expr(color)));
         }
-        let border = &mut self.rest.border_widths;
-        let sides = [
-            border.top.take(),
-            border.right.take(),
-            border.bottom.take(),
-            border.left.take(),
-        ];
-        self.edges(&BORDER, sides, border_call);
+        let border = take_edges(&mut self.rest.border_widths);
+        self.edges(&BORDER, border, border_call);
         if let Some(color) = self.rest.border_color.and_then(|color| color.as_solid()) {
             self.rest.border_color = None;
             self.call(format!("border_color({})", color_expr(color)));
@@ -998,6 +974,18 @@ impl<'a> Emitter<'a> {
 
 fn take_size(size: &mut SizeRefinement<Length>) -> (Option<Length>, Option<Length>) {
     (size.width.take(), size.height.take())
+}
+
+/// Top, right, bottom, left.
+fn take_edges<T: Clone + std::fmt::Debug + Default + PartialEq>(
+    edges: &mut EdgesRefinement<T>,
+) -> [Option<T>; 4] {
+    [
+        edges.top.take(),
+        edges.right.take(),
+        edges.bottom.take(),
+        edges.left.take(),
+    ]
 }
 
 /// `.underline()` then adjustments, when they reproduce `underline` exactly.

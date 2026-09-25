@@ -293,23 +293,21 @@ pub fn set(
     path: &str,
     value: &PropertyValue,
 ) -> Result<StyleRefinement, StyleEditError> {
-    pointer_tokens(path)?;
     let json = to_json(style)?;
     let existing = json.pointer(path).filter(|existing| !existing.is_null());
     if existing.is_some_and(|existing| classify(path, existing) == *value) {
         return Ok(style.clone());
     }
-    write(style, path, value)
+    write(json, path, value)
 }
 
-/// Writes `value` at `path` and validates the result.
+/// Writes `value` at `path` into a serialized style and validates the result.
 fn write(
-    style: &StyleRefinement,
+    mut json: Value,
     path: &str,
     value: &PropertyValue,
 ) -> Result<StyleRefinement, StyleEditError> {
     let tokens = pointer_tokens(path)?;
-    let mut json = to_json(style)?;
     let existing = json.pointer(path).filter(|existing| !existing.is_null());
     let encoded = encode(path, value, existing)?;
     *slot(&mut json, &tokens, path)? = encoded;
@@ -892,7 +890,8 @@ mod tests {
         for style in styles() {
             let expected = comparable(rows(&style));
             for row in rows(&style) {
-                let written = write(&style, &row.path, &row.value)
+                let json = to_json(&style).unwrap();
+                let written = write(json, &row.path, &row.value)
                     .unwrap_or_else(|error| panic!("{}: {error}", row.path));
                 assert_eq!(comparable(rows(&written)), expected, "{}", row.path);
                 assert_eq!(set(&style, &row.path, &row.value).as_ref(), Ok(&style));
