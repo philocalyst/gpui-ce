@@ -21,6 +21,10 @@ pub use conditional::*;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod capture;
 #[cfg(any(feature = "inspector", debug_assertions))]
+pub(crate) mod causes;
+#[cfg(any(feature = "inspector", debug_assertions))]
+pub(crate) mod describe;
+#[cfg(any(feature = "inspector", debug_assertions))]
 mod entities;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod input;
@@ -28,6 +32,11 @@ mod input;
 mod keys;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod model;
+#[cfg(any(feature = "inspector", debug_assertions))]
+pub(crate) mod recorder;
+#[cfg(all(test, any(feature = "inspector", debug_assertions)))]
+mod tests;
+pub(crate) mod user_span;
 #[cfg(any(feature = "inspector", debug_assertions))]
 pub use capture::*;
 #[cfg(any(feature = "inspector", debug_assertions))]
@@ -38,6 +47,7 @@ pub(crate) use {
     input::{InputInFlight, InputScope},
     keys::resolve_keystrokes,
 };
+pub use user_span::{SpanGuard, span};
 
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod conditional {
@@ -76,11 +86,11 @@ mod conditional {
     pub type InspectorRenderer =
         Box<dyn Fn(&mut Inspector, &mut Window, &mut Context<Inspector>) -> AnyElement>;
 
-    /// Manages inspector state - which element is currently selected and whether the inspector is
-    /// in picking mode.
+    /// The inspector of one window: owns the inspector UI's state and emits
+    /// [`InspectorEvent`]s while the user picks elements. Selection, picking
+    /// and overlays live in the window's [`InspectorCapture`].
     pub struct Inspector {
         active_element: Option<InspectedElement>,
-        pub(crate) pick_depth: Option<f32>,
         ui_state: Option<Box<dyn Any>>,
     }
 
@@ -104,7 +114,6 @@ mod conditional {
         pub(crate) fn new() -> Self {
             Self {
                 active_element: None,
-                pick_depth: None,
                 ui_state: None,
             }
         }
@@ -120,34 +129,16 @@ mod conditional {
                 .expect("inspector UI state has a different type")
         }
 
-        pub(crate) fn select(&mut self, id: InspectorElementId, window: &mut Window) {
-            self.set_active_element_id(id, window);
-            self.pick_depth = None;
-        }
-
-        pub(crate) fn hover(&mut self, id: InspectorElementId, window: &mut Window) {
-            if self.is_picking() {
-                let changed = self.set_active_element_id(id, window);
-                if changed {
-                    self.pick_depth = Some(0.0);
-                }
+        /// Makes `id` the element whose registered inspector states are kept,
+        /// dropping the states of the previous one.
+        pub(crate) fn set_active_element_id(&mut self, id: &InspectorElementId) {
+            if Some(id) != self.active_element_id() {
+                self.active_element = Some(InspectedElement::new(id.clone()));
             }
         }
 
-        pub(crate) fn set_active_element_id(
-            &mut self,
-            id: InspectorElementId,
-            window: &mut Window,
-        ) -> bool {
-            let changed = Some(&id) != self.active_element_id();
-            if changed {
-                self.active_element = Some(InspectedElement::new(id));
-                window.refresh();
-            }
-            changed
-        }
-
-        /// ID of the currently hovered or selected element.
+        /// ID of the selected element, once it has been drawn with inspector
+        /// states (see [`Window::with_inspector_state`]).
         pub fn active_element_id(&self) -> Option<&InspectorElementId> {
             self.active_element.as_ref().map(|e| &e.id)
         }
@@ -176,16 +167,6 @@ mod conditional {
             }
 
             result
-        }
-
-        /// Starts element picking mode, allowing the user to select elements by clicking.
-        pub fn start_picking(&mut self) {
-            self.pick_depth = Some(0.0);
-        }
-
-        /// Returns whether the inspector is currently in picking mode.
-        pub fn is_picking(&self) -> bool {
-            self.pick_depth.is_some()
         }
 
         /// Renders elements for all registered inspector states of the active inspector element.

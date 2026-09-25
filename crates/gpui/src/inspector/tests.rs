@@ -1,0 +1,1584 @@
+//! Engine capture tests: every fact the inspector shows is checked against
+//! what the window actually drew.
+
+use super::*;
+use crate::{
+    self as gpui, AnyElement, App, AppContext as _, Bounds, Context, Entity, EntityId, Hsla,
+    InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Pixels, Point, Render,
+    ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
+    StyleRefinement, Styled as _, TestAppContext, TouchPhase, VisualTestContext, Window, blue,
+    deferred, div, point, px, red, size, uniform_list,
+};
+use std::{cell::RefCell, panic::Location, rc::Rc, sync::Arc};
+
+// Harness.
+
+fn open(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.toggle_inspector(cx));
+}
+
+fn close(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.toggle_inspector(cx));
+}
+
+fn read<R>(cx: &mut VisualTestContext, f: impl FnOnce(&InspectorCapture) -> R) -> R {
+    cx.update(|window, _| f(window.inspector_capture().expect("the inspector is open")))
+}
+
+fn write<R>(cx: &mut VisualTestContext, f: impl FnOnce(&mut InspectorCapture) -> R) -> R {
+    cx.update(|window, _| {
+        f(window
+            .inspector_capture_mut()
+            .expect("the inspector is open"))
+    })
+}
+
+/// Draws a frame after changing the capture (as the inspector UI does by
+/// notifying its own view).
+fn redraw(cx: &mut VisualTestContext) {
+    cx.update(|window, _| window.refresh());
+}
+
+fn latest_frame(cx: &mut VisualTestContext) -> FrameRecord {
+    read(cx, |capture| {
+        capture.latest_frame().expect("a frame").clone()
+    })
+}
+
+fn latest_tree(cx: &mut VisualTestContext) -> Arc<ElementTree> {
+    read(cx, |capture| capture.latest_tree().expect("a tree").clone())
+}
+
+fn app_bounds(cx: &mut VisualTestContext) -> Bounds<Pixels> {
+    cx.update(|window, _| window.app_bounds())
+}
+
+fn find_id(tree: &ElementTree, id: &str) -> ElementIndex {
+    let matches = tree
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| record.id.as_deref() == Some(id))
+        .map(|(ix, _)| ix as ElementIndex)
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 1, "expected exactly one element #{id}");
+    matches[0]
+}
+
+fn record<'a>(tree: &'a ElementTree, id: &str) -> &'a ElementRecord {
+    tree.get(find_id(tree, id)).unwrap()
+}
+
+fn key_of(tree: &ElementTree, id: &str) -> ElementKey {
+    record(tree, id).key.expect("the element has a key")
+}
+
+fn bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<Pixels> {
+    Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
+}
+
+fn events(cx: &mut VisualTestContext) -> Rc<RefCell<Vec<InspectorEvent>>> {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|window, cx| {
+        let inspector = window.inspector_entity().expect("the inspector is open");
+        let events = events.clone();
+        cx.subscribe(&inspector, move |_, event: &InspectorEvent, _| {
+            events.borrow_mut().push(event.clone())
+        })
+        .detach();
+    });
+    events
+}
+
+#[track_caller]
+fn notify_here<T: 'static>(cx: &mut Context<T>) -> &'static Location<'static> {
+    cx.notify();
+    Location::caller()
+}
+
+#[track_caller]
+fn refresh_here(window: &mut Window) -> &'static Location<'static> {
+    window.refresh();
+    Location::caller()
+}
+
+// Views.
+
+/// `#root > #outer > (#inner, #sibling)`, with `#outer` placed absolutely.
+struct Nested {
+    clicks: Rc<RefCell<usize>>,
+    outer_width: Pixels,
+}
+
+impl Nested {
+    fn new() -> Self {
+        Nested {
+            clicks: Rc::default(),
+            outer_width: px(200.),
+        }
+    }
+}
+
+impl Render for Nested {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let clicks = self.clicks.clone();
+        div().id("root").size_full().child(
+            div()
+                .id("outer")
+                .flex()
+                .absolute()
+                .left(px(10.))
+                .top(px(20.))
+                .w(self.outer_width)
+                .h(px(100.))
+                .child(
+                    div()
+                        .id("inner")
+                        .w(px(50.))
+                        .h(px(40.))
+                        .bg(red())
+                        .on_click(move |_, _, _| *clicks.borrow_mut() += 1),
+                )
+                .child(div().id("sibling").w(px(30.)).h(px(10.)).bg(blue())),
+        )
+    }
+}
+
+struct Leaf;
+
+impl Render for Leaf {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("leaf-root")
+            .size_full()
+            .bg(blue())
+            .child(div().id("leaf").w(px(10.)).h(px(10.)).bg(red()))
+    }
+}
+
+#[derive(IntoElement)]
+struct Badge;
+
+impl crate::RenderOnce for Badge {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div().id("badge").w(px(8.)).h(px(8.))
+    }
+}
+
+/// A view embedding a child view (cached or not) and a component.
+struct Parent {
+    child: Entity<Leaf>,
+    cached: bool,
+}
+
+impl Render for Parent {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let child: AnyElement = if self.cached {
+            self.child
+                .clone()
+                .cached(StyleRefinement::default().w(px(300.)).h(px(200.)))
+                .into_any_element()
+        } else {
+            div()
+                .w(px(300.))
+                .h(px(200.))
+                .child(self.child.clone())
+                .into_any_element()
+        };
+        div()
+            .id("parent")
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(child)
+            .child(Badge)
+    }
+}
+
+fn parent(cx: &mut TestAppContext, cached: bool) -> (Entity<Parent>, &mut VisualTestContext) {
+    cx.add_window_view(move |_, cx| Parent {
+        child: cx.new(|_| Leaf),
+        cached,
+    })
+}
+
+/// A view that renders whatever its closure builds.
+struct Scene(Box<dyn Fn(&mut Window, &mut App) -> AnyElement>);
+
+impl Render for Scene {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        (self.0)(window, cx)
+    }
+}
+
+fn scene<E: IntoElement>(
+    cx: &mut TestAppContext,
+    build: impl Fn() -> E + 'static,
+) -> (Entity<Scene>, &mut VisualTestContext) {
+    cx.add_window_view(move |_, _| Scene(Box::new(move |_, _| build().into_any_element())))
+}
+
+// Element tree.
+
+#[gpui::test]
+fn nested_divs_have_exact_links_depths_kinds_and_bounds(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    let tree = latest_tree(cx);
+
+    assert_eq!(tree.roots.len(), 1, "one root: the window's root view");
+    let root_view = tree.roots[0];
+    let root_record = tree.get(root_view).unwrap();
+    assert_eq!(
+        root_record.kind,
+        ElementKind::View {
+            entity: view.entity_id(),
+            type_name: std::any::type_name::<Nested>(),
+        }
+    );
+    assert_eq!(root_record.depth, 0);
+    assert_eq!(root_record.bounds, app_bounds(cx));
+
+    let root = find_id(&tree, "root");
+    let outer = find_id(&tree, "outer");
+    let inner = find_id(&tree, "inner");
+    let sibling = find_id(&tree, "sibling");
+    assert_eq!(tree.get(root).unwrap().parent, Some(root_view));
+    assert_eq!(tree.get(outer).unwrap().parent, Some(root));
+    assert_eq!(tree.get(inner).unwrap().parent, Some(outer));
+    assert_eq!(tree.get(sibling).unwrap().parent, Some(outer));
+    assert_eq!(tree.children(outer), &[inner, sibling]);
+    assert_eq!(tree.children(root_view), &[root]);
+
+    for (id, depth) in [("root", 1), ("outer", 2), ("inner", 3), ("sibling", 3)] {
+        let record = record(&tree, id);
+        assert_eq!(record.depth, depth, "#{id}");
+        assert_eq!(
+            record.kind,
+            ElementKind::Element {
+                type_name: std::any::type_name::<crate::Div>(),
+            },
+            "#{id}"
+        );
+        assert!(record.key.is_some(), "#{id} has a key");
+        assert!(!record.flags.contains(ElementFlags::CLIPPED));
+    }
+    assert_eq!(record(&tree, "root").bounds, app_bounds(cx));
+    assert_eq!(record(&tree, "outer").bounds, bounds(10., 20., 200., 100.));
+    assert_eq!(record(&tree, "inner").bounds, bounds(10., 20., 50., 40.));
+    assert_eq!(record(&tree, "sibling").bounds, bounds(60., 20., 30., 10.));
+    assert_eq!(
+        record(&tree, "inner").visible_bounds,
+        Some(bounds(10., 20., 50., 40.))
+    );
+
+    // Keys are stable across frames and point at the construction site.
+    let inner_key = key_of(&tree, "inner");
+    redraw(cx);
+    assert_eq!(key_of(&latest_tree(cx), "inner"), inner_key);
+    let source = read(cx, |capture| {
+        capture.path_info(inner_key.path).unwrap().source
+    });
+    assert!(source.file().ends_with("inspector/tests.rs"));
+    assert_ne!(inner_key, key_of(&tree, "sibling"));
+    assert!(
+        record(&tree, "inner")
+            .flags
+            .contains(ElementFlags::CLICKABLE | ElementFlags::HITBOX)
+    );
+}
+
+#[gpui::test]
+fn views_and_components_are_boundaries(cx: &mut TestAppContext) {
+    let (view, cx) = parent(cx, false);
+    open(cx);
+    let tree = latest_tree(cx);
+    let child = view.read_with(cx, |parent, _| parent.child.entity_id());
+
+    let leaf_view = tree
+        .elements
+        .iter()
+        .position(
+            |record| matches!(record.kind, ElementKind::View { entity, .. } if entity == child),
+        )
+        .expect("the child view is recorded") as ElementIndex;
+    assert_eq!(
+        tree.get(leaf_view).unwrap().kind,
+        ElementKind::View {
+            entity: child,
+            type_name: std::any::type_name::<Leaf>(),
+        }
+    );
+    assert_eq!(
+        tree.get(find_id(&tree, "leaf-root")).unwrap().parent,
+        Some(leaf_view)
+    );
+    assert_eq!(tree.owning_view(find_id(&tree, "leaf")), Some(leaf_view));
+    let view_key = tree.get(leaf_view).unwrap().key.expect("views have keys");
+    let view_site = read(cx, |capture| {
+        capture.path_info(view_key.path).unwrap().source
+    });
+    assert!(
+        view_site.file().ends_with("inspector/tests.rs"),
+        "a view is sited where it is embedded, not in gpui: {view_site}"
+    );
+
+    let badge = find_id(&tree, "badge");
+    let component = tree.get(badge).unwrap().parent.unwrap();
+    assert_eq!(
+        tree.get(component).unwrap().kind,
+        ElementKind::Component {
+            type_name: std::any::type_name::<Badge>(),
+        }
+    );
+    assert_eq!(tree.get(component).unwrap().kind.short_name(), "Badge");
+
+    // Both views rendered; the component is not a view.
+    let frame = latest_frame(cx);
+    let views: Vec<_> = frame
+        .views
+        .iter()
+        .map(|span| (span.entity, span.outcome))
+        .collect();
+    assert_eq!(
+        views,
+        vec![
+            (view.entity_id(), ViewOutcome::Rendered),
+            (child, ViewOutcome::Rendered)
+        ]
+    );
+    assert_eq!(frame.views[0].depth, 0);
+    assert_eq!(
+        frame.views[1].depth, 1,
+        "the child renders inside the parent"
+    );
+    assert_eq!(frame.views[1].element, Some(leaf_view));
+    assert!(frame.views[1].start >= frame.views[0].start);
+    assert!(
+        frame.views[1].start + frame.views[1].duration
+            <= frame.views[0].start + frame.views[0].duration
+    );
+}
+
+#[gpui::test]
+fn reused_cached_views_keep_their_subtree(cx: &mut TestAppContext) {
+    let (view, cx) = parent(cx, true);
+    open(cx);
+    let child = view.read_with(cx, |parent, _| parent.child.clone());
+    let fresh = latest_tree(cx);
+    let fresh_frame = latest_frame(cx);
+    assert!(
+        fresh_frame
+            .views
+            .iter()
+            .any(|span| span.entity == child.entity_id() && span.outcome == ViewOutcome::Rendered)
+    );
+
+    // Only the parent re-renders: the child's paint is reused.
+    view.update(cx, |_, cx| cx.notify());
+    let reused = latest_tree(cx);
+    let frame = latest_frame(cx);
+    let child_span = frame
+        .views
+        .iter()
+        .find(|span| span.entity == child.entity_id())
+        .expect("the reused view has a span");
+    assert_eq!(child_span.outcome, ViewOutcome::Cached);
+    assert_eq!(
+        reused.elements.len(),
+        fresh.elements.len(),
+        "the tree stays complete"
+    );
+    for id in ["leaf-root", "leaf"] {
+        let (before, after) = (record(&fresh, id), record(&reused, id));
+        assert!(
+            after.flags.contains(ElementFlags::REUSED),
+            "#{id} is reused"
+        );
+        assert!(!before.flags.contains(ElementFlags::REUSED));
+        assert_eq!(after.bounds, before.bounds, "#{id}");
+        assert_eq!(after.key, before.key, "#{id}");
+        assert_eq!(after.primitives, before.primitives, "#{id}");
+        assert!(after.paint_order > 0);
+    }
+    let view_record = child_span.element.unwrap();
+    assert_eq!(
+        reused.get(find_id(&reused, "leaf-root")).unwrap().parent,
+        Some(view_record)
+    );
+    assert!(
+        !reused
+            .get(view_record)
+            .unwrap()
+            .flags
+            .contains(ElementFlags::REUSED)
+    );
+    let mut orders: Vec<u32> = reused
+        .elements
+        .iter()
+        .map(|record| record.paint_order)
+        .collect();
+    orders.sort();
+    orders.dedup();
+    assert_eq!(
+        orders.len(),
+        reused.elements.len(),
+        "paint orders are unique"
+    );
+    assert!(record(&reused, "leaf").paint_order > record(&reused, "leaf-root").paint_order);
+    assert_eq!(
+        record(&reused, "leaf").primitives + 1,
+        reused.get(view_record).unwrap().primitives,
+        "the view's paint (the root's quad and the leaf's) is replayed"
+    );
+
+    // Notifying the child renders it again.
+    child.update(cx, |_, cx| cx.notify());
+    let rendered = latest_tree(cx);
+    assert!(
+        !record(&rendered, "leaf")
+            .flags
+            .contains(ElementFlags::REUSED)
+    );
+}
+
+/// A cached view that embeds another cached view.
+struct Outer {
+    inner: Entity<Leaf>,
+}
+
+impl Render for Outer {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().id("outer-root").size_full().child(
+            self.inner
+                .clone()
+                .cached(StyleRefinement::default().w(px(300.)).h(px(200.))),
+        )
+    }
+}
+
+struct Shell {
+    outer: Entity<Outer>,
+}
+
+impl Render for Shell {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().id("shell").size_full().child(
+            self.outer
+                .clone()
+                .cached(StyleRefinement::default().w(px(400.)).h(px(300.))),
+        )
+    }
+}
+
+#[gpui::test]
+fn nested_cached_views_replay_with_their_parent(cx: &mut TestAppContext) {
+    let (shell, cx) = cx.add_window_view(|_, cx| Shell {
+        outer: cx.new(|cx| Outer {
+            inner: cx.new(|_| Leaf),
+        }),
+    });
+    open(cx);
+    let outer = shell.read_with(cx, |shell, _| shell.outer.clone());
+    let inner = outer.read_with(cx, |outer, _| outer.inner.entity_id());
+    let fresh = latest_tree(cx);
+    let outcome = |frame: &FrameRecord, entity: EntityId| {
+        frame
+            .views
+            .iter()
+            .find(|span| span.entity == entity)
+            .map(|span| span.outcome)
+    };
+
+    // The shell renders; the outer view (and the inner one within it) replay.
+    shell.update(cx, |_, cx| cx.notify());
+    let frame = latest_frame(cx);
+    assert_eq!(
+        outcome(&frame, outer.entity_id()),
+        Some(ViewOutcome::Cached)
+    );
+    assert_eq!(
+        outcome(&frame, inner),
+        None,
+        "replayed inside the outer view"
+    );
+    let replayed = latest_tree(cx);
+    assert_eq!(replayed.elements.len(), fresh.elements.len());
+    for id in ["outer-root", "leaf-root", "leaf"] {
+        assert!(
+            record(&replayed, id).flags.contains(ElementFlags::REUSED),
+            "#{id}"
+        );
+        assert_eq!(
+            record(&replayed, id).bounds,
+            record(&fresh, id).bounds,
+            "#{id}"
+        );
+    }
+
+    // A cached view that renders again renders the cached views inside it.
+    outer.update(cx, |_, cx| cx.notify());
+    let frame = latest_frame(cx);
+    assert_eq!(
+        outcome(&frame, outer.entity_id()),
+        Some(ViewOutcome::Rendered)
+    );
+    assert_eq!(outcome(&frame, inner), Some(ViewOutcome::Rendered));
+    let tree = latest_tree(cx);
+    assert!(
+        tree.elements
+            .iter()
+            .all(|record| !record.flags.contains(ElementFlags::REUSED))
+    );
+    assert_eq!(tree.elements.len(), fresh.elements.len());
+}
+
+#[gpui::test]
+fn clipped_and_scrolled_content(cx: &mut TestAppContext) {
+    let scroll = ScrollHandle::new();
+    scroll.set_offset(point(px(0.), px(-30.)));
+    let (_, cx) = scene(cx, {
+        let scroll = scroll.clone();
+        move || {
+            div()
+                .flex()
+                .child(
+                    div()
+                        .id("clip")
+                        .relative()
+                        .w(px(100.))
+                        .h(px(100.))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .id("partial")
+                                .absolute()
+                                .left(px(50.))
+                                .w(px(100.))
+                                .h(px(20.)),
+                        )
+                        .child(
+                            div()
+                                .id("outside")
+                                .absolute()
+                                .left(px(200.))
+                                .w(px(10.))
+                                .h(px(10.)),
+                        ),
+                )
+                .child(
+                    div().id("loose").relative().w(px(100.)).h(px(100.)).child(
+                        div()
+                            .id("overflowing")
+                            .absolute()
+                            .left(px(60.))
+                            .w(px(100.))
+                            .h(px(20.)),
+                    ),
+                )
+                .child(
+                    div()
+                        .id("scroller")
+                        .w(px(100.))
+                        .h(px(50.))
+                        .overflow_y_scroll()
+                        .track_scroll(&scroll)
+                        .child(div().id("tall").w(px(100.)).h(px(200.))),
+                )
+        }
+    });
+    open(cx);
+    let tree = latest_tree(cx);
+
+    let partial = record(&tree, "partial");
+    assert_eq!(partial.bounds, bounds(50., 0., 100., 20.));
+    assert_eq!(partial.visible_bounds, Some(bounds(50., 0., 50., 20.)));
+    assert!(
+        !partial.flags.contains(ElementFlags::OVERFLOWS_PARENT),
+        "clipped by its parent"
+    );
+
+    let outside = record(&tree, "outside");
+    assert_eq!(outside.visible_bounds, None);
+    assert!(outside.flags.contains(ElementFlags::CLIPPED));
+    assert!(
+        tree.hit_test(point(px(205.), px(5.))).iter().all(|&ix| tree
+            .get(ix)
+            .unwrap()
+            .id
+            .as_deref()
+            != Some("outside"))
+    );
+
+    let overflowing = record(&tree, "overflowing");
+    assert_eq!(
+        overflowing.visible_bounds,
+        Some(bounds(160., 0., 100., 20.))
+    );
+    assert!(overflowing.flags.contains(ElementFlags::OVERFLOWS_PARENT));
+
+    let scroller = record(&tree, "scroller");
+    assert!(scroller.flags.contains(ElementFlags::SCROLLABLE));
+    let tall = record(&tree, "tall");
+    assert_eq!(tall.bounds, bounds(200., -30., 100., 200.));
+    assert_eq!(tall.visible_bounds, Some(bounds(200., 0., 100., 50.)));
+    let details = scroller
+        .details
+        .as_ref()
+        .expect("full capture reports details");
+    assert_eq!(details.scroll_offset, Some(point(px(0.), px(-30.))));
+    assert_eq!(details.content_size, Some(size(px(100.), px(200.))));
+}
+
+#[gpui::test]
+fn deferred_elements_are_roots_painted_last(cx: &mut TestAppContext) {
+    let (_, cx) = scene(cx, || {
+        div().id("root").size_full().child(
+            div()
+                .id("anchor")
+                .w(px(40.))
+                .h(px(40.))
+                .bg(blue())
+                .child(deferred(
+                    div()
+                        .id("popover")
+                        .absolute()
+                        .w(px(80.))
+                        .h(px(30.))
+                        .bg(red()),
+                )),
+        )
+    });
+    open(cx);
+    let tree = latest_tree(cx);
+    let popover = find_id(&tree, "popover");
+    let record = tree.get(popover).unwrap();
+    assert_eq!(record.parent, None);
+    assert_eq!(record.depth, 0);
+    assert!(record.flags.contains(ElementFlags::DEFERRED));
+    assert!(tree.roots.contains(&popover));
+    let highest_main = tree
+        .elements
+        .iter()
+        .filter(|record| !record.flags.contains(ElementFlags::DEFERRED))
+        .map(|record| record.paint_order)
+        .max()
+        .unwrap();
+    assert!(
+        record.paint_order > highest_main,
+        "deferred draws paint above the tree"
+    );
+    assert_eq!(tree.hit_test(point(px(5.), px(5.)))[0], popover);
+}
+
+#[gpui::test]
+fn hit_test_follows_paint_order(cx: &mut TestAppContext) {
+    let (_, cx) = scene(cx, || {
+        div()
+            .id("root")
+            .size_full()
+            .child(div().id("below").absolute().w(px(100.)).h(px(100.)))
+            .child(
+                div()
+                    .id("above")
+                    .absolute()
+                    .left(px(50.))
+                    .w(px(100.))
+                    .h(px(100.))
+                    .child(div().id("child").w(px(10.)).h(px(10.))),
+            )
+    });
+    open(cx);
+    let tree = latest_tree(cx);
+    let ids = |position: Point<Pixels>| {
+        tree.hit_test(position)
+            .into_iter()
+            .filter_map(|ix| tree.get(ix).unwrap().id.clone())
+            .collect::<Vec<SharedString>>()
+    };
+    assert_eq!(
+        ids(point(px(55.), px(5.))),
+        ["child", "above", "below", "root"]
+    );
+    assert_eq!(ids(point(px(75.), px(50.))), ["above", "below", "root"]);
+    assert_eq!(ids(point(px(25.), px(50.))), ["below", "root"]);
+    assert!(record(&tree, "above").paint_order > record(&tree, "below").paint_order);
+    assert!(record(&tree, "child").paint_order > record(&tree, "above").paint_order);
+}
+
+// Frames.
+
+#[gpui::test]
+fn primitive_counts_match_scene_stats(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    let (tree, frame) = (latest_tree(cx), latest_frame(cx));
+    let from_tree: u32 = tree
+        .roots
+        .iter()
+        .map(|&root| tree.get(root).unwrap().primitives)
+        .sum();
+    assert_eq!(from_tree, frame.scene.primitives());
+    assert_eq!(frame.scene.quads, 2);
+    assert_eq!(record(&tree, "inner").primitives, 1);
+    assert_eq!(record(&tree, "outer").primitives, 2);
+    assert_eq!(record(&tree, "root").primitives, 2);
+    assert_eq!(frame.element_count, tree.elements.len() as u32);
+    let quads = cx.update(|window, _| window.painted_quads().len() as u32);
+    assert_eq!(quads, frame.scene.quads);
+}
+
+#[gpui::test]
+fn phase_timings_are_consistent(cx: &mut TestAppContext) {
+    let (_, cx) =
+        scene(cx, || {
+            div().id("grid").flex().flex_wrap().children(
+                (0..200).map(|ix| div().id(ix).w(px(20.)).h(px(20.)).bg(red()).child("x")),
+            )
+        });
+    open(cx);
+    redraw(cx);
+    let timings = latest_frame(cx).timings;
+    for (phase, duration) in [
+        ("render", timings.render),
+        ("layout", timings.layout),
+        ("prepaint", timings.prepaint),
+        ("paint", timings.paint),
+        ("total", timings.total),
+    ] {
+        assert!(!duration.is_zero(), "{phase} is measured");
+    }
+    let phases = timings.render + timings.layout + timings.prepaint + timings.paint;
+    assert!(phases + timings.inspector <= timings.total);
+    assert_eq!(timings.app_total(), timings.total - timings.inspector);
+    assert_eq!(timings.present, None, "tests draw without presenting");
+}
+
+#[gpui::test]
+fn causes_explain_each_frame(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| Nested::new());
+    // Frames drawn while closed are not recorded.
+    view.update(cx, |_, cx| cx.notify());
+    open(cx);
+    let first = latest_frame(cx);
+    assert_eq!(first.causes.len(), 1);
+    assert_eq!(first.causes[0].kind, CauseKind::Initial);
+    assert!(!first.inspector_only);
+
+    let site = view.update(cx, |_, cx| notify_here(cx));
+    let frame = latest_frame(cx);
+    assert_eq!(frame.causes.len(), 1);
+    let cause = &frame.causes[0];
+    assert_eq!(
+        cause.kind,
+        CauseKind::Notify {
+            entity: view.entity_id(),
+            type_name: Some(std::any::type_name::<Nested>()),
+        }
+    );
+    assert_eq!(cause.site, Some(site));
+    assert!(!cause.from_inspector);
+    assert!(!frame.inspector_only);
+
+    let site = cx.update(|window, _| refresh_here(window));
+    let frame = latest_frame(cx);
+    assert_eq!(frame.causes.len(), 1);
+    assert_eq!(frame.causes[0].kind, CauseKind::Refresh);
+    assert_eq!(frame.causes[0].site, Some(site));
+
+    cx.simulate_resize(size(px(1000.), px(700.)));
+    cx.update(|_, _| {});
+    let frame = latest_frame(cx);
+    assert!(
+        frame
+            .causes
+            .iter()
+            .any(|cause| cause.kind == CauseKind::Resize)
+    );
+    assert_eq!(frame.viewport, app_bounds(cx).size);
+}
+
+#[gpui::test]
+fn animation_frames_are_a_cause(cx: &mut TestAppContext) {
+    struct Animated {
+        site: Option<&'static Location<'static>>,
+    }
+    impl Render for Animated {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            if self.site.is_none() {
+                self.site = Some(request_animation_frame_here(window));
+            }
+            div().w(px(10.)).h(px(10.))
+        }
+    }
+    #[track_caller]
+    fn request_animation_frame_here(window: &mut Window) -> &'static Location<'static> {
+        window.request_animation_frame();
+        Location::caller()
+    }
+
+    let (view, cx) = cx.add_window_view(|_, _| Animated { site: None });
+    open(cx);
+    let site = view.read_with(cx, |view, _| view.site).expect("rendered");
+    // Tests deliver next-frame callbacks by hand.
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    let frame = latest_frame(cx);
+    assert_eq!(frame.causes.len(), 1, "{:?}", frame.causes);
+    assert_eq!(frame.causes[0].kind, CauseKind::Animation);
+    assert_eq!(frame.causes[0].site, Some(site));
+    assert!(!frame.inspector_only);
+}
+
+#[gpui::test]
+fn input_that_invalidates_is_a_cause(cx: &mut TestAppContext) {
+    struct Hover;
+    impl Render for Hover {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("target")
+                .w(px(50.))
+                .h(px(50.))
+                .hover(|style| style.bg(red()))
+        }
+    }
+    let (_, cx) = cx.add_window_view(|_, _| Hover);
+    open(cx);
+    cx.simulate_mouse_move(point(px(10.), px(10.)), None, Modifiers::none());
+    let frame = latest_frame(cx);
+    assert!(
+        frame.causes.iter().any(|cause| cause.kind
+            == CauseKind::Input {
+                event: "mouse_move"
+            }
+            && !cause.from_inspector),
+        "{:?}",
+        frame.causes
+    );
+}
+
+/// The inspector's own dock view, for frames the inspector causes.
+struct Dock;
+
+impl Render for Dock {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().id("dock").size_full().bg(blue())
+    }
+}
+
+fn dock_renderer(cx: &mut VisualTestContext) -> Rc<RefCell<Option<Entity<Dock>>>> {
+    let dock = Rc::new(RefCell::new(None));
+    let slot = dock.clone();
+    cx.update(|_, cx| {
+        cx.set_inspector_renderer(Box::new(move |inspector, _, cx| {
+            let view = inspector.ui_state(|| cx.new(|_| Dock)).clone();
+            *slot.borrow_mut() = Some(view.clone());
+            view.into_any_element()
+        }))
+    });
+    dock
+}
+
+#[gpui::test]
+fn frames_caused_only_by_the_inspector_are_flagged(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| Nested::new());
+    let dock = dock_renderer(cx);
+    open(cx);
+    let generation = read(cx, |capture| capture.generation());
+    let dock = dock.borrow().clone().expect("the dock rendered");
+
+    dock.update(cx, |_, cx| cx.notify());
+    let frame = latest_frame(cx);
+    assert!(frame.inspector_only, "{:?}", frame.causes);
+    assert!(frame.causes.iter().all(|cause| cause.from_inspector));
+    assert_eq!(read(cx, |capture| capture.generation()), generation);
+    assert!(
+        latest_tree(cx)
+            .elements
+            .iter()
+            .all(|record| record.id.as_deref() != Some("dock")),
+        "the inspector's own root is never recorded"
+    );
+    assert!(!frame.timings.inspector.is_zero());
+
+    // Restyling the app from the inspector is inspector-caused, but the
+    // restyled tree is new data for the inspector's UI.
+    let key = key_of(&latest_tree(cx), "inner");
+    write(cx, |capture| {
+        capture.set_override(key.path, Some(StyleRefinement::default().w(px(70.))))
+    });
+    dock.update(cx, |_, cx| cx.notify());
+    assert!(latest_frame(cx).inspector_only);
+    assert_eq!(record(&latest_tree(cx), "inner").bounds.size.width, px(70.));
+    let restyled = read(cx, |capture| capture.generation());
+    assert_eq!(restyled, generation + 1);
+
+    view.update(cx, |_, cx| cx.notify());
+    assert!(!latest_frame(cx).inspector_only);
+    assert_eq!(read(cx, |capture| capture.generation()), restyled + 1);
+}
+
+#[gpui::test]
+fn present_time_is_recorded_when_the_frame_is_presented(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    assert_eq!(latest_frame(cx).timings.present, None);
+    let handle = cx.update(|window, _| window.window_handle());
+    cx.test_window(handle)
+        .simulate_frame_request(crate::RequestFrameOptions::default());
+    let present = latest_frame(cx).timings.present;
+    assert!(present.is_some(), "the platform presented the frame");
+
+    // Frames that are not drawn again are not presented again.
+    cx.test_window(handle)
+        .simulate_frame_request(crate::RequestFrameOptions::default());
+    assert_eq!(latest_frame(cx).timings.present, present);
+}
+
+#[gpui::test]
+fn notify_stats_count_per_entity(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    let mut site = None;
+    for _ in 0..3 {
+        site = Some(view.update(cx, |_, cx| notify_here(cx)));
+    }
+    let stats = read(cx, |capture| {
+        capture.notify_stats()[&view.entity_id()].clone()
+    });
+    assert_eq!(stats.total, 3);
+    assert_eq!(stats.buckets.iter().sum::<u32>(), 3);
+    assert!(stats.buckets.len() <= causes::NOTIFY_BUCKETS);
+    assert_eq!(stats.last_site, site);
+}
+
+#[gpui::test]
+fn user_spans_nest_within_the_frame(cx: &mut TestAppContext) {
+    struct Spanned;
+    impl Render for Spanned {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            crate::inspector_span!("outer");
+            let inner = crate::inspector::span("inner");
+            let value = crate::inspector_span!("value", 40 + 2);
+            drop(inner);
+            div().w(px(value as f32))
+        }
+    }
+    // Spans opened while no inspector records are ignored.
+    drop(crate::inspector::span("ignored"));
+    let (_, cx) = cx.add_window_view(|_, _| Spanned);
+    open(cx);
+    let spans = latest_frame(cx).spans;
+    let names: Vec<_> = spans
+        .iter()
+        .map(|span| (span.name.as_ref(), span.depth))
+        .collect();
+    assert_eq!(names, [("outer", 0), ("inner", 1), ("value", 2)]);
+    let (outer, inner, value) = (&spans[0], &spans[1], &spans[2]);
+    assert!(inner.start >= outer.start);
+    assert!(inner.start + inner.duration <= outer.start + outer.duration);
+    assert!(value.start + value.duration <= inner.start + inner.duration);
+    assert!(outer.site.file().ends_with("inspector/tests.rs"));
+    assert!(inner.site.line() > outer.site.line());
+}
+
+#[gpui::test]
+fn input_ranges_are_assigned_to_frames(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    let input = |kind| InputRecord {
+        seq: 0,
+        at: Default::default(),
+        frame: None,
+        kind,
+        detail: "fixture".into(),
+        position: None,
+        keystroke: None,
+        hit_path: Default::default(),
+        context_stack: Default::default(),
+        actions: Default::default(),
+        handled: false,
+        duration: std::time::Duration::from_millis(2),
+        caused_redraw: true,
+        coalesced: 1,
+        inspector: false,
+    };
+    write(cx, |capture| {
+        capture.push_input_for_test(input(InputKind::MouseDown));
+        capture.push_input_for_test(input(InputKind::MouseUp));
+    });
+    redraw(cx);
+    let frame = latest_frame(cx);
+    assert_eq!(frame.input, 0..2);
+    assert_eq!(frame.timings.input, std::time::Duration::from_millis(4));
+    let frames: Vec<_> = read(cx, |capture| {
+        capture.input().iter().map(|record| record.frame).collect()
+    });
+    assert_eq!(frames, [Some(frame.id), Some(frame.id)]);
+    redraw(cx);
+    assert!(latest_frame(cx).input.is_empty());
+}
+
+#[gpui::test]
+fn capture_levels(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    assert!(record(&latest_tree(cx), "inner").details.is_some());
+
+    write(cx, |capture| {
+        capture.config_mut().level = CaptureLevel::Tree
+    });
+    redraw(cx);
+    let tree = latest_tree(cx);
+    assert!(tree.elements.iter().all(|record| record.details.is_none()));
+    assert_eq!(
+        latest_frame(cx).tree.as_ref().map(|tree| tree.frame),
+        Some(latest_frame(cx).id)
+    );
+
+    write(cx, |capture| {
+        capture.config_mut().level = CaptureLevel::Frames
+    });
+    redraw(cx);
+    let frame = latest_frame(cx);
+    assert!(frame.tree.is_none());
+    assert!(frame.element_count >= 5, "elements are still counted");
+    assert!(!frame.views.is_empty());
+}
+
+// Details.
+
+#[gpui::test]
+fn elements_report_details(cx: &mut TestAppContext) {
+    let (_, cx) = scene(cx, || {
+        div()
+            .id("root")
+            .size_full()
+            .child(
+                div()
+                    .id("box")
+                    .m(px(4.))
+                    .p(px(6.))
+                    .border_2()
+                    .border_color(red())
+                    .rounded(px(5.))
+                    .bg(blue())
+                    .opacity(0.5)
+                    .w(px(120.))
+                    .h_1_2()
+                    .flex_grow(1.)
+                    .key_context("Editor")
+                    .child("hello"),
+            )
+            .child(
+                uniform_list("list", 100, |range, _, _| {
+                    range
+                        .map(|ix| div().h(px(10.)).child(format!("row {ix}")))
+                        .collect()
+                })
+                .h(px(50.)),
+            )
+            .child(crate::svg().path("icons/close.svg").id("icon").size_4())
+            .child(crate::img("images/logo.png").id("logo").size_4())
+    });
+    open(cx);
+    let tree = latest_tree(cx);
+    let details = record(&tree, "box").details.clone().expect("details");
+    let box_model = details.box_model.unwrap();
+    assert_eq!(box_model.margin, crate::Edges::all(px(4.)));
+    assert_eq!(box_model.padding, crate::Edges::all(px(6.)));
+    assert_eq!(box_model.border, crate::Edges::all(px(2.)));
+    assert_eq!(details.background, Some(blue()));
+    assert_eq!(details.border_color, Some(red()));
+    assert_eq!(details.corner_radius, Some(px(5.)));
+    assert_eq!(details.opacity, Some(0.5));
+    assert_eq!(details.key_context.as_deref(), Some("Editor"));
+    let layout = details.layout.unwrap();
+    assert_eq!(
+        layout.display.as_ref(),
+        "block",
+        "divs are blocks unless flex"
+    );
+    assert_eq!(layout.flex_direction, None);
+    assert_eq!(layout.size.width, SizeSpec::Pixels(px(120.)));
+    assert_eq!(layout.size.height, SizeSpec::Fraction(0.5));
+    assert_eq!(layout.flex_grow, 1.);
+
+    let text = tree.children(find_id(&tree, "box"))[0];
+    let text_details = tree
+        .get(text)
+        .unwrap()
+        .details
+        .clone()
+        .expect("text details");
+    assert_eq!(text_details.text.as_deref(), Some("hello"));
+    assert!(text_details.font_size.is_some());
+    assert!(text_details.text_color.is_some());
+
+    let list = record(&tree, "list").details.clone().expect("list details");
+    assert_eq!(list.list, Some((100, 0..5)));
+
+    let source = |id| {
+        record(&tree, id)
+            .details
+            .clone()
+            .and_then(|details| details.source)
+    };
+    assert_eq!(source("icon").as_deref(), Some("icons/close.svg"));
+    assert_eq!(source("logo").as_deref(), Some("images/logo.png"));
+}
+
+// Style overrides.
+
+#[gpui::test]
+fn overrides_restyle_and_relayout(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    let key = key_of(&latest_tree(cx), "inner");
+    write(cx, |capture| {
+        capture.set_override(key.path, Some(StyleRefinement::default().w(px(120.))))
+    });
+    redraw(cx);
+    let tree = latest_tree(cx);
+    assert_eq!(record(&tree, "inner").bounds, bounds(10., 20., 120., 40.));
+    assert!(
+        record(&tree, "inner")
+            .flags
+            .contains(ElementFlags::OVERRIDDEN)
+    );
+    assert_eq!(
+        record(&tree, "sibling").bounds.origin.x,
+        px(130.),
+        "siblings relayout"
+    );
+    assert!(
+        !record(&tree, "outer")
+            .flags
+            .contains(ElementFlags::OVERRIDDEN)
+    );
+
+    write(cx, |capture| capture.set_override(key.path, None));
+    redraw(cx);
+    let tree = latest_tree(cx);
+    assert_eq!(record(&tree, "inner").bounds, bounds(10., 20., 50., 40.));
+    assert!(
+        !record(&tree, "inner")
+            .flags
+            .contains(ElementFlags::OVERRIDDEN)
+    );
+}
+
+#[gpui::test]
+fn forced_states_apply_state_styles(cx: &mut TestAppContext) {
+    let hovered_color: Hsla = red();
+    let (_, cx) = scene(cx, move || {
+        div()
+            .id("button")
+            .w(px(40.))
+            .h(px(20.))
+            .bg(blue())
+            .hover(move |style| style.bg(hovered_color))
+    });
+    open(cx);
+    let tree = latest_tree(cx);
+    assert!(
+        record(&tree, "button")
+            .flags
+            .contains(ElementFlags::STATEFUL_STYLE)
+    );
+    let key = key_of(&tree, "button");
+    let background = |cx: &mut VisualTestContext| {
+        record(&latest_tree(cx), "button")
+            .details
+            .clone()
+            .unwrap()
+            .background
+    };
+    assert_eq!(background(cx), Some(blue()));
+
+    write(cx, |capture| {
+        capture.set_forced_states(key.path, ForcedStates::HOVER)
+    });
+    redraw(cx);
+    assert_eq!(
+        background(cx),
+        Some(red()),
+        "hover is forced without a pointer"
+    );
+    let painted_red = cx.update(|window, _| {
+        window
+            .painted_quads()
+            .iter()
+            .any(|quad| quad.background.as_solid() == Some(red()))
+    });
+    assert!(painted_red);
+
+    write(cx, |capture| {
+        capture.set_forced_states(key.path, ForcedStates::empty())
+    });
+    redraw(cx);
+    assert_eq!(background(cx), Some(blue()));
+}
+
+#[gpui::test]
+fn the_selected_element_keeps_its_base_style(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    let key = key_of(&latest_tree(cx), "inner");
+    write(cx, |capture| {
+        capture.overlay_mut().selected = Some(key);
+        capture.set_override(key.path, Some(StyleRefinement::default().w(px(99.))));
+    });
+    redraw(cx);
+    let selected = read(cx, |capture| capture.selected_style().cloned()).expect("recorded");
+    assert_eq!(selected.key, key);
+    let expected = StyleRefinement::default().w(px(50.)).h(px(40.)).bg(red());
+    assert_eq!(
+        *selected.base, expected,
+        "the base style precedes overrides"
+    );
+
+    write(cx, |capture| capture.overlay_mut().selected = None);
+    redraw(cx);
+    assert!(read(cx, |capture| capture.selected_style().is_none()));
+}
+
+// Picking.
+
+#[gpui::test]
+fn picking_selects_the_deepest_element_and_walks_up(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    let events = events(cx);
+    let tree = latest_tree(cx);
+    let (inner, outer) = (key_of(&tree, "inner"), key_of(&tree, "outer"));
+    let clicks = view.read_with(cx, |view, _| view.clicks.clone());
+
+    cx.update(|window, _| window.start_inspector_pick());
+    assert!(cx.update(|window, cx| window.is_inspector_picking(cx)));
+    let position = point(px(20.), px(30.));
+    cx.simulate_mouse_move(position, None, Modifiers::none());
+    assert_eq!(read(cx, |capture| capture.overlay().hovered), Some(inner));
+    assert_eq!(
+        events.borrow().last(),
+        Some(&InspectorEvent::PickHovered(Some(inner)))
+    );
+    let frame = latest_frame(cx);
+    assert!(
+        frame.inspector_only,
+        "picking only redraws the overlay: {:?}",
+        frame.causes
+    );
+
+    cx.simulate_keystrokes("]");
+    assert_eq!(read(cx, |capture| capture.overlay().hovered), Some(outer));
+    cx.simulate_keystrokes("[");
+    assert_eq!(read(cx, |capture| capture.overlay().hovered), Some(inner));
+    cx.simulate_event(ScrollWheelEvent {
+        position,
+        delta: ScrollDelta::Pixels(point(px(0.), px(36.))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    assert_eq!(read(cx, |capture| capture.overlay().hovered), Some(outer));
+    assert_eq!(read(cx, |capture| capture.pick().depth), 1);
+
+    cx.simulate_click(position, Modifiers::none());
+    assert_eq!(
+        *clicks.borrow(),
+        0,
+        "the app does not see the picking click"
+    );
+    assert_eq!(read(cx, |capture| capture.overlay().selected), Some(outer));
+    assert!(!read(cx, |capture| capture.pick().active));
+    assert_eq!(events.borrow().last(), Some(&InspectorEvent::Picked(outer)));
+
+    // Once picking ends, the app gets its clicks again.
+    cx.simulate_click(position, Modifiers::none());
+    assert_eq!(*clicks.borrow(), 1);
+}
+
+#[gpui::test]
+fn escape_or_stopping_cancels_picking(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    let events = events(cx);
+
+    cx.update(|window, _| window.start_inspector_pick());
+    cx.simulate_mouse_move(point(px(20.), px(30.)), None, Modifiers::none());
+    cx.simulate_keystrokes("escape");
+    assert!(!read(cx, |capture| capture.pick().active));
+    assert_eq!(read(cx, |capture| capture.overlay().hovered), None);
+    assert_eq!(events.borrow().last(), Some(&InspectorEvent::PickCancelled));
+
+    events.borrow_mut().clear();
+    cx.update(|window, _| {
+        window.start_inspector_pick();
+        window.stop_inspector_pick();
+    });
+    assert!(!read(cx, |capture| capture.pick().active));
+    assert_eq!(events.borrow().as_slice(), [InspectorEvent::PickCancelled]);
+}
+
+// Overlays.
+
+#[gpui::test]
+fn overlays_paint_inside_the_app_only(cx: &mut TestAppContext) {
+    let (_, cx) = scene(cx, || {
+        div().id("root").size_full().child(
+            div()
+                .id("wide")
+                .absolute()
+                .left(px(1300.))
+                .w(px(200.))
+                .h(px(40.))
+                .bg(red())
+                .on_click(|_, _, _| {}),
+        )
+    });
+    open(cx);
+    let app = app_bounds(cx);
+    let scale = cx.update(|window, _| window.scale_factor());
+    let outside_app = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .painted_quads()
+                .iter()
+                .filter(|quad| {
+                    let mask = quad.content_mask.bounds;
+                    mask.right() > (app.right() + px(0.5)).scale(scale)
+                })
+                .count()
+        })
+    };
+    let (quads_before, outside_before) = (
+        cx.update(|window, _| window.painted_quads().len()),
+        outside_app(cx),
+    );
+
+    let key = key_of(&latest_tree(cx), "wide");
+    write(cx, |capture| {
+        let overlay = capture.overlay_mut();
+        overlay.modes = OverlayModes::all();
+        overlay.selected = Some(key);
+        overlay.highlights.push(OverlayHighlight {
+            bounds: bounds(1200., 0., 600., 100.),
+            color: blue(),
+            label: Some("highlight".into()),
+        });
+    });
+    redraw(cx);
+    let quads_after = cx.update(|window, _| window.painted_quads().len());
+    assert!(quads_after > quads_before + 10, "overlays were painted");
+    assert_eq!(
+        outside_app(cx),
+        outside_before,
+        "no overlay quad reaches the dock"
+    );
+
+    // Overlays are the inspector's: excluded from the app's scene stats.
+    let frame = latest_frame(cx);
+    assert_eq!(frame.scene.quads as usize, quads_before);
+}
+
+#[gpui::test]
+fn paint_flash_fades_in_inspector_only_frames(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    write(cx, |capture| {
+        capture.overlay_mut().modes = OverlayModes::PAINT_FLASH
+    });
+    view.update(cx, |_, cx| cx.notify());
+    assert!(!latest_frame(cx).inspector_only);
+    assert!(
+        cx.update(|window, _| window.invalidator.is_dirty()),
+        "the flash requests a frame"
+    );
+
+    let id = latest_frame(cx).id;
+    cx.update(|_, _| {});
+    let frame = latest_frame(cx);
+    assert!(frame.id > id);
+    assert!(frame.inspector_only, "{:?}", frame.causes);
+    assert!(
+        frame
+            .causes
+            .iter()
+            .all(|cause| cause.kind == CauseKind::Animation)
+    );
+}
+
+// Lifetime, freezing, dock.
+
+#[gpui::test]
+fn nothing_is_recorded_while_closed(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| Nested::new());
+    view.update(cx, |_, cx| cx.notify());
+    assert!(cx.update(|window, _| window.inspector_capture().is_none()));
+    assert!(cx.update(|window, _| !window.invalidator.has_cause_log()));
+
+    open(cx);
+    assert_eq!(read(cx, |capture| capture.frames().len()), 1);
+    view.update(cx, |_, cx| cx.notify());
+    assert_eq!(read(cx, |capture| capture.frames().len()), 2);
+
+    close(cx);
+    assert!(cx.update(|window, _| window.inspector_capture().is_none()));
+    assert!(cx.update(|window, _| !window.invalidator.has_cause_log()));
+    view.update(cx, |_, cx| cx.notify());
+
+    open(cx);
+    let frames = read(cx, |capture| capture.frames().len());
+    assert_eq!(frames, 1, "a new capture starts empty");
+    assert_eq!(latest_frame(cx).causes[0].kind, CauseKind::Initial);
+    assert!(read(cx, |capture| capture.notify_stats().is_empty()));
+}
+
+#[gpui::test]
+fn freezing_stops_the_rings_but_not_picking(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    write(cx, |capture| capture.set_frozen(true));
+    let (frames, generation) = read(cx, |capture| (capture.frames().len(), capture.generation()));
+    view.update(cx, |view, cx| {
+        view.outer_width = px(400.);
+        cx.notify();
+    });
+    assert_eq!(read(cx, |capture| capture.frames().len()), frames);
+    assert_eq!(read(cx, |capture| capture.generation()), generation);
+    assert!(read(cx, |capture| capture.notify_stats().is_empty()));
+
+    // Picking walks the live tree, which follows the new layout.
+    cx.update(|window, _| window.start_inspector_pick());
+    cx.simulate_mouse_move(point(px(300.), px(50.)), None, Modifiers::none());
+    let outer = key_of(&latest_tree(cx), "outer");
+    assert_eq!(read(cx, |capture| capture.overlay().hovered), Some(outer));
+
+    write(cx, |capture| capture.set_frozen(false));
+    view.update(cx, |_, cx| cx.notify());
+    assert!(read(cx, |capture| capture.frames().len()) > frames);
+}
+
+#[gpui::test]
+fn dock_changes_relayout_the_app(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    let viewport = cx.update(|window, _| window.viewport_size());
+    write(cx, |capture| {
+        capture.set_dock(InspectorDock::Bottom { height: px(300.) })
+    });
+    redraw(cx);
+    let app = app_bounds(cx);
+    assert_eq!(
+        app,
+        Bounds::new(
+            Point::default(),
+            size(viewport.width, viewport.height - px(300.))
+        )
+    );
+    let tree = latest_tree(cx);
+    assert_eq!(tree.get(tree.roots[0]).unwrap().bounds, app);
+    assert_eq!(record(&tree, "root").bounds, app);
+    let frame = latest_frame(cx);
+    assert_eq!(frame.viewport, app.size);
+    assert!(
+        frame
+            .causes
+            .iter()
+            .any(|cause| cause.kind == CauseKind::Resize && !cause.from_inspector)
+    );
+    assert_eq!(
+        cx.update(|window, _| window.inspector_bounds()),
+        Some(Bounds::new(
+            point(px(0.), viewport.height - px(300.)),
+            size(viewport.width, px(300.))
+        ))
+    );
+}
+
+#[test]
+fn dock_extents_are_clamped() {
+    let viewport = size(px(1000.), px(600.));
+    let width = |dock: InspectorDock, viewport| dock.split(viewport).1.size.width;
+    assert_eq!(
+        width(InspectorDock::Right { width: px(10.) }, viewport),
+        px(240.)
+    );
+    assert_eq!(
+        width(InspectorDock::Right { width: px(5000.) }, viewport),
+        px(880.)
+    );
+    assert_eq!(
+        width(InspectorDock::Right { width: px(400.) }, viewport),
+        px(400.)
+    );
+    let (app, dock) = InspectorDock::Right { width: px(400.) }.split(size(px(300.), px(600.)));
+    assert_eq!(app.size.width, px(120.), "the app keeps its minimum");
+    assert_eq!(dock.size.width, px(180.));
+    let (app, dock) = InspectorDock::Bottom { height: px(100.) }.split(viewport);
+    assert_eq!(dock.size.height, px(240.));
+    assert_eq!(app.size.height, px(360.));
+    assert_eq!(dock.origin.y, px(360.));
+}
+
+// Overhead.
+
+/// Median `Window::draw` time of a ~2,000 element scene with the inspector
+/// closed and open at each capture level. Prints its measurements:
+/// `cargo test -p gpui-ce --features test-support --lib capture_overhead -- --ignored --nocapture`
+#[gpui::test]
+#[ignore = "a measurement, not a check"]
+fn capture_overhead(cx: &mut TestAppContext) {
+    const ROWS: usize = 40;
+    const COLUMNS: usize = 48;
+    let (_, cx) = scene(cx, || {
+        div()
+            .id("grid")
+            .size_full()
+            .flex()
+            .flex_col()
+            .children((0..ROWS).map(|row| {
+                div()
+                    .id(("row", row))
+                    .flex()
+                    .children((0..COLUMNS).map(|column| {
+                        div()
+                            .id(column)
+                            .w(px(8.))
+                            .h(px(8.))
+                            .bg(red())
+                            .hover(|style| style.bg(blue()))
+                    }))
+            }))
+    });
+    let median_draw = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            for _ in 0..10 {
+                window.draw(cx).clear(cx);
+            }
+            let mut samples = (0..60)
+                .map(|_| {
+                    let start = scheduler::Instant::now();
+                    window.draw(cx).clear(cx);
+                    start.elapsed()
+                })
+                .collect::<Vec<_>>();
+            samples.sort();
+            samples[samples.len() / 2]
+        })
+    };
+
+    let closed = median_draw(cx);
+    println!("closed      {closed:>10.2?}");
+    open(cx);
+    let elements = latest_frame(cx).element_count;
+    for level in [CaptureLevel::Frames, CaptureLevel::Tree, CaptureLevel::Full] {
+        write(cx, |capture| capture.config_mut().level = level);
+        let open = median_draw(cx);
+        let overhead = open.as_secs_f64() / closed.as_secs_f64() - 1.;
+        println!(
+            "{:<11} {open:>10.2?}  {:+.0}%  ({elements} elements)",
+            format!("{level:?}"),
+            overhead * 100.
+        );
+    }
+}

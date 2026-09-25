@@ -1573,6 +1573,14 @@ impl Element for List {
 
         state.last_layout_bounds = Some(bounds);
         state.last_padding = Some(padding);
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        window.inspect_current_element(|details| {
+            let visible = match (layout.item_layouts.front(), layout.item_layouts.back()) {
+                (Some(first), Some(last)) => first.index..last.index + 1,
+                _ => 0..0,
+            };
+            details.list = Some((state.items.summary().count, visible));
+        });
         ListPrepaintState { hitbox, layout }
     }
 

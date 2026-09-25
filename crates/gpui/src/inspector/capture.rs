@@ -7,7 +7,7 @@ use super::model::*;
 use crate::{Bounds, Hsla, Pixels, SharedString, Size, StyleRefinement, px};
 use collections::FxHashMap;
 use scheduler::Instant;
-use std::{collections::VecDeque, panic::Location, sync::Arc, time::Duration};
+use std::{collections::VecDeque, panic::Location, rc::Rc, sync::Arc, time::Duration};
 
 /// Where the inspector UI docks inside its window.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,11 +31,18 @@ impl Default for InspectorDock {
 }
 
 impl InspectorDock {
-    /// Splits a viewport into the app's area and the dock's area.
+    /// The dock is never narrower (or shorter) than this, unless the window
+    /// is too small to also give the app [`Self::MIN_APP_EXTENT`].
+    pub const MIN_DOCK_EXTENT: Pixels = px(240.);
+    /// The app keeps at least this much width (or height) next to the dock.
+    pub const MIN_APP_EXTENT: Pixels = px(120.);
+
+    /// Splits a viewport into the app's area and the dock's area. The dock's
+    /// requested extent is clamped so both stay usable.
     pub fn split(&self, viewport: Size<Pixels>) -> (Bounds<Pixels>, Bounds<Pixels>) {
         match *self {
             InspectorDock::Right { width } => {
-                let width = width.min(viewport.width * 0.85).max(px(0.));
+                let width = Self::clamp_extent(width, viewport.width);
                 let app = Bounds::new(
                     crate::point(px(0.), px(0.)),
                     crate::size(viewport.width - width, viewport.height),
@@ -47,7 +54,7 @@ impl InspectorDock {
                 (app, dock)
             }
             InspectorDock::Bottom { height } => {
-                let height = height.min(viewport.height * 0.85).max(px(0.));
+                let height = Self::clamp_extent(height, viewport.height);
                 let app = Bounds::new(
                     crate::point(px(0.), px(0.)),
                     crate::size(viewport.width, viewport.height - height),
@@ -59,6 +66,11 @@ impl InspectorDock {
                 (app, dock)
             }
         }
+    }
+
+    fn clamp_extent(requested: Pixels, available: Pixels) -> Pixels {
+        let max = (available - Self::MIN_APP_EXTENT).max(px(0.));
+        requested.max(Self::MIN_DOCK_EXTENT).min(max)
     }
 }
 
@@ -196,7 +208,7 @@ pub struct InspectorCapture {
     pub(crate) input: VecDeque<InputRecord>,
     pub(crate) next_frame_id: u64,
     pub(crate) next_input_seq: u64,
-    pub(crate) paths: FxHashMap<crate::InspectorElementPath, PathKey>,
+    pub(crate) paths: FxHashMap<Rc<crate::InspectorElementPath>, PathKey>,
     pub(crate) path_infos: Vec<PathInfo>,
     pub(crate) notify_stats: FxHashMap<crate::EntityId, NotifyStats>,
     pub(crate) frozen: bool,
@@ -207,6 +219,7 @@ pub struct InspectorCapture {
     pub(crate) overrides: FxHashMap<PathKey, StyleRefinement>,
     pub(crate) forced_states: FxHashMap<PathKey, ForcedStates>,
     pub(crate) selected_style: Option<SelectedStyle>,
+    pub(crate) recorder: super::recorder::Recorder,
 }
 
 impl InspectorCapture {
@@ -229,6 +242,7 @@ impl InspectorCapture {
             overrides: FxHashMap::default(),
             forced_states: FxHashMap::default(),
             selected_style: None,
+            recorder: Default::default(),
         }
     }
 
@@ -238,12 +252,30 @@ impl InspectorCapture {
         if let Some(&key) = self.paths.get(path) {
             return key;
         }
+        self.insert_path(Rc::new(path.clone()))
+    }
+
+    /// Interns an element path, also returning the capture's shared copy of
+    /// it, so elements drawn at the same site share one allocation.
+    pub(crate) fn intern_shared(
+        &mut self,
+        path: crate::InspectorElementPath,
+    ) -> (Rc<crate::InspectorElementPath>, PathKey) {
+        if let Some((shared, &key)) = self.paths.get_key_value(&path) {
+            return (shared.clone(), key);
+        }
+        let shared = Rc::new(path);
+        let key = self.insert_path(shared.clone());
+        (shared, key)
+    }
+
+    fn insert_path(&mut self, path: Rc<crate::InspectorElementPath>) -> PathKey {
         let key = PathKey(self.path_infos.len() as u32);
         self.path_infos.push(PathInfo {
             source: path.source_location,
             scope: format!("{:?}", path.global_id).into(),
         });
-        self.paths.insert(path.clone(), key);
+        self.paths.insert(path, key);
         key
     }
 
@@ -456,6 +488,7 @@ impl InspectorCapture {
             Some(style) => self.overrides.insert(path, style),
             None => self.overrides.remove(&path),
         };
+        self.recorder.style_inputs_changed = true;
     }
 
     /// States forced on the element at `path`.
@@ -470,6 +503,7 @@ impl InspectorCapture {
         } else {
             self.forced_states.insert(path, states);
         }
+        self.recorder.style_inputs_changed = true;
     }
 
     /// The selected element's own style, from the latest frame that drew it.
@@ -517,6 +551,7 @@ impl InspectorCapture {
             + frames
             + self.input.len() * size_of::<InputRecord>()
             + self.path_infos.len() * size_of::<PathInfo>()
+            + self.recorder.retained_bytes()
     }
 }
 

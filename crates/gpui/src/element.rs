@@ -31,6 +31,8 @@
 //! elements when you need to take manual control of the layout and painting process, such as when using
 //! your own custom layout algorithm or rendering a code editor.
 
+#[cfg(any(feature = "inspector", debug_assertions))]
+use crate::inspector::recorder::RecordSlot;
 use crate::{
     A11ySubtreeBuilder, App, ArenaBox, AvailableSpace, Bounds, Context, DispatchNodeId, ElementId,
     FocusHandle, InspectorElementId, LayoutId, Pixels, Point, Size, Style, Window,
@@ -152,6 +154,18 @@ pub trait Element: 'static + IntoElement {
     fn into_any(self) -> AnyElement {
         AnyElement::new(self)
     }
+
+    /// How the inspector records this element; `None` for transparent
+    /// wrappers, whose content is recorded in their place. Defaults to an
+    /// [`ElementKind::Element`](crate::inspector::ElementKind::Element) named
+    /// after the implementing type.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    #[doc(hidden)]
+    fn inspector_kind(&self) -> Option<crate::inspector::ElementKind> {
+        Some(crate::inspector::ElementKind::Element {
+            type_name: std::any::type_name::<Self>(),
+        })
+    }
 }
 
 /// Implemented by any type that can be converted into an element.
@@ -230,6 +244,7 @@ pub trait ParentElement {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>);
 
     /// Add a single child element to this element.
+    #[track_caller]
     fn child(mut self, child: impl IntoElement) -> Self
     where
         Self: Sized,
@@ -276,6 +291,9 @@ impl GlobalElementId {
 trait ElementObject {
     fn inner_element(&mut self) -> &mut dyn Any;
 
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn inspector_record(&self) -> Option<RecordSlot>;
+
     fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId;
 
     fn prepaint(&mut self, window: &mut Window, cx: &mut App);
@@ -295,6 +313,9 @@ pub struct Drawable<E: Element> {
     /// The drawn element.
     pub element: E,
     phase: ElementDrawPhase<E::RequestLayoutState, E::PrepaintState>,
+    /// The element's record in the inspector's tree, while one is captured.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    inspector_record: Option<RecordSlot>,
 }
 
 #[derive(Default)]
@@ -331,6 +352,8 @@ impl<E: Element> Drawable<E> {
         Drawable {
             element,
             phase: ElementDrawPhase::Start,
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            inspector_record: None,
         }
     }
 
@@ -342,21 +365,19 @@ impl<E: Element> Drawable<E> {
                     GlobalElementId(Arc::from(&*window.element_id_stack))
                 });
 
-                let inspector_id;
                 #[cfg(any(feature = "inspector", debug_assertions))]
-                {
-                    inspector_id = self.element.source_location().map(|source| {
-                        let path = crate::InspectorElementPath {
-                            global_id: GlobalElementId(Arc::from(&*window.element_id_stack)),
-                            source_location: source,
-                        };
-                        window.build_inspector_element_id(path)
-                    });
-                }
+                let (inspector_id, record) = {
+                    let path =
+                        self.element
+                            .source_location()
+                            .map(|source| crate::InspectorElementPath {
+                                global_id: GlobalElementId(Arc::from(&*window.element_id_stack)),
+                                source_location: source,
+                            });
+                    window.inspector_begin_element(&self.element, global_id.as_ref(), path)
+                };
                 #[cfg(not(any(feature = "inspector", debug_assertions)))]
-                {
-                    inspector_id = None;
-                }
+                let inspector_id = None;
 
                 let (layout_id, request_layout) = self.element.request_layout(
                     global_id.as_ref(),
@@ -364,6 +385,11 @@ impl<E: Element> Drawable<E> {
                     window,
                     cx,
                 );
+
+                #[cfg(any(feature = "inspector", debug_assertions))]
+                {
+                    self.inspector_record = window.inspector_close_element(record);
+                }
 
                 if global_id.is_some() {
                     window.element_id_stack.pop();
@@ -447,6 +473,8 @@ impl<E: Element> Drawable<E> {
                 }
 
                 let node_id = window.next_frame.dispatch_tree.push_node();
+                #[cfg(any(feature = "inspector", debug_assertions))]
+                window.inspector_enter_prepaint(self.inspector_record, bounds);
                 let mut prepaint = self.element.prepaint(
                     global_id.as_ref(),
                     inspector_id.as_ref(),
@@ -455,6 +483,8 @@ impl<E: Element> Drawable<E> {
                     window,
                     cx,
                 );
+                #[cfg(any(feature = "inspector", debug_assertions))]
+                window.inspector_exit_prepaint(self.inspector_record);
                 window.next_frame.dispatch_tree.pop_node();
 
                 if pushed_a11y_node {
@@ -521,6 +551,8 @@ impl<E: Element> Drawable<E> {
                 }
 
                 window.next_frame.dispatch_tree.set_active_node(node_id);
+                #[cfg(any(feature = "inspector", debug_assertions))]
+                window.inspector_enter_paint(self.inspector_record);
                 self.element.paint(
                     global_id.as_ref(),
                     inspector_id.as_ref(),
@@ -530,6 +562,8 @@ impl<E: Element> Drawable<E> {
                     window,
                     cx,
                 );
+                #[cfg(any(feature = "inspector", debug_assertions))]
+                window.inspector_exit_paint(self.inspector_record);
 
                 if global_id.is_some() {
                     window.element_id_stack.pop();
@@ -604,6 +638,11 @@ where
         &mut self.element
     }
 
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn inspector_record(&self) -> Option<RecordSlot> {
+        self.inspector_record
+    }
+
     #[inline]
     fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
         Drawable::request_layout(self, window, cx)
@@ -647,6 +686,12 @@ impl AnyElement {
     /// Attempt to downcast a reference to the boxed element to a specific type.
     pub fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
         self.0.inner_element().downcast_mut::<T>()
+    }
+
+    /// The element's record in the inspector's tree, once laid out.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub(crate) fn inspector_record(&self) -> Option<RecordSlot> {
+        self.0.inspector_record()
     }
 
     /// Request the layout ID of the element stored in this `AnyElement`.
@@ -718,6 +763,11 @@ impl Element for AnyElement {
     }
 
     fn source_location(&self) -> Option<&'static panic::Location<'static>> {
+        None
+    }
+
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn inspector_kind(&self) -> Option<crate::inspector::ElementKind> {
         None
     }
 

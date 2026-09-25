@@ -50,6 +50,21 @@ pub enum ImageSource {
     Custom(Arc<dyn Fn(&mut Window, &mut App) -> Option<Result<Arc<RenderImage>, ImageCacheError>>>),
 }
 
+impl ImageSource {
+    /// A short description of where the image comes from, for the inspector.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn describe(&self) -> SharedString {
+        match self {
+            ImageSource::Resource(Resource::Uri(uri)) => (**uri).clone(),
+            ImageSource::Resource(Resource::Path(path)) => path.display().to_string().into(),
+            ImageSource::Resource(Resource::Embedded(path)) => path.clone(),
+            ImageSource::Render(_) => "rendered image".into(),
+            ImageSource::Image(_) => "image data".into(),
+            ImageSource::Custom(_) => "custom loader".into(),
+        }
+    }
+}
+
 fn is_uri(uri: &str) -> bool {
     url::Url::from_str(uri).is_ok()
 }
@@ -281,6 +296,8 @@ impl Element for Img {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        window.inspect_current_element(|details| details.source = Some(self.source.describe()));
         let mut layout_state = ImgLayoutState {
             frame_index: 0,
             replacement: None,
