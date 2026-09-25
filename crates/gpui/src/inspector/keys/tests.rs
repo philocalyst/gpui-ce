@@ -475,6 +475,83 @@ fn window_resolution_uses_focus_handlers_and_global_listeners(cx: &mut TestAppCo
     cx.update(|window, _| assert!(!window.has_pending_keystrokes()));
 }
 
+/// Two focusable leaves in different key contexts: `workspace > editor`,
+/// whose level handles [`Alpha`], and `workspace > panel`.
+struct TwoFoci {
+    editor: FocusHandle,
+    panel: FocusHandle,
+}
+
+impl Render for TwoFoci {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .key_context("workspace")
+            .size_full()
+            .child(
+                div()
+                    .key_context("editor")
+                    .on_action(|_: &Alpha, _, _| {})
+                    .child(div().track_focus(&self.editor).size_full()),
+            )
+            .child(
+                div()
+                    .key_context("panel")
+                    .child(div().track_focus(&self.panel).size_full()),
+            )
+    }
+}
+
+#[gpui::test]
+fn resolving_for_another_focus_matches_resolving_with_it_focused(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| TwoFoci {
+        editor: cx.focus_handle(),
+        panel: cx.focus_handle(),
+    });
+    cx.update(|_, cx| {
+        cx.bind_keys([
+            KeyBinding::new("a", Alpha, Some("editor")),
+            KeyBinding::new("a", Beta, Some("workspace")),
+            KeyBinding::new("a", Gamma, Some("panel")),
+        ])
+    });
+    let (editor, panel) = view.read_with(cx, |view, _| (view.editor.clone(), view.panel.clone()));
+    let summary = |resolution: KeyResolution| {
+        let verdicts: Vec<_> = verdicts(&resolution)
+            .into_iter()
+            .map(|(action, verdict)| (action.to_string(), verdict))
+            .collect();
+        (resolution.context_stack, verdicts)
+    };
+
+    cx.update(|window, cx| editor.focus(window, cx));
+    cx.run_until_parked();
+    let focused =
+        cx.update(|window, cx| summary(window.inspector_resolve_keystrokes(&keystrokes("a"), cx)));
+    assert_eq!(focused.0, contexts(&["workspace", "editor"]));
+    assert_eq!(focused.1[0].0, "inspector_keys_test::Alpha");
+
+    // With the panel focused, resolving for the editor still sees the editor.
+    cx.update(|window, cx| panel.focus(window, cx));
+    cx.run_until_parked();
+    let for_editor = cx.update(|window, cx| {
+        summary(window.inspector_resolve_keystrokes_for(&keystrokes("a"), Some(&editor), cx))
+    });
+    assert_eq!(for_editor, focused);
+    let for_panel = cx.update(|window, cx| {
+        summary(window.inspector_resolve_keystrokes_for(&keystrokes("a"), Some(&panel), cx))
+    });
+    let with_panel =
+        cx.update(|window, cx| summary(window.inspector_resolve_keystrokes(&keystrokes("a"), cx)));
+    assert_eq!(for_panel, with_panel);
+    assert_eq!(for_panel.0, contexts(&["workspace", "panel"]));
+
+    // No focus: the keys go to the window root, outside every context.
+    let unfocused =
+        cx.update(|window, cx| window.inspector_resolve_keystrokes_for(&keystrokes("a"), None, cx));
+    assert!(unfocused.context_stack.is_empty());
+    assert!(unfocused.winner().is_none());
+}
+
 // Property tests.
 
 const KEYS: [&str; 4] = ["a", "b", "ctrl-a", "ctrl-b"];

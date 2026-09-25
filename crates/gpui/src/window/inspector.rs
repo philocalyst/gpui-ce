@@ -68,10 +68,37 @@ impl Window {
         keystrokes: &[Keystroke],
         cx: &App,
     ) -> crate::inspector::KeyResolution {
-        let node_id = self.focus_node_id_in_rendered_frame(self.focus);
+        self.resolve_keystrokes_at(keystrokes, self.focus, cx)
+    }
+
+    /// Like [`Self::inspector_resolve_keystrokes`], but as if `focus` were
+    /// focused (`None`: nothing is, so the window root receives the keys).
+    /// The inspector's key tester holds the window's focus while it listens,
+    /// so it resolves against the app element that had focus before.
+    pub fn inspector_resolve_keystrokes_for(
+        &self,
+        keystrokes: &[Keystroke],
+        focus: Option<&FocusHandle>,
+        cx: &App,
+    ) -> crate::inspector::KeyResolution {
+        self.resolve_keystrokes_at(keystrokes, focus.map(|focus| focus.id), cx)
+    }
+
+    fn resolve_keystrokes_at(
+        &self,
+        keystrokes: &[Keystroke],
+        focus: Option<FocusId>,
+        cx: &App,
+    ) -> crate::inspector::KeyResolution {
+        let node_id = self.focus_node_id_in_rendered_frame(focus);
         let dispatch_tree = &self.rendered_frame.dispatch_tree;
+        let context_stack = dispatch_tree
+            .dispatch_path(node_id)
+            .iter()
+            .filter_map(|&node_id| dispatch_tree.node(node_id).context.clone())
+            .collect();
         let keymap = cx.keymap.borrow();
-        crate::inspector::resolve_keystrokes(&keymap, keystrokes, self.context_stack(), |action| {
+        crate::inspector::resolve_keystrokes(&keymap, keystrokes, context_stack, |action| {
             dispatch_tree.is_action_available(action, node_id)
                 || cx
                     .global_action_listeners
