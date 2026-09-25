@@ -442,11 +442,13 @@ impl EventsLens {
             .border_color(colors.line)
             .child(
                 div()
+                    .id("events-summary")
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_size(theme.metrics.text_small)
                     .text_color(colors.text_muted)
+                    .tooltip(Tooltip::text(summary.clone()))
                     .child(summary),
             )
             .child(

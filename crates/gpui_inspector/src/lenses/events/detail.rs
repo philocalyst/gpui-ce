@@ -315,7 +315,10 @@ impl EventsLens {
             .debug_selector(|| "events-frame".into())
             .cursor_pointer()
             .hover(|style| style.bg(colors.hover))
-            .tooltip(Tooltip::text("Show in Frames"))
+            .tooltip(Tooltip::with_meta(
+                format!("{text} #{frame}{took}"),
+                "Click to show it in Frames",
+            ))
             .child(
                 div()
                     .flex_1()
@@ -388,28 +391,32 @@ fn event_meta(record: &InputRecord, theme: &Theme) -> impl IntoElement + use<> {
 /// binding that produced it.
 fn action_row(action: &ActionRecord, theme: &Theme) -> impl IntoElement + use<> {
     let colors = &theme.colors;
-    let (icon, color, tip) = if action.handled {
-        (IconName::Check, colors.ok, "Handled")
+    let (icon, color, verdict) = if action.handled {
+        (IconName::Check, colors.ok, "handled")
     } else {
         (
             IconName::Close,
             colors.warn,
-            "Not handled: nothing on the path listens for it",
+            "not handled: nothing on the path listens for it",
         )
     };
+    let binding = match (&action.keystrokes, &action.context) {
+        (Some(keys), Some(context)) => format!("bound to {keys} in {context}"),
+        (Some(keys), None) => format!("bound to {keys}"),
+        _ => "dispatched directly".to_string(),
+    };
     div()
+        .id(SharedString::from(format!("events-action-{}", action.name)))
         .min_h(theme.metrics.row)
         .px(theme.metrics.gutter)
         .flex()
         .items_center()
         .gap_2()
-        .child(
-            div()
-                .id(SharedString::from(format!("events-action-{}", action.name)))
-                .flex_none()
-                .tooltip(Tooltip::text(tip))
-                .child(Icon::new(icon).size(theme.metrics.icon_small).color(color)),
-        )
+        .tooltip(Tooltip::with_meta(
+            action.name,
+            format!("{verdict} · {binding}"),
+        ))
+        .child(Icon::new(icon).size(theme.metrics.icon_small).color(color))
         .child(
             div()
                 .flex_1()
@@ -423,7 +430,8 @@ fn action_row(action: &ActionRecord, theme: &Theme) -> impl IntoElement + use<> 
         .children(action.keystrokes.clone().map(Kbd::new))
         .children(action.context.clone().map(|context| {
             div()
-                .flex_none()
+                .flex_shrink(1.)
+                .min_w_0()
                 .max_w(px(180.))
                 .truncate()
                 .font_family(MONO_FONT)
