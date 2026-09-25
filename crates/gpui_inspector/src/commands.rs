@@ -3,10 +3,12 @@
 //! (`Loupe::run`) and one label.
 
 use crate::{
+    analysis::source::Editor,
+    settings::{CAPTURE_LEVELS, FrameBudget, LoupeSettings},
     state::{Lens, LoupeState},
-    theme::{Appearance, Density, LoupeSettings},
+    theme::{Appearance, Density},
 };
-use gpui::inspector::{InspectorCapture, InspectorDock, OverlayModes};
+use gpui::inspector::{CaptureLevel, InspectorCapture, InspectorDock, OverlayModes};
 
 /// A dock edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,12 +50,22 @@ pub enum Command {
     ShowLens(Lens),
     /// Drop every recorded frame and input record.
     ClearRecording,
-    /// Pick the palette.
+    /// Choose the color theme.
     SetAppearance(Appearance),
-    /// Pick the density.
+    /// Choose the row and control sizing.
     SetDensity(Density),
+    /// Choose the editor source links open in.
+    SetEditor(Editor),
+    /// Choose the refresh rate frames are graded against.
+    SetBudget(FrameBudget),
+    /// Choose what each frame records.
+    SetCaptureLevel(CaptureLevel),
     /// Open the command palette.
     OpenPalette,
+    /// Open or close the settings popover.
+    ToggleSettings,
+    /// Show or hide the keyboard shortcuts.
+    ToggleHelp,
     /// Close Loupe.
     Close,
 }
@@ -96,6 +108,14 @@ pub(crate) mod keys {
     } else {
         "ctrl-shift-h"
     };
+    /// Opens the settings popover.
+    pub const SETTINGS: &str = if cfg!(target_os = "macos") {
+        "cmd-,"
+    } else {
+        "ctrl-,"
+    };
+    /// Shows the keyboard shortcuts.
+    pub const HELP: &str = "?";
     /// Shows a lens, by rail position.
     pub const LENSES: [&str; 5] = ["alt-1", "alt-2", "alt-3", "alt-4", "alt-5"];
 }
@@ -115,13 +135,18 @@ impl Command {
             Command::Dock(DockSide::Right),
             Command::Dock(DockSide::Bottom),
             Command::ClearRecording,
+            Command::ToggleSettings,
+            Command::ToggleHelp,
             Command::SetAppearance(Appearance::System),
             Command::SetAppearance(Appearance::Dark),
             Command::SetAppearance(Appearance::Light),
             Command::SetDensity(Density::Compact),
             Command::SetDensity(Density::Comfortable),
-            Command::Close,
         ]);
+        commands.extend(Editor::ALL.map(Command::SetEditor));
+        commands.extend(FrameBudget::ALL.map(Command::SetBudget));
+        commands.extend(CAPTURE_LEVELS.map(Command::SetCaptureLevel));
+        commands.push(Command::Close);
         commands
     }
 
@@ -147,7 +172,19 @@ impl Command {
             Command::SetAppearance(Appearance::Light) => "Theme: light",
             Command::SetDensity(Density::Compact) => "Density: compact",
             Command::SetDensity(Density::Comfortable) => "Density: comfortable",
+            Command::SetEditor(Editor::Zed) => "Editor: Zed",
+            Command::SetEditor(Editor::VsCode) => "Editor: VS Code",
+            Command::SetEditor(Editor::Cursor) => "Editor: Cursor",
+            Command::SetEditor(Editor::Idea) => "Editor: IntelliJ",
+            Command::SetBudget(FrameBudget::Hz60) => "Frame budget: 60 Hz",
+            Command::SetBudget(FrameBudget::Hz120) => "Frame budget: 120 Hz",
+            Command::SetBudget(FrameBudget::Hz144) => "Frame budget: 144 Hz",
+            Command::SetCaptureLevel(CaptureLevel::Frames) => "Capture level: Frames",
+            Command::SetCaptureLevel(CaptureLevel::Tree) => "Capture level: Tree",
+            Command::SetCaptureLevel(CaptureLevel::Full) => "Capture level: Full",
             Command::OpenPalette => "Find anything",
+            Command::ToggleSettings => "Settings",
+            Command::ToggleHelp => "Keyboard shortcuts",
             Command::Close => "Close Loupe",
         }
     }
@@ -160,6 +197,8 @@ impl Command {
             Command::ToggleHold => Some(keys::HOLD),
             Command::ShowLens(lens) => Some(keys::LENSES[lens.index()]),
             Command::OpenPalette => Some(keys::PALETTE),
+            Command::ToggleSettings => Some(keys::SETTINGS),
+            Command::ToggleHelp => Some(keys::HELP),
             Command::Close => Some(keys::TOGGLE),
             _ => None,
         }
@@ -170,7 +209,7 @@ impl Command {
         self,
         capture: &InspectorCapture,
         state: &LoupeState,
-        settings: LoupeSettings,
+        settings: &LoupeSettings,
     ) -> Option<bool> {
         match self {
             Command::TogglePick => Some(capture.pick().active),
@@ -181,12 +220,31 @@ impl Command {
             Command::ShowLens(lens) => Some(state.lens() == lens),
             Command::SetAppearance(appearance) => Some(settings.appearance == appearance),
             Command::SetDensity(density) => Some(settings.density == density),
+            Command::SetEditor(editor) => Some(settings.editor.editor() == Some(editor)),
+            Command::SetBudget(budget) => Some(settings.budget == budget),
+            Command::SetCaptureLevel(level) => Some(settings.capture_level == level),
             Command::ToggleDock
             | Command::HoldSoon
             | Command::ClearRecording
             | Command::OpenPalette
+            | Command::ToggleSettings
+            | Command::ToggleHelp
             | Command::Close => None,
         }
+    }
+
+    /// Applies a settings choice to `settings`. Returns false, changing
+    /// nothing, for commands that are not settings.
+    pub fn apply_to(self, settings: &mut LoupeSettings) -> bool {
+        match self {
+            Command::SetAppearance(appearance) => settings.appearance = appearance,
+            Command::SetDensity(density) => settings.density = density,
+            Command::SetEditor(editor) => settings.editor = editor.into(),
+            Command::SetBudget(budget) => settings.budget = budget,
+            Command::SetCaptureLevel(level) => settings.capture_level = level,
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -232,5 +290,27 @@ mod tests {
         }
         assert!(commands.contains(&Command::TogglePick));
         assert!(commands.contains(&Command::ToggleFreeze));
+    }
+
+    #[test]
+    fn every_setting_choice_is_a_command_that_sets_it() {
+        let settings_commands: Vec<Command> = Command::all()
+            .into_iter()
+            .filter(|command| command.apply_to(&mut LoupeSettings::default()))
+            .collect();
+        let choices = 3 + 2 + Editor::ALL.len() + FrameBudget::ALL.len() + CAPTURE_LEVELS.len();
+        assert_eq!(settings_commands.len(), choices);
+
+        let capture = InspectorCapture::new_for_test();
+        let state = LoupeState::new();
+        for command in settings_commands {
+            let mut settings = LoupeSettings::default();
+            command.apply_to(&mut settings);
+            let on = command.is_on(&capture, &state, &settings);
+            assert_eq!(on, Some(true), "{command:?}");
+        }
+        let mut settings = LoupeSettings::default();
+        assert!(!Command::ToggleHelp.apply_to(&mut settings));
+        assert_eq!(settings, LoupeSettings::default());
     }
 }

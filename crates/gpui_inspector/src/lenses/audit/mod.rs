@@ -59,23 +59,23 @@ actions!(
 );
 
 /// Key context of the Audit lens.
-const CONTEXT: &str = "LoupeAudit";
+pub(crate) const CONTEXT: &str = "LoupeAudit";
 /// Below this width the selected finding expands in the list instead of
 /// taking a column of its own.
 const TWO_COLUMNS_WIDTH: Pixels = px(720.);
 /// Instances listed in a finding's detail before `and N more`.
 const LISTED_INSTANCES: usize = 8;
 
-/// Binds the lens' keys.
-pub(crate) fn bind_keys(cx: &mut App) {
+/// The lens' keys.
+pub(crate) fn key_bindings() -> [KeyBinding; 5] {
     let context = Some(CONTEXT);
-    cx.bind_keys([
+    [
         KeyBinding::new("down", NextFinding, context),
         KeyBinding::new("j", NextFinding, context),
         KeyBinding::new("up", PreviousFinding, context),
         KeyBinding::new("k", PreviousFinding, context),
         KeyBinding::new("enter", RevealFinding, context),
-    ]);
+    ]
 }
 
 fn two_columns(window: &Window) -> bool {
@@ -426,7 +426,12 @@ fn render_summary(
 ) -> AnyElement {
     let colors = &theme.colors;
     let worst = findings.first().map(|finding| finding.severity);
-    let (icon, tone) = worst.map_or((IconName::Check, Tone::Ok), severity_glyph);
+    // Nothing recorded is not a pass: a neutral clock until the app draws.
+    let (icon, tone) = match worst {
+        Some(severity) => severity_glyph(severity),
+        None if frames == 0 => (IconName::Clock, Tone::Neutral),
+        None => (IconName::Check, Tone::Ok),
+    };
     let chips = [
         (Severity::Critical, counts.critical),
         (Severity::Warning, counts.warning),
@@ -646,7 +651,6 @@ impl AuditLens {
             )
         });
         CaptureCard {
-            state: self.state.clone(),
             level: capture.config().level,
             budget,
             retained: capture.retained_bytes(),

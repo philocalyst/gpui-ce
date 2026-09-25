@@ -15,7 +15,7 @@
 //!   right docks, side by side otherwise).
 
 mod audit;
-mod capture;
+pub(crate) mod capture;
 mod elements;
 mod entities;
 mod events;
@@ -36,12 +36,21 @@ use crate::{
     state::{Lens, LoupeState},
     widgets::{IconName, Tone},
 };
-use gpui::{AnyView, App, AppContext as _, Context, Entity, Render, SharedString, Window};
+use gpui::{
+    AnyView, App, AppContext as _, Context, Entity, KeyBinding, Render, SharedString, Window,
+};
 
-/// Binds the lenses' own keys (each within its lens' key context).
-pub(crate) fn bind_keys(cx: &mut App) {
-    frames::bind_keys(cx);
-    audit::bind_keys(cx);
+/// The lenses with keys of their own, and the key context those apply in.
+pub(crate) const KEY_CONTEXTS: [(Lens, &str); 2] = [
+    (Lens::Frames, frames::CONTEXT),
+    (Lens::Audit, audit::CONTEXT),
+];
+
+/// The lenses' own keys (each within its lens' key context).
+pub(crate) fn key_bindings() -> impl Iterator<Item = KeyBinding> {
+    frames::key_bindings()
+        .into_iter()
+        .chain(audit::key_bindings())
 }
 
 /// The glyph and tone of a finding's severity: circled `i`, triangle,

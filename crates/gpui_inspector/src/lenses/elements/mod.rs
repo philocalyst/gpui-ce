@@ -30,9 +30,10 @@ use crate::{
         why_size::{self, SizeExplanation},
     },
     loupe::Cancel,
+    settings::LoupeSettings,
     shell::pulse::cause_summary,
     state::{LensLayout, LoupeState},
-    theme::{LoupeSettings, Theme},
+    theme::Theme,
     widgets::{EmptyState, IconName, Split, TreeEvent, TreeState, text_field_state},
 };
 use box_model::BoxFields;
@@ -897,7 +898,8 @@ impl Render for ElementsLens {
                     EmptyState::new("No element tree yet")
                         .icon(IconName::Pick)
                         .description(
-                            "Interact with the app… Loupe captures its tree with the next frame.",
+                            "Use the app: Loupe records its element tree with the next frame \
+                             it draws.",
                         )
                         .action(self.render_pick_actions(holding, cx)),
                 )
@@ -1151,9 +1153,8 @@ mod tests {
         assert!(std::path::Path::new(path).exists(), "{path} exists");
 
         harness.app(|cx| {
-            cx.set_global(LoupeSettings {
-                editor: source::EditorUrl::VsCode,
-                ..LoupeSettings::get(cx)
+            LoupeSettings::update(cx, |settings| {
+                settings.editor = source::Editor::VsCode.into();
             })
         });
         harness.click_selector("elements-source");

@@ -109,6 +109,11 @@ fn format_key(key: &str, mac: bool) -> String {
         "down" => Some("↓"),
         "left" => Some("←"),
         "right" => Some("→"),
+        "home" => Some("Home"),
+        "end" => Some("End"),
+        "pageup" => Some(if mac { "⇞" } else { "PgUp" }),
+        "pagedown" => Some(if mac { "⇟" } else { "PgDn" }),
+        "delete" => Some(if mac { "⌦" } else { "Del" }),
         _ => None,
     };
     match named {
@@ -139,5 +144,7 @@ mod tests {
         assert_eq!(format_keys("secondary-shift-z", false), "Ctrl+Shift+Z");
         assert_eq!(format_keys("ctrl--", false), "Ctrl+-");
         assert_eq!(format_keys("[", false), "[");
+        assert_eq!(format_keys("home end", false), "Home End");
+        assert_eq!(format_keys("pagedown", true), "⇟");
     }
 }

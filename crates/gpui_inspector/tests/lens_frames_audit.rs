@@ -515,7 +515,7 @@ fn empty_and_idle_states_say_so() {
 
     let mut audit = fixture(1280., 800., Lens::Audit, InspectorCapture::new_for_test());
     audit.assert_text_visible("Nothing recorded yet");
-    audit.assert_text_visible("Element checks need a retained element tree");
+    audit.assert_text_visible("Element checks run on the next element tree the app draws");
     audit.screenshot("audit-empty");
 }
 

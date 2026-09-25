@@ -10,8 +10,9 @@ use crate::{
         why_size::AxisExplanation,
     },
     commands::keys,
+    settings::LoupeSettings,
     state::Lens,
-    theme::{LoupeSettings, MONO_FONT, Theme},
+    theme::{MONO_FONT, Theme},
     widgets::{
         Button, ButtonSize, ButtonStyle, EmptyState, Icon, IconName, Kbd, Pill, SectionHeader,
         Tone, Tooltip,
@@ -331,9 +332,12 @@ impl ElementsLens {
             .size_full()
             .bg(colors.bg)
             .child(
-                EmptyState::new("Nothing selected")
+                EmptyState::new(Lens::Elements.question())
                     .icon(IconName::Pick)
-                    .description(Lens::Elements.question())
+                    .description(
+                        "Select an element in the tree, or pick one in the app, to see why it \
+                         has its size, its style and where it was built.",
+                    )
                     .action(self.render_pick_actions(holding, cx)),
             )
             .into_any_element()
@@ -477,7 +481,7 @@ impl ElementsLens {
 
         let source = match selection.source.clone() {
             Some((location, path)) => {
-                let editor = LoupeSettings::get(cx).editor;
+                let editor = LoupeSettings::get(cx).editor.clone();
                 let full_path = format!("{path}:{}:{}", location.line(), location.column());
                 div()
                     .flex_none()

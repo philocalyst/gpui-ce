@@ -1,4 +1,5 @@
-//! The toolbar: pick, overlay toggles, freeze, the palette entry and the dock.
+//! The toolbar: pick, overlay toggles, freeze, hold, the palette entry,
+//! settings and the dock.
 
 use crate::{
     commands::{Command, DockSide, OVERLAYS, keys},
@@ -47,6 +48,7 @@ pub(crate) struct Toolbar {
     pub overlays: OverlayModes,
     pub frozen: bool,
     pub holding: bool,
+    pub settings_open: bool,
     pub dock: DockSide,
     pub width: gpui::Pixels,
     pub run: Run,
@@ -154,6 +156,12 @@ impl RenderOnce for Toolbar {
             ))
             .on_click(command(Command::OpenPalette));
 
+        let settings = Button::new("loupe-settings-button")
+            .icon(IconName::Settings)
+            .toggle_state(self.settings_open)
+            .tooltip_keys(Command::ToggleSettings.label(), keys::SETTINGS)
+            .on_click(command(Command::ToggleSettings));
+
         // One toggle that moves the dock to the other edge.
         let (dock_icon, target) = match self.dock {
             DockSide::Right => (IconName::DockBottom, DockSide::Bottom),
@@ -189,8 +197,9 @@ impl RenderOnce for Toolbar {
             .child(hold)
             .child(search.mx(px(4.)))
             // Takes whatever the capped search field leaves, keeping the
-            // dock and close buttons at the trailing edge.
-            .child(div().ml_auto().child(dock))
+            // settings, dock and close buttons at the trailing edge.
+            .child(div().ml_auto().child(settings))
+            .child(dock)
             .child(close)
     }
 }

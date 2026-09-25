@@ -1,11 +1,12 @@
 //! The root view docked in the inspected window: the shell around the lenses.
 //!
 //! ```text
-//! toolbar      pick · overlays · freeze · find · dock · close
+//! toolbar      pick · overlays · freeze · hold · find · settings · dock · close
 //! pulse strip  one bar per frame · fps · p95
 //! lens rail    Elements · Frames · Events · Entities · Audit (live counts)
 //! lens body    the active lens (a cached view)
 //! status bar   selection breadcrumb · app ms · loupe ms · memory · FROZEN
+//! floating     palette · settings popover · keyboard shortcuts (one at a time)
 //! ```
 //!
 //! Loupe never calls `window.refresh()`. A 100 ms timer compares the
@@ -18,20 +19,23 @@ use crate::{
     commands::{Command, DockSide, keys},
     lenses::{Lenses, entity_label, entity_names},
     palette::{Palette, PaletteEvent, PaletteGlyph, PaletteItem, PaletteTarget},
+    settings::LoupeSettings,
     shell::{
+        help::{self, CheatSheet, HelpOverlay},
         pulse::{self, capture_bars, frame_at, paint_pulse},
+        settings::{SettingsEvent, SettingsPanel},
         status::{StatusBar, breadcrumb},
         toolbar::{Run, Toolbar},
     },
     state::{Lens, LoupeState},
-    theme::{LoupeSettings, MONO_FONT, Theme, UI_FONT},
+    theme::{MONO_FONT, Theme, UI_FONT},
     widgets::{self, RailTab, SplitDrag, SplitHandle, TabRail, clamp_split, floating_surface},
 };
 use gpui::{
-    Anchor, App, AppContext as _, Axis, Bounds, ColorExt as _, Context, DragMoveEvent, Entity,
-    FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, MouseMoveEvent, Pixels, Point,
-    Render, SharedString, StyleRefinement, Subscription, Task, Window, actions, anchored, canvas,
-    deferred, div,
+    Action as _, Anchor, App, AppContext as _, Axis, Bounds, ColorExt as _, Context, DragMoveEvent,
+    Entity, FocusHandle, Focusable, IntoElement, KeyBinding, MouseButton, MouseMoveEvent, Pixels,
+    Point, Render, SharedString, StyleRefinement, Subscription, Task, Window, actions, anchored,
+    canvas, deferred, div,
     inspector::{ElementKind, InspectorDock, InspectorEvent},
     point,
     prelude::*,
@@ -59,11 +63,15 @@ fn min_app_size(viewport: Pixels) -> Pixels {
 actions!(
     loupe,
     [
-        /// Opens (or closes) the command palette.
+        /// Opens or closes the command palette.
         OpenPalette,
+        /// Opens or closes the settings.
+        ToggleSettings,
+        /// Shows or hides the keyboard shortcuts.
+        ToggleHelp,
         /// Freezes or resumes recording.
         ToggleFreeze,
-        /// Closes the palette or stops picking.
+        /// Closes the open panel, or stops picking.
         Cancel,
         /// Shows the Elements lens.
         ShowElements,
@@ -84,6 +92,9 @@ pub struct Loupe {
     lenses: Lenses,
     focus: FocusHandle,
     palette: Option<(Entity<Palette>, Subscription)>,
+    settings: Option<(Entity<SettingsPanel>, Subscription)>,
+    /// The keyboard shortcuts, while shown.
+    help: Option<Rc<CheatSheet>>,
     pulse_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pulse_hover: Option<u64>,
     right_width: Pixels,
@@ -115,13 +126,17 @@ impl Loupe {
             Some(InspectorDock::Right { width }) => (width, px(320.)),
             Some(InspectorDock::Hidden) | None => (px(560.), px(320.)),
         };
+        apply_capture_settings(window, cx);
         let subscriptions = vec![
             cx.subscribe_in(&inspector, window, Self::on_inspector_event),
             cx.observe_in(&state, window, |this, state, window, cx| {
                 this.sync_overlay_selection(&state, window, cx);
                 cx.notify();
             }),
-            cx.observe_global_in::<LoupeSettings>(window, |this, _, cx| this.restyle(cx)),
+            cx.observe_global_in::<LoupeSettings>(window, |this, window, cx| {
+                apply_capture_settings(window, cx);
+                this.restyle(cx);
+            }),
             cx.observe_window_appearance(window, |this, _, cx| this.restyle(cx)),
         ];
         Self {
@@ -129,6 +144,8 @@ impl Loupe {
             lenses,
             focus: cx.focus_handle(),
             palette: None,
+            settings: None,
+            help: None,
             pulse_bounds: Rc::default(),
             pulse_hover: None,
             right_width,
@@ -173,6 +190,16 @@ impl Loupe {
             .as_ref()
             .map(|(palette, _)| palette.read(cx).match_labels())
             .unwrap_or_default()
+    }
+
+    /// Whether the settings popover is open.
+    pub fn is_settings_open(&self) -> bool {
+        self.settings.is_some()
+    }
+
+    /// Whether the keyboard shortcuts are shown.
+    pub fn is_help_open(&self) -> bool {
+        self.help.is_some()
     }
 
     fn spawn_refresh(window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
@@ -286,13 +313,30 @@ impl Loupe {
                 self.state
                     .update(cx, |state, cx| state.select_frame(None, cx));
             }
-            Command::SetAppearance(appearance) => {
-                cx.default_global::<LoupeSettings>().appearance = appearance;
-            }
-            Command::SetDensity(density) => {
-                cx.default_global::<LoupeSettings>().density = density;
+            Command::SetAppearance(_)
+            | Command::SetDensity(_)
+            | Command::SetEditor(_)
+            | Command::SetBudget(_)
+            | Command::SetCaptureLevel(_) => {
+                LoupeSettings::update(cx, |settings| {
+                    command.apply_to(settings);
+                });
             }
             Command::OpenPalette => self.open_palette("", window, cx),
+            Command::ToggleSettings => {
+                if self.settings.is_some() {
+                    self.close_floating(window, cx);
+                } else {
+                    self.open_settings(window, cx);
+                }
+            }
+            Command::ToggleHelp => {
+                if self.help.is_some() {
+                    self.close_floating(window, cx);
+                } else {
+                    self.open_help(window, cx);
+                }
+            }
             Command::Close => {
                 window.toggle_inspector(cx);
                 return;
@@ -359,6 +403,7 @@ impl Loupe {
     }
 
     fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_floating(window, cx);
         let items = self.palette_items(window, cx);
         let palette = cx.new(|cx| Palette::new(items, query, window, cx));
         let subscription = cx.subscribe_in(&palette, window, Self::on_palette_event);
@@ -366,11 +411,35 @@ impl Loupe {
         cx.notify();
     }
 
-    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.take().is_some() {
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_floating(window, cx);
+        let panel = cx.new(SettingsPanel::new);
+        let subscription = cx.subscribe_in(&panel, window, |this, _, event, window, cx| {
+            let SettingsEvent::Dismissed = event;
+            this.close_floating(window, cx);
+        });
+        self.settings = Some((panel, subscription));
+        cx.notify();
+    }
+
+    fn open_help(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_floating(window, cx);
+        self.help = Some(Rc::new(CheatSheet::of(cx)));
+        cx.notify();
+    }
+
+    /// Closes whichever floating layer is open (the palette, settings or
+    /// help) and gives the focus back to Loupe. Returns whether one was.
+    fn close_floating(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let palette = self.palette.take().is_some();
+        let settings = self.settings.take().is_some();
+        let help = self.help.take().is_some();
+        let closed = palette || settings || help;
+        if closed {
             window.focus(&self.focus, cx);
             cx.notify();
         }
+        closed
     }
 
     fn on_palette_event(
@@ -380,7 +449,7 @@ impl Loupe {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_palette(window, cx);
+        self.close_floating(window, cx);
         let PaletteEvent::Confirmed(target) = event else {
             return;
         };
@@ -682,24 +751,84 @@ impl Loupe {
         }
     }
 
-    fn render_palette(&self, theme: &Theme) -> Option<impl IntoElement + use<>> {
-        let (palette, _) = self.palette.as_ref()?;
+    /// The open floating layer (palette, settings or help) over a scrim that
+    /// swallows clicks: clicking outside the layer only closes it.
+    fn render_floating(
+        &self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let scrim = |id: &'static str| div().id(id).absolute().inset_0().occlude();
+        let dock = window
+            .inspector_bounds()
+            .map_or(gpui::size(px(560.), px(700.)), |bounds| bounds.size);
+        let close = cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
+            this.close_floating(window, cx);
+        });
+        if let Some((palette, _)) = &self.palette {
+            return Some(
+                scrim("loupe-palette-scrim")
+                    .bg(theme.colors.shadow.opacity(0.35))
+                    .flex()
+                    .justify_center()
+                    .pt(theme.metrics.toolbar + px(6.))
+                    .px(px(12.))
+                    .child(div().w_full().max_w(px(560.)).child(palette.clone()))
+                    .into_any_element(),
+            );
+        }
+        if let Some((settings, _)) = &self.settings {
+            // A popover under the gear, as tall as its content allows.
+            let width = SETTINGS_WIDTH.min(dock.width - px(12.));
+            return Some(
+                scrim("loupe-settings-scrim")
+                    .child(
+                        div()
+                            .absolute()
+                            .top(theme.metrics.toolbar + px(4.))
+                            .right(px(6.))
+                            .bottom(px(8.))
+                            .w(width)
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .max_h_full()
+                                    .flex()
+                                    .flex_col()
+                                    .on_mouse_down_out(close)
+                                    .child(settings.clone()),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let sheet = self.help.clone()?;
+        let width = help::MAX_WIDTH.min(dock.width - px(24.));
         Some(
-            // A scrim that swallows clicks: clicking outside only dismisses.
-            div()
-                .id("loupe-palette-scrim")
-                .absolute()
-                .inset_0()
-                .occlude()
+            scrim("loupe-help-scrim")
                 .bg(theme.colors.shadow.opacity(0.35))
                 .flex()
-                .justify_center()
+                .flex_col()
+                .items_center()
                 .pt(theme.metrics.toolbar + px(6.))
-                .px(px(12.))
-                .child(div().w_full().max_w(px(560.)).child(palette.clone())),
+                .pb(px(12.))
+                .child(
+                    div()
+                        .max_h_full()
+                        .flex()
+                        .flex_col()
+                        .on_mouse_down_out(close)
+                        .child(HelpOverlay { sheet, width }),
+                )
+                .into_any_element(),
         )
     }
 }
+
+/// The settings popover's width, when the dock has room.
+const SETTINGS_WIDTH: Pixels = px(372.);
 
 impl Render for Loupe {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -718,6 +847,7 @@ impl Render for Loupe {
             overlays: capture.overlay().modes,
             frozen: capture.is_frozen(),
             holding: capture.is_holding(),
+            settings_open: self.settings.is_some(),
             dock: DockSide::of(dock),
             width: window
                 .inspector_bounds()
@@ -751,18 +881,26 @@ impl Render for Loupe {
             .text_color(colors.text)
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 if this.palette.is_some() {
-                    this.close_palette(window, cx);
+                    this.close_floating(window, cx);
                 } else {
                     this.open_palette("", window, cx);
                 }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSettings, window, cx| {
+                this.run(Command::ToggleSettings, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleHelp, window, cx| {
+                this.run(Command::ToggleHelp, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleFreeze, window, cx| {
                 this.run(Command::ToggleFreeze, window, cx)
             }))
             .on_action(cx.listener(|this, _: &Cancel, window, cx| {
-                if this.palette.is_some() {
-                    this.close_palette(window, cx);
-                } else if window.inspector_capture().is_some_and(|c| c.pick().active) {
+                let picking = window.inspector_capture().is_some_and(|c| c.pick().active);
+                if this.close_floating(window, cx) {
+                    return;
+                }
+                if picking {
                     this.run(Command::TogglePick, window, cx);
                 } else {
                     cx.propagate();
@@ -804,28 +942,55 @@ impl Render for Loupe {
             )
             .child(self.render_status(window, cx))
             .child(edge)
-            .children(self.render_palette(theme))
+            .children(self.render_floating(theme, window, cx))
             .children(self.render_pulse_tooltip(theme, window))
             .into_any_element()
     }
 }
 
-/// Binds Loupe's keys (see `DESIGN.md`, "Keys").
-pub(crate) fn bind_keys(cx: &mut App) {
+/// The keys that apply inside Loupe (see `DESIGN.md`, "Keys").
+pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     let loupe = Some(LOUPE_CONTEXT);
+    // Plain keys would type into text fields.
+    let outside_text = Some("Loupe && !EditableText");
     let [elements, frames, events, entities, audit] = keys::LENSES;
-    cx.bind_keys([
-        KeyBinding::new("secondary-k", OpenPalette, loupe),
+    let mut bindings = vec![
+        KeyBinding::new(keys::PALETTE, OpenPalette, loupe),
         KeyBinding::new(elements, ShowElements, loupe),
         KeyBinding::new(frames, ShowFrames, loupe),
         KeyBinding::new(events, ShowEvents, loupe),
         KeyBinding::new(entities, ShowEntities, loupe),
         KeyBinding::new(audit, ShowAudit, loupe),
+        KeyBinding::new(keys::SETTINGS, ToggleSettings, loupe),
+        KeyBinding::new(keys::HELP, ToggleHelp, outside_text),
         KeyBinding::new("escape", Cancel, loupe),
-        KeyBinding::new(keys::FREEZE, ToggleFreeze, Some("Loupe && !EditableText")),
-    ]);
-    widgets::bind_keys(LOUPE_CONTEXT, cx);
-    crate::lenses::bind_keys(cx);
+        KeyBinding::new(keys::FREEZE, ToggleFreeze, outside_text),
+    ];
+    bindings.extend(widgets::key_bindings(LOUPE_CONTEXT));
+    bindings.extend(crate::lenses::key_bindings());
+    bindings
+}
+
+/// The name of the action that shows `lens`.
+pub(crate) fn lens_action(lens: Lens) -> &'static str {
+    match lens {
+        Lens::Elements => ShowElements::name_for_type(),
+        Lens::Frames => ShowFrames::name_for_type(),
+        Lens::Events => ShowEvents::name_for_type(),
+        Lens::Entities => ShowEntities::name_for_type(),
+        Lens::Audit => ShowAudit::name_for_type(),
+    }
+}
+
+/// Copies the frame budget and capture level from [`LoupeSettings`] into
+/// the window's capture.
+fn apply_capture_settings(window: &mut Window, cx: &App) {
+    let settings = LoupeSettings::get(cx);
+    if let Some(capture) = window.inspector_capture_mut() {
+        let config = capture.config_mut();
+        config.budget = settings.budget.duration();
+        config.level = settings.capture_level;
+    }
 }
 
 /// How long "Hold the app in 3 seconds" waits: enough to open a hover menu.

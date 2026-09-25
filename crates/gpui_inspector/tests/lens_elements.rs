@@ -248,7 +248,7 @@ fn bottom_docks_lay_the_tree_beside_the_detail() {
 #[test]
 fn empty_states_say_what_to_do() {
     let (mut harness, _) = inbox_harness(1280., 800.);
-    harness.assert_text_visible("Nothing selected");
+    harness.assert_text_visible("Select an element in the tree, or pick one in the app");
     harness.assert_text_visible(Lens::Elements.question());
     harness.assert_text_visible("Start picking");
     harness.screenshot("elements-nothing-selected");
@@ -274,7 +274,7 @@ fn empty_states_say_what_to_do() {
     empty.install_capture(fixtures::steady_frames(30, 5.));
     empty.set_appearance(Appearance::Dark);
     empty.assert_text_visible("No element tree yet");
-    empty.assert_text_visible("Interact with the app…");
+    empty.assert_text_visible("Use the app: Loupe records its element tree");
     empty.screenshot("elements-no-tree");
 }
 

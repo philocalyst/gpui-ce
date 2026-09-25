@@ -43,7 +43,7 @@ pub use text_field::{TextField, text_field_state};
 pub use tooltip::{Tooltip, floating_surface};
 pub use tree::{Tree, TreeEvent, TreeModel, TreeNode, TreeRow, TreeState, flatten};
 
-use gpui::{App, KeyBinding, actions};
+use gpui::{KeyBinding, actions};
 use gpui_elements::editable_text::actions::default_bindings;
 
 /// Key context of focused trees and tables.
@@ -62,9 +62,9 @@ actions!(
         SelectFirst,
         /// Selects the last row.
         SelectLast,
-        /// Expands the selected tree node, or steps into it.
+        /// Expands the selected tree node, or moves into it.
         ExpandSelected,
-        /// Collapses the selected tree node, or steps out to its parent.
+        /// Collapses the selected tree node, or moves to its parent.
         CollapseSelected,
         /// Opens the selected row.
         ActivateSelected,
@@ -85,13 +85,13 @@ actions!(
     ]
 );
 
-/// Binds the widgets' keys: list navigation, scrubbing, and editable text
-/// inside `root_context` (so Loupe's text fields work even if the app never
-/// bound `gpui_elements`' defaults).
-pub(crate) fn bind_keys(root_context: &str, cx: &mut App) {
+/// The widgets' keys: list navigation, scrubbing, and editable text inside
+/// `root_context` (so Loupe's text fields work even if the app never bound
+/// `gpui_elements`' defaults).
+pub(crate) fn key_bindings(root_context: &str) -> Vec<KeyBinding> {
     let list = Some(LIST_CONTEXT);
     let scrub = Some(SCRUB_CONTEXT);
-    cx.bind_keys([
+    let mut bindings = vec![
         KeyBinding::new("down", SelectNext, list),
         KeyBinding::new("j", SelectNext, list),
         KeyBinding::new("up", SelectPrevious, list),
@@ -105,7 +105,8 @@ pub(crate) fn bind_keys(root_context: &str, cx: &mut App) {
         KeyBinding::new("down", ScrubDecrement, scrub),
         KeyBinding::new("shift-up", ScrubIncrementCoarse, scrub),
         KeyBinding::new("shift-down", ScrubDecrementCoarse, scrub),
-    ]);
+    ];
     let text_context = format!("{root_context} > EditableText");
-    cx.bind_keys(default_bindings().as_keybindings(Some(&text_context)));
+    bindings.extend(default_bindings().as_keybindings(Some(&text_context)));
+    bindings
 }

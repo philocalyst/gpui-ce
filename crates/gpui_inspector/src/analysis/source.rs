@@ -6,13 +6,12 @@
 //! git dependencies, so a path is resolved against the working directory (or
 //! the nearest ancestor that contains it) before it becomes an editor URL.
 
-use gpui::inspector::ElementKind;
+use gpui::{SharedString, inspector::ElementKind};
 use std::path::{Path, PathBuf};
 
-/// How Loupe opens a source location in an editor: a URL template with
-/// `{path}`, `{line}` and `{col}` placeholders.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum EditorUrl {
+/// An editor Loupe knows how to open source links in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Editor {
     /// `zed://file/{path}:{line}:{col}`.
     #[default]
     Zed,
@@ -22,43 +21,82 @@ pub enum EditorUrl {
     Cursor,
     /// JetBrains IDEs: `idea://open?file={path}&line={line}&column={col}`.
     Idea,
+}
+
+impl Editor {
+    /// Every known editor, for pickers.
+    pub const ALL: [Editor; 4] = [Editor::Zed, Editor::VsCode, Editor::Cursor, Editor::Idea];
+
+    /// The editor's URL template.
+    pub fn template(self) -> &'static str {
+        match self {
+            Editor::Zed => "zed://file/{path}:{line}:{col}",
+            Editor::VsCode => "vscode://file/{path}:{line}:{col}",
+            Editor::Cursor => "cursor://file/{path}:{line}:{col}",
+            Editor::Idea => "idea://open?file={path}&line={line}&column={col}",
+        }
+    }
+
+    /// The editor's name: "VS Code".
+    pub fn label(self) -> &'static str {
+        match self {
+            Editor::Zed => "Zed",
+            Editor::VsCode => "VS Code",
+            Editor::Cursor => "Cursor",
+            Editor::Idea => "IntelliJ",
+        }
+    }
+}
+
+/// How Loupe opens a source location: a known editor, or any URL template
+/// with `{path}`, `{line}` and `{col}` placeholders.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum EditorUrl {
+    /// A known editor's scheme.
+    Editor(Editor),
     /// Any other editor's scheme, e.g. `subl://open?url=file://{path}&line={line}`.
-    Custom(&'static str),
+    Custom(SharedString),
+}
+
+impl Default for EditorUrl {
+    fn default() -> Self {
+        EditorUrl::Editor(Editor::default())
+    }
+}
+
+impl From<Editor> for EditorUrl {
+    fn from(editor: Editor) -> Self {
+        EditorUrl::Editor(editor)
+    }
 }
 
 impl EditorUrl {
-    /// Every built-in editor, for pickers.
-    pub const PRESETS: [EditorUrl; 4] = [
-        EditorUrl::Zed,
-        EditorUrl::VsCode,
-        EditorUrl::Cursor,
-        EditorUrl::Idea,
-    ];
-
     /// The URL template.
-    pub fn template(self) -> &'static str {
+    pub fn template(&self) -> &str {
         match self {
-            EditorUrl::Zed => "zed://file/{path}:{line}:{col}",
-            EditorUrl::VsCode => "vscode://file/{path}:{line}:{col}",
-            EditorUrl::Cursor => "cursor://file/{path}:{line}:{col}",
-            EditorUrl::Idea => "idea://open?file={path}&line={line}&column={col}",
+            EditorUrl::Editor(editor) => editor.template(),
             EditorUrl::Custom(template) => template,
         }
     }
 
     /// The editor's name, for tooltips: "Open in Zed".
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> &str {
         match self {
-            EditorUrl::Zed => "Zed",
-            EditorUrl::VsCode => "VS Code",
-            EditorUrl::Cursor => "Cursor",
-            EditorUrl::Idea => "IntelliJ",
+            EditorUrl::Editor(editor) => editor.label(),
             EditorUrl::Custom(_) => "editor",
         }
     }
 
+    /// The known editor, unless the template is custom.
+    pub fn editor(&self) -> Option<Editor> {
+        match self {
+            EditorUrl::Editor(editor) => Some(*editor),
+            EditorUrl::Custom(_) => None,
+        }
+    }
+
     /// The URL that opens `path` (absolute) at `line`:`column`.
-    pub fn url(self, path: &str, line: u32, column: u32) -> String {
+    pub fn url(&self, path: &str, line: u32, column: u32) -> String {
         editor_url(self.template(), path, line, column)
     }
 }
@@ -205,22 +243,27 @@ mod tests {
     #[test]
     fn editor_urls_fill_every_placeholder() {
         let path = "/home/me/app/src/list.rs";
+        let url = |editor: Editor| EditorUrl::from(editor).url(path, 52, 9);
+        assert_eq!(url(Editor::Zed), "zed://file/home/me/app/src/list.rs:52:9");
         assert_eq!(
-            EditorUrl::Zed.url(path, 52, 9),
-            "zed://file/home/me/app/src/list.rs:52:9"
-        );
-        assert_eq!(
-            EditorUrl::VsCode.url(path, 52, 9),
+            url(Editor::VsCode),
             "vscode://file/home/me/app/src/list.rs:52:9"
         );
         assert_eq!(
-            EditorUrl::Idea.url(path, 52, 9),
-            "idea://open?file=/home/me/app/src/list.rs&line=52&column=9"
+            url(Editor::Cursor),
+            "cursor://file/home/me/app/src/list.rs:52:9"
         );
         assert_eq!(
-            EditorUrl::Custom("subl://open?url=file://{path}&line={line}").url(path, 3, 1),
+            url(Editor::Idea),
+            "idea://open?file=/home/me/app/src/list.rs&line=52&column=9"
+        );
+        let sublime = EditorUrl::Custom("subl://open?url=file://{path}&line={line}".into());
+        assert_eq!(
+            sublime.url(path, 3, 1),
             "subl://open?url=file:///home/me/app/src/list.rs&line=3"
         );
+        assert_eq!((sublime.label(), sublime.editor()), ("editor", None));
+        assert_eq!(EditorUrl::default().editor(), Some(Editor::Zed));
     }
 
     #[test]

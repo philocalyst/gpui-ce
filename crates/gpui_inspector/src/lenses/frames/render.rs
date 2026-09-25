@@ -23,6 +23,7 @@ use crate::{
         capture::budget_control,
         links::{Navigate, Target, link, site_link},
     },
+    settings::FrameBudget,
     state::Lens,
     theme::{MONO_FONT, Theme, UI_FONT},
     widgets::{
@@ -99,7 +100,7 @@ impl Render for FramesLens {
             self.idle_check = None;
             return root.child(
                 EmptyState::new("No app frames recorded yet")
-                    .icon(IconName::Pause)
+                    .icon(IconName::Clock)
                     .description(format!(
                         "{} Use the app: every frame it draws lands here, with why it was \
                          drawn and where its time went.",
@@ -394,8 +395,7 @@ impl FramesLens {
                     .child(div().flex_1())
                     .child(budget_control(
                         "loupe-frames-budget",
-                        shown.budget,
-                        &self.state,
+                        FrameBudget::nearest(shown.budget),
                     )),
             )
             .into_any_element()
