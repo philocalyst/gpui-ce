@@ -335,7 +335,7 @@ fn app_hitboxes(capture: &InspectorCapture, hitboxes: &[Hitbox]) -> Vec<(Hitbox,
 
 /// `div#close 24×24 · issue_detail.rs:97`
 fn element_label(record: &ElementRecord, capture: &InspectorCapture) -> SharedString {
-    let mut label = record.kind.short_name().to_string();
+    let mut label = record.kind.display_name().into_owned();
     if let Some(id) = &record.id {
         label.push('#');
         label.push_str(id);

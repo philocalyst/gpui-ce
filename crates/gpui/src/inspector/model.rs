@@ -77,6 +77,33 @@ impl ElementKind {
     pub fn short_name(&self) -> &'static str {
         short_type_name(self.type_name())
     }
+
+    /// The name people know the element by: plain elements as the builder
+    /// that makes them (`div`, `uniform_list`), views and components by
+    /// their type (`IssueList`).
+    pub fn display_name(&self) -> std::borrow::Cow<'static, str> {
+        match self {
+            ElementKind::Element { .. } => snake_case(self.short_name()).into(),
+            ElementKind::View { .. } | ElementKind::Component { .. } => self.short_name().into(),
+        }
+    }
+}
+
+/// `UniformList` → `uniform_list`, `HTMLView` → `html_view`.
+fn snake_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut snake = String::with_capacity(name.len() + 4);
+    for (ix, &char) in chars.iter().enumerate() {
+        if char.is_uppercase() && ix > 0 {
+            let previous_lower = chars[ix - 1].is_lowercase();
+            let next_lower = chars.get(ix + 1).is_some_and(|next| next.is_lowercase());
+            if previous_lower || (chars[ix - 1].is_uppercase() && next_lower) {
+                snake.push('_');
+            }
+        }
+        snake.extend(char.to_lowercase());
+    }
+    snake
 }
 
 /// Strips module paths and generic arguments from a `type_name`.
