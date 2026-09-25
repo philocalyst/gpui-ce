@@ -82,11 +82,17 @@ pub enum IconName {
     TriangleUp,
     /// Push pin: hold the app still.
     Hold,
+    /// Disclosure pointing back: the previous item.
+    ChevronLeft,
+    /// Circled `i`: something worth knowing.
+    Info,
+    /// Octagon with an exclamation mark: a critical problem.
+    Critical,
 }
 
 impl IconName {
     /// Every glyph, for galleries and pickers.
-    pub const ALL: [IconName; 29] = [
+    pub const ALL: [IconName; 32] = [
         IconName::Pick,
         IconName::Outline,
         IconName::Flash,
@@ -116,6 +122,9 @@ impl IconName {
         IconName::Command,
         IconName::TriangleUp,
         IconName::Hold,
+        IconName::ChevronLeft,
+        IconName::Info,
+        IconName::Critical,
     ];
 
     /// A stable name, also the sprite atlas key.
@@ -150,6 +159,9 @@ impl IconName {
             IconName::Command => "loupe/command",
             IconName::TriangleUp => "loupe/triangle-up",
             IconName::Hold => "loupe/hold",
+            IconName::ChevronLeft => "loupe/chevron-left",
+            IconName::Info => "loupe/info",
+            IconName::Critical => "loupe/critical",
         }
     }
 
@@ -218,6 +230,13 @@ impl IconName {
             IconName::TriangleUp => glyph!(r##"<path d="M8 3.6 13.2 12H2.8z" fill="#000"/>"##),
             IconName::Hold => glyph!(
                 r##"<path d="M9.6 1.9 14.1 6.4l-1.9.7-2.4 2.4.4 3-1.2 1.2-6.8-6.8L3.4 5.7l3 .4 2.4-2.4z"/><path d="M5.7 10.3 1.9 14.1"/>"##
+            ),
+            IconName::ChevronLeft => glyph!(r##"<path d="M9.8 3.6 5.4 8l4.4 4.4"/>"##),
+            IconName::Info => glyph!(
+                r##"<circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v4"/><circle cx="8" cy="4.9" r=".8" fill="#000" stroke="none"/>"##
+            ),
+            IconName::Critical => glyph!(
+                r##"<path d="M5.5 1.9h5l3.6 3.6v5l-3.6 3.6h-5l-3.6-3.6v-5z"/><path d="M8 4.8v3.6"/><circle cx="8" cy="10.9" r=".8" fill="#000" stroke="none"/>"##
             ),
         }
     }

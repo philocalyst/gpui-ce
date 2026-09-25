@@ -27,6 +27,7 @@ use gpui::{
 use std::borrow::Cow;
 
 pub use commands::{Command, DockSide};
+pub use lenses::ExportDirectory;
 pub use loupe::{Loupe, REFRESH_INTERVAL};
 pub use palette::fuzzy;
 pub use state::{Filters, Lens, LensLayout, LoupeState};

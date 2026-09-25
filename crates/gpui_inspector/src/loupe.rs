@@ -825,6 +825,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new(keys::FREEZE, ToggleFreeze, Some("Loupe && !EditableText")),
     ]);
     widgets::bind_keys(LOUPE_CONTEXT, cx);
+    crate::lenses::bind_keys(cx);
 }
 
 /// How long "Hold the app in 3 seconds" waits: enough to open a hover menu.
