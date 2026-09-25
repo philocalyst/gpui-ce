@@ -158,13 +158,11 @@ impl LogIndex {
         }
         // The newest record may have absorbed more moves since it was indexed.
         self.entries.pop_back();
-        let next = self
-            .entries
-            .back()
-            .map_or(first.seq, |(seq, _)| seq + 1);
+        let next = self.entries.back().map_or(first.seq, |(seq, _)| seq + 1);
         let skip = next.saturating_sub(first.seq) as usize;
         for record in input.iter().skip(skip) {
-            self.entries.push_back((record.seq, record_haystack(record, &name)));
+            self.entries
+                .push_back((record.seq, record_haystack(record, &name)));
         }
     }
 
@@ -197,9 +195,16 @@ pub fn record_haystack(
     record: &InputRecord,
     name: impl Fn(ElementKey) -> Option<String>,
 ) -> String {
-    let keystroke = record.keystroke.as_ref().map(|keystroke| keystroke.unparse());
+    let keystroke = record
+        .keystroke
+        .as_ref()
+        .map(|keystroke| keystroke.unparse());
     let contexts: Vec<String> = record.context_stack.iter().map(context_label).collect();
-    let elements: Vec<String> = record.hit_path.iter().filter_map(|&key| name(key)).collect();
+    let elements: Vec<String> = record
+        .hit_path
+        .iter()
+        .filter_map(|&key| name(key))
+        .collect();
     let actions = record.actions.iter().flat_map(|action| {
         [
             action.name,
@@ -326,13 +331,13 @@ pub fn record_sentence(record: &InputRecord, target: Option<&str>) -> Sentence {
         InputKind::Modifiers => Sentence::new()
             .text("Modifiers changed to ")
             .code(record.detail.clone()),
-        InputKind::Action => Sentence::new().code(record.detail.clone()).text(
-            if record.handled {
+        InputKind::Action => Sentence::new()
+            .code(record.detail.clone())
+            .text(if record.handled {
                 " dispatched"
             } else {
                 " dispatched, but nothing handles it"
-            },
-        ),
+            }),
         InputKind::MouseMove => {
             let count = record.coalesced.max(1);
             let moves = if count == 1 {
@@ -352,7 +357,8 @@ pub fn record_sentence(record: &InputRecord, target: Option<&str>) -> Sentence {
         };
         sentence = sentence.text(preposition).code(target.to_string());
     }
-    if record.kind != InputKind::KeyDown
+    // Key presses name their action above, and a dispatched action is its own.
+    if !matches!(record.kind, InputKind::KeyDown | InputKind::Action)
         && let Some(action) = primary_action(record)
     {
         sentence = sentence.text(" → ").code(action.name);
@@ -640,6 +646,23 @@ mod tests {
             record_sentence(&unhandled, None)
                 .to_string()
                 .ends_with("· not handled (80 µs)")
+        );
+    }
+
+    #[test]
+    fn dispatched_actions_read_as_themselves() {
+        let mut record = with_action(blank(0, InputKind::Action), "mail::Compose", true);
+        record.detail = "mail::Compose".into();
+        contexts(&mut record, &["Workspace", "Pane"]);
+        assert_eq!(
+            record_sentence(&record, None).to_string(),
+            "`mail::Compose` dispatched in `Workspace > Pane` · handled in 80 µs"
+        );
+        record.handled = false;
+        assert!(
+            record_sentence(&record, None)
+                .to_string()
+                .starts_with("`mail::Compose` dispatched, but nothing handles it in ")
         );
     }
 

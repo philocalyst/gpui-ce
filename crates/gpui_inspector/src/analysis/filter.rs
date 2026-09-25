@@ -33,7 +33,9 @@ impl TextFilter {
 
     /// Whether a row whose haystack (see [`haystack`]) is `haystack` passes.
     pub fn matches(&self, haystack: &str) -> bool {
-        self.include.iter().all(|term| haystack.contains(term.as_str()))
+        self.include
+            .iter()
+            .all(|term| haystack.contains(term.as_str()))
             && !self
                 .exclude
                 .iter()

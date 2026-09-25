@@ -79,7 +79,10 @@ impl KeySequence {
             }
         }
         self.cleared = false;
-        let continues = self.resolution.as_ref().is_some_and(KeyResolution::is_pending)
+        let continues = self
+            .resolution
+            .as_ref()
+            .is_some_and(KeyResolution::is_pending)
             && self.strokes.len() < MAX_STROKES
             && self
                 .last_press
@@ -127,7 +130,11 @@ pub enum Verdict {
 impl Verdict {
     /// The verdict of `resolution.candidates[ix]`.
     pub fn of(resolution: &KeyResolution, ix: usize) -> Self {
-        match resolution.candidates.get(ix).map(|candidate| &candidate.verdict) {
+        match resolution
+            .candidates
+            .get(ix)
+            .map(|candidate| &candidate.verdict)
+        {
             Some(BindingVerdict::Wins) => Verdict::Runs,
             Some(BindingVerdict::Shadowed { by }) => {
                 let by_disabler = resolution
@@ -384,7 +391,13 @@ mod tests {
         };
         resolution(
             &written.join(" "),
-            vec![candidate("ctrl-k ctrl-t", "e::Trim", None, Some(0), verdict)],
+            vec![candidate(
+                "ctrl-k ctrl-t",
+                "e::Trim",
+                None,
+                Some(0),
+                verdict,
+            )],
         )
     }
 
@@ -410,7 +423,13 @@ mod tests {
         press(&mut sequence, "ctrl-t", start + Duration::from_millis(300));
         assert_eq!(typed(&sequence), "ctrl-k ctrl-t");
         assert_eq!(
-            sequence.resolution().unwrap().winner().unwrap().action.as_ref(),
+            sequence
+                .resolution()
+                .unwrap()
+                .winner()
+                .unwrap()
+                .action
+                .as_ref(),
             "e::Trim"
         );
 
@@ -590,8 +609,7 @@ mod tests {
         assert_eq!(at(Some(1)), "bound in `Workspace` · matched 1 level up");
         assert_eq!(at(Some(3)), "bound in `Workspace` · matched 3 levels up");
         assert_eq!(
-            binding_place(&candidate("a", "a::A", None, Some(0), BindingVerdict::Wins))
-                .to_string(),
+            binding_place(&candidate("a", "a::A", None, Some(0), BindingVerdict::Wins)).to_string(),
             "bound globally (no context)"
         );
     }

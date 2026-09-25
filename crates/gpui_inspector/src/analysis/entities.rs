@@ -489,7 +489,11 @@ mod tests {
         let history = history(&buckets(&[1, 0, 3]));
         assert_eq!(history.len(), HISTORY_BUCKETS);
         assert_eq!(&history[HISTORY_BUCKETS - 3..], [2., 0., 6.]);
-        assert!(history[..HISTORY_BUCKETS - 3].iter().all(|&rate| rate == 0.));
+        assert!(
+            history[..HISTORY_BUCKETS - 3]
+                .iter()
+                .all(|&rate| rate == 0.)
+        );
         let long: VecDeque<u32> = (0..200).map(|ix| ix as u32).collect();
         assert_eq!(super::history(&long)[0], 160.);
     }
