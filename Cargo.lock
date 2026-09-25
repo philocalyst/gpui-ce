@@ -2420,6 +2420,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui_ce_inspector"
+version = "0.1.0"
+dependencies = [
+ "gpui-ce",
+ "gpui_ce_elements",
+ "gpui_ce_inspector",
+ "gpui_ce_wgpu",
+ "image",
+ "log",
+ "serde_json",
+ "smallvec",
+]
+
+[[package]]
 name = "gpui_ce_linux"
 version = "0.1.0"
 dependencies = [

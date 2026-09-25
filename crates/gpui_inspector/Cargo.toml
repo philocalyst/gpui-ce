@@ -1,0 +1,36 @@
+[package]
+name = "gpui_ce_inspector"
+version = "0.1.0"
+description = "Loupe: an inspector and profiler for gpui applications"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+name = "gpui_inspector"
+path = "src/lib.rs"
+doctest = false
+
+[features]
+default = []
+# Adds the profiler journal's main-thread tasks to the Frames lens.
+profiler = ["gpui/profiler"]
+# Headless screenshot harness for tests (real text and pixels via wgpu).
+test-support = ["gpui/test-support", "dep:gpui_wgpu", "gpui_wgpu/test-support"]
+
+[dependencies]
+gpui = { workspace = true, features = ["inspector"] }
+gpui_elements.workspace = true
+gpui_wgpu = { workspace = true, optional = true }
+image.workspace = true
+log.workspace = true
+serde_json.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["inspector", "test-support"] }
+gpui_inspector = { path = ".", package = "gpui_ce_inspector", features = ["test-support"] }
+gpui_wgpu = { workspace = true, features = ["test-support"] }

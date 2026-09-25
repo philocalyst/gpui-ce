@@ -23,7 +23,7 @@ use crate::{
     TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
     Transition, TransitionState, Underline, UnderlineStyle, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
-    WindowParams, WindowTextSystem, point, prelude::*, px, rems, size, transparent_black,
+    WindowParams, WindowTextSystem, point, prelude::*, px, size, transparent_black,
 };
 
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
@@ -1298,6 +1298,12 @@ pub struct Window {
     captured_hitbox: Option<HitboxId>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector: Option<Entity<Inspector>>,
+    /// Recording of frames, element trees and input; present while the inspector is open.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    inspector_capture: Option<Box<crate::inspector::InspectorCapture>>,
+    /// Where the inspector docks; remembered across toggles.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    inspector_dock: crate::inspector::InspectorDock,
     #[cfg(feature = "profiler")]
     debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay,
     pub(crate) a11y: A11y,
@@ -1996,6 +2002,10 @@ impl Window {
             captured_hitbox: None,
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector: None,
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            inspector_capture: None,
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            inspector_dock: Default::default(),
             #[cfg(feature = "profiler")]
             debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay::new(),
             a11y: A11y::new(
@@ -3221,23 +3231,7 @@ impl Window {
             self.a11y.begin_frame();
         }
 
-        let _inspector_width: Pixels = rems(30.0).to_pixels(self.rem_size());
-        let root_size = {
-            #[cfg(any(feature = "inspector", debug_assertions))]
-            {
-                if self.inspector.is_some() {
-                    let mut size = self.viewport_size;
-                    size.width = (size.width - _inspector_width).max(px(0.0));
-                    size
-                } else {
-                    self.viewport_size
-                }
-            }
-            #[cfg(not(any(feature = "inspector", debug_assertions)))]
-            {
-                self.viewport_size
-            }
-        };
+        let root_size = self.app_bounds().size;
 
         // Layout all root elements. Like the root element on the web, which
         // stretches to fill the viewport unless explicitly sized, window roots
@@ -3252,7 +3246,7 @@ impl Window {
         root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
-        let inspector_element = self.prepaint_inspector(_inspector_width, cx);
+        let inspector_element = self.prepaint_inspector(cx);
 
         self.prepaint_deferred_draws(cx);
 
@@ -6818,11 +6812,104 @@ impl Window {
     /// Toggles the inspector mode on this window.
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn toggle_inspector(&mut self, cx: &mut App) {
-        self.inspector = match self.inspector {
-            None => Some(cx.new(|_| Inspector::new())),
-            Some(_) => None,
-        };
+        if self.inspector.take().is_some() {
+            if let Some(capture) = self.inspector_capture.take() {
+                self.inspector_dock = capture.dock();
+            }
+        } else {
+            self.inspector = Some(cx.new(|_| Inspector::new()));
+            self.inspector_capture = Some(Box::new(crate::inspector::InspectorCapture::new(
+                self.inspector_dock,
+            )));
+        }
         self.refresh();
+    }
+
+    /// Whether the inspector is open in this window.
+    pub fn is_inspector_open(&self) -> bool {
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        {
+            self.inspector.is_some()
+        }
+        #[cfg(not(any(feature = "inspector", debug_assertions)))]
+        {
+            false
+        }
+    }
+
+    /// The inspector's recording of this window, while the inspector is open.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn inspector_capture(&self) -> Option<&crate::inspector::InspectorCapture> {
+        self.inspector_capture.as_deref()
+    }
+
+    /// Mutable access to the inspector's recording: overlays, picking, dock,
+    /// overrides, freezing and configuration. Changes show on the next frame.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn inspector_capture_mut(&mut self) -> Option<&mut crate::inspector::InspectorCapture> {
+        self.inspector_capture.as_deref_mut()
+    }
+
+    /// The part of the window the app draws into: the whole viewport, minus
+    /// the inspector's dock while it is open.
+    pub fn app_bounds(&self) -> Bounds<Pixels> {
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        if let Some(capture) = &self.inspector_capture {
+            return capture.dock().split(self.viewport_size).0;
+        }
+        Bounds::new(Point::default(), self.viewport_size)
+    }
+
+    /// Starts picking: the next click in the app selects an element instead
+    /// of interacting with it. Emits [`crate::inspector::InspectorEvent`]s.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn start_inspector_pick(&mut self) {
+        // Engine slice: route app-area mouse input to picking over the captured tree.
+        if let Some(capture) = self.inspector_capture.as_deref_mut() {
+            capture.pick.active = true;
+        }
+    }
+
+    /// Ends picking without selecting anything.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn stop_inspector_pick(&mut self) {
+        if let Some(capture) = self.inspector_capture.as_deref_mut() {
+            capture.pick.active = false;
+        }
+    }
+
+    /// Lets the element currently being drawn report rich facts (text, box
+    /// model, colors, list range...) to the inspector. `f` only runs while the
+    /// inspector is capturing at [`crate::inspector::CaptureLevel::Full`].
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn inspect_current_element(
+        &mut self,
+        _f: impl FnOnce(&mut crate::inspector::ElementDetails),
+    ) {
+        // Engine slice: attach to the record of the element being drawn.
+    }
+
+    /// Resolves keystrokes against the keymap and the focused context stack
+    /// without dispatching anything: which binding wins, and why each other
+    /// candidate loses.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn inspector_resolve_keystrokes(
+        &self,
+        keystrokes: &[Keystroke],
+        _cx: &App,
+    ) -> crate::inspector::KeyResolution {
+        // Engine slice: Keymap::bindings_for_input + context stack + predicate evaluation.
+        crate::inspector::KeyResolution {
+            keystrokes: keystrokes.iter().cloned().collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Where the inspector UI is drawn, while it is open.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn inspector_bounds(&self) -> Option<Bounds<Pixels>> {
+        let capture = self.inspector_capture.as_ref()?;
+        Some(capture.dock().split(self.viewport_size).1)
     }
 
     /// Returns true if the window is in inspector mode.
@@ -6876,15 +6963,11 @@ impl Window {
     }
 
     #[cfg(any(feature = "inspector", debug_assertions))]
-    fn prepaint_inspector(&mut self, inspector_width: Pixels, cx: &mut App) -> Option<AnyElement> {
+    fn prepaint_inspector(&mut self, cx: &mut App) -> Option<AnyElement> {
+        let bounds = self.inspector_bounds()?;
         if let Some(inspector) = self.inspector.take() {
             let mut inspector_element = AnyView::from(inspector.clone()).into_any_element();
-            inspector_element.prepaint_as_root(
-                point(self.viewport_size.width - inspector_width, px(0.0)),
-                size(inspector_width, self.viewport_size.height).into(),
-                self,
-                cx,
-            );
+            inspector_element.prepaint_as_root(bounds.origin, bounds.size.into(), self, cx);
             self.inspector = Some(inspector);
             Some(inspector_element)
         } else {

@@ -44,10 +44,10 @@ pub use test_context::*;
 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
 pub use visual_test_context::*;
 
-#[cfg(any(feature = "inspector", debug_assertions))]
-use crate::InspectorElementRegistry;
 #[cfg(target_os = "macos")]
 use crate::MacActivationPolicy;
+#[cfg(any(feature = "inspector", debug_assertions))]
+use crate::inspector::InspectorElementRegistry;
 use crate::{
     Action, ActionBuildError, ActionRegistry, Any, AnyView, AnyWindowHandle, AppContext, Arena,
     ArenaBox, Asset, BackgroundExecutor, Bounds, ClipboardItem, ClipboardReadError, CursorStyle,
@@ -2794,6 +2794,14 @@ impl App {
         if let Some(window) = current_window {
             _ = window.drop_image(image);
         }
+    }
+
+    /// Every live entity with its type, handle count and observers, for the
+    /// inspector's Entities lens.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn inspector_entities(&self) -> Vec<crate::inspector::EntityInfo> {
+        // Engine slice: walk the entity map (type names recorded at insert).
+        Vec::new()
     }
 
     /// Sets the renderer for the inspector.

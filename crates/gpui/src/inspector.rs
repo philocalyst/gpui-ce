@@ -19,6 +19,15 @@ impl Into<InspectorElementId> for &InspectorElementId {
 pub use conditional::*;
 
 #[cfg(any(feature = "inspector", debug_assertions))]
+mod capture;
+#[cfg(any(feature = "inspector", debug_assertions))]
+mod model;
+#[cfg(any(feature = "inspector", debug_assertions))]
+pub use capture::*;
+#[cfg(any(feature = "inspector", debug_assertions))]
+pub use model::*;
+
+#[cfg(any(feature = "inspector", debug_assertions))]
 mod conditional {
     use super::*;
     use crate::{AnyElement, App, Context, Empty, IntoElement, Render, Window};
@@ -60,7 +69,10 @@ mod conditional {
     pub struct Inspector {
         active_element: Option<InspectedElement>,
         pub(crate) pick_depth: Option<f32>,
+        ui_state: Option<Box<dyn Any>>,
     }
+
+    impl crate::EventEmitter<InspectorEvent> for Inspector {}
 
     struct InspectedElement {
         id: InspectorElementId,
@@ -80,8 +92,20 @@ mod conditional {
         pub(crate) fn new() -> Self {
             Self {
                 active_element: None,
-                pick_depth: Some(0.0),
+                pick_depth: None,
+                ui_state: None,
             }
+        }
+
+        /// State owned by the inspector UI for this window, created by `init`
+        /// on first use. Lives exactly as long as the inspector stays open.
+        ///
+        /// Panics if a previous call created the state with a different type.
+        pub fn ui_state<T: 'static>(&mut self, init: impl FnOnce() -> T) -> &mut T {
+            self.ui_state
+                .get_or_insert_with(|| Box::new(init()))
+                .downcast_mut()
+                .expect("inspector UI state has a different type")
         }
 
         pub(crate) fn select(&mut self, id: InspectorElementId, window: &mut Window) {

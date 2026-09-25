@@ -28,7 +28,9 @@ mod geometry;
 mod gestures;
 mod global;
 mod input;
-mod inspector;
+/// Element identity, the inspector entity, and (while an inspector is open)
+/// the capture of frames, element trees and input it records.
+pub mod inspector;
 mod interactive;
 mod key_dispatch;
 mod keymap;
@@ -144,7 +146,9 @@ pub use gpui_util::arc_cow::ArcCow;
 /// HTTP client abstraction for making requests.
 pub mod http_client;
 pub use input::*;
-pub use inspector::*;
+pub use inspector::InspectorElementId;
+#[cfg(any(feature = "inspector", debug_assertions))]
+pub use inspector::{Inspector, InspectorElementPath, InspectorRenderer, inspector_reflection};
 pub use interactive::*;
 use key_dispatch::*;
 pub use keymap::*;
