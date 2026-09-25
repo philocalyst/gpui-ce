@@ -48,7 +48,7 @@ pub use bench::{BenchReport, BenchSpec, bench};
 pub use color::Color;
 pub use film::{Film, FilmSpec};
 pub use golden::GoldenTolerance;
-pub use lint::{LintReport, Rule, Severity, StyleSpec, TextRole};
+pub use lint::{LintReport, Rule, Severity, SpacingRule, StyleSpec, TextRole};
 pub use matrix::{Matrix, Variant};
 pub use output::Suite;
 pub use shot::{QuadInfo, Rect, Shot, TextLine};

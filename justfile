@@ -117,6 +117,35 @@ test-with +args:
     @echo "🧪 Running workspace tests with args..."
     cargo test --workspace -- {{ args }}
 
+[doc('Run every Lightbox suite in the workspace, then build contact sheets and target/lightbox/index.html')]
+[group('testing')]
+lightbox *flags:
+    #!/usr/bin/env nu
+    # Every package that uses Lightbox (and Lightbox's own suite).
+    let packages = (cargo metadata --format-version 1 --no-deps | from json | get packages
+        | where {|package| $package.name == "gpui_ce_lightbox" or ($package.dependencies | any {|dependency| $dependency.name == "gpui_ce_lightbox" }) }
+        | get name)
+    print $"🔦 Lightbox suites in: ($packages | str join ', ')"
+    cargo run -q -p gpui_ce_lightbox -- clean
+    let selection = ($packages | each {|name| ["-p" $name] } | flatten)
+    # Failing tests still leave their shots, films and diffs: build the report either way.
+    let code = try { cargo test ...$selection --no-fail-fast {{ flags }}; $env.LAST_EXIT_CODE } catch { 1 }
+    cargo run -q -p gpui_ce_lightbox -- report
+    exit $code
+
+[doc('Run Lightbox UI benchmarks (tests named bench_*) in release, one at a time, then build the report')]
+[group('testing')]
+bench-ui *flags:
+    #!/usr/bin/env nu
+    let packages = (cargo metadata --format-version 1 --no-deps | from json | get packages
+        | where {|package| $package.name == "gpui_ce_lightbox" or ($package.dependencies | any {|dependency| $dependency.name == "gpui_ce_lightbox" }) }
+        | get name)
+    print $"⏱️ UI benchmarks in: ($packages | str join ', ')"
+    let selection = ($packages | each {|name| ["-p" $name] } | flatten)
+    let code = try { cargo test --release ...$selection --no-fail-fast -- bench_ --test-threads=1 {{ flags }}; $env.LAST_EXIT_CODE } catch { 1 }
+    cargo run -q -p gpui_ce_lightbox -- report
+    exit $code
+
 
 [doc('Format all Rust code in the workspace')]
 [group('quality')]
