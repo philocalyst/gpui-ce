@@ -42,13 +42,16 @@ and the UI (this crate). Read it fully before changing either side.
                                │ window.inspector_capture_mut()  (commands)
 ┌─ crates/gpui_inspector ──────┴────────────────────────────────────────┐
 │ Loupe (root view, cached)  shell: toolbar · pulse strip · lens rail ·  │
-│                            lens body · status bar · palette           │
+│                            lens body · status bar · palette ·         │
+│                            settings popover · help overlay            │
 │ lenses/   elements · frames · events · entities · audit                │
 │ analysis/ pure functions over captures (stats, why-size, flame layout, │
 │           bottom-up, insights, trace export, audit rules, rust patch)  │
-│ widgets/  tree, table, splitter, tabs, pill, kbd, sparkline, strip,    │
-│           scrub field, text field, icon, section, tooltip, menu        │
-│ theme.rs  tokens · harness.rs headless screenshots (test-support)      │
+│ widgets/  tree, table, splitter, tab rail, segmented, button, pill,    │
+│           kbd, sparkline, scrub field, text field, icon, section,      │
+│           tooltip, empty state, prose, swatch                          │
+│ theme.rs  tokens · settings.rs LoupeSettings (app-wide global)         │
+│ harness.rs, fixtures.rs  headless screenshots (test-support)          │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -70,6 +73,12 @@ and the UI (this crate). Read it fully before changing either side.
   it notifies its own entities, and uses `capture_mut()` for commands.
 * Heavy derived data (percentiles, flame layout, bottom-up, audit) is memoized
   per lens keyed by `(generation, selection)`; never recomputed per render.
+* **Settings** are one app-wide `LoupeSettings` global (theme, density,
+  editor, frame budget, capture level), set by `init_with` and changed by the
+  settings popover, the palette and the lenses' capture controls through
+  `LoupeSettings::update`. Every Loupe observes it: it restyles, and copies
+  the budget and level into its window's `CaptureConfig` (also when it
+  opens). The capture's config is a mirror; settings are the source.
 
 ## Engine API
 
@@ -120,7 +129,7 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ ◎ Pick  ▢ ◌ ▦ ⚠ ⇲ ⊡  ❚❚   [ Find anything…        ⌘K ]  ⇆ │ toolbar 32
+│ ◎ Pick  ▢ ◌ ▦ ⚠ ⇲ ⊡  ❚❚ Freeze ⚲ [ Find anything… ⌘K ] ⚙ ⇆ ✕ │ toolbar 32
 ├────────────────────────────────────────────────────────────┤
 │ ▁▁▂▁▁▁█▁▁▂▁▁▁▁▁▃▁▁▁▁▁▁▁▁▁▁▁▁▅▁▁▁▁▁▁  118 fps · p95 7.9 ms │ pulse strip 40
 ├────────────────────────────────────────────────────────────┤
@@ -143,9 +152,28 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
   time-travel. Right side: live fps and p95.
 * **Rail** tabs carry live counts, so the rail itself is a dashboard.
 * **Status bar**: selection breadcrumb (clickable), app ms, Loupe's own ms,
-  retained memory, `FROZEN` pill.
+  retained memory, `FROZEN` / `HELD` pills.
 * **Palette** (`⌘K`/`ctrl-k`): fuzzy search across elements (`#`), entities
-  (`@`), commands (`>`) and lenses. Every toolbar toggle is a command.
+  (`@`), commands (`>`) and lenses. Every toolbar toggle and every setting
+  choice is a command.
+* **Settings popover** (the ⚙ in the toolbar, `⌘,`/`ctrl-,`): theme
+  (window / dark / light), density, frame budget (60 / 120 / 144 Hz),
+  capture level (a radio list, one line each on what it records and costs)
+  and the editor for source links (Zed, VS Code, Cursor, IntelliJ or a
+  custom `{path}` `{line}` `{col}` template, with a live URL preview).
+* **Help overlay** (`?` outside text fields, or the palette): what each lens
+  answers and every key, generated from the keymap and the actions' doc
+  comments, grouped by key context (Global, Loupe, Lists and tables, Number
+  fields, Frames, Audit) plus the keys the engine handles while picking. One
+  to three columns, by width.
+* Floating layers (palette, settings, help) are exclusive; each sits over a
+  scrim that swallows clicks, so clicking outside only closes it, and
+  `escape` closes whichever is open.
+* **Empty states** say what the pane would show and how to get there: the
+  master pane names what is missing (`No app frames recorded yet`) and what
+  to do (`Use the app: …`); an empty detail pane asks the lens' question and
+  says what to select, with actions where there are any (*Start picking*,
+  *Hold app*).
 * **Responsive**: lenses read the dock size; below 520 px wide they stack
   master/detail vertically with a splitter, otherwise side by side. Nothing
   overflows or clips text without an ellipsis.
@@ -154,7 +182,8 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
 
 1. **Elements** — *What is this, where did it come from, why does it look like
    that?* Virtual tree (kind glyph, name, `#id`, size, flag icons, view render
-   count, override dot); filter; time-travel banner when viewing an old frame.
+   count, override dot); filter; *Your code* (hides gpui and library
+   elements); time-travel banner when viewing an old frame.
    Detail: title + source link + owning view; **Why this size** (one sentence
    per axis); box model diagram (scrub-editable); Style grid over the
    `StyleRefinement` JSON (set fields only, scrub numbers, color swatches,
@@ -164,7 +193,7 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
    p50/p95/p99, over-budget count), phase bar, causes with sites, flame chart
    (views, user spans, main-thread tasks) with wheel zoom / drag pan, bottom-up
    self-time table, Insights (plain-language findings), *Jump to worst*,
-   *Export trace* (Chrome JSON for Perfetto).
+   *Export trace* (Chrome JSON for Perfetto), the budget control.
 3. **Events** — *Where did my click go? What will this key do here?* Coalesced
    input log with filter chips and pause; selected event's hit path (click to
    select element), context stack, actions and whether handled; **Key tester**:
@@ -182,7 +211,7 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
    frames and entities (clickable without keyboard access, low contrast,
    zero-size hitboxes with listeners, render hot spots, expensive render,
    overflowing content, missing a11y labels, duplicate ids) with severity,
-   explanation and links; capture self-cost.
+   explanation and links; capture level, budget and self-cost.
 
 ### Overlays (painted by the engine from `OverlayState`)
 
@@ -198,19 +227,29 @@ UI-requested highlights (e.g. hovering a flame span highlights its element).
   rail 28, status 22. Controls 20 or 24 px.
 * `IBM Plex Sans` for UI (12 px body, 11 px secondary, 10.5 px uppercase section
   labels with tracking), `Lilex` for values, paths, ids and code.
-* Tokens (`theme.rs`, dark + light, follows window appearance): `bg`,
+* Tokens (`theme.rs`, dark + light, follow the window unless the settings
+  pick one; a comfortable density adds 4 px to rows and controls): `bg`,
   `surface`, `surface_2`, `hover`, `selected`, `line`, `line_strong`, `text`,
   `text_muted`, `text_faint`, `accent`, `ok`, `warn`, `crit`, `view`,
   `component`, and a fixed phase ramp `input · render · layout · prepaint ·
   paint · present · inspector` used identically everywhere.
 * Overlays use web conventions: content blue, padding green, margin orange.
 
-### Keys (within the `Loupe` key context)
+### Keys
 
-`⌘K`/`ctrl-k` palette · `alt-1…5` lenses · `ctrl-shift-c`/`cmd-shift-c` pick ·
-`[`/`]` pick depth · `space` freeze (when no text field is focused) · `j/k`,
-arrows, `left/right` collapse/expand in trees · `enter` open/select ·
-`escape` cancel pick / close palette.
+All bindings are built by `key_bindings()` (`lib.rs`, `loupe.rs`,
+`widgets/mod.rs`, the lenses) and listed by the help overlay, so this table
+is a summary; the overlay is the reference.
+
+| Context | Keys |
+|---|---|
+| Global | `ctrl-shift-i`/`cmd-alt-i` toggle Loupe · `ctrl-shift-c`/`cmd-shift-c` pick · `ctrl-shift-h`/`cmd-shift-h` hold |
+| `Loupe` | `ctrl-k`/`cmd-k` palette · `alt-1…5` lenses · `ctrl-,`/`cmd-,` settings · `?` help and `space` freeze (outside text fields) · `escape` closes the open layer, else stops picking |
+| While picking (engine) | `]`/`[` or the wheel walk the ancestry · click selects · `escape` stops |
+| `LoupeList` (trees, tables) | `j`/`k`, arrows · `home`/`end` · `left`/`right` collapse/expand · `enter` open |
+| `LoupeScrub` (number fields) | `up`/`down` ±1 step · `shift-up`/`shift-down` ±10 |
+| `LoupeFrames` | `left`/`right` previous/next frame · `w` worst · `l` latest · `=`/`+`, `-`, `0` zoom |
+| `LoupeAudit` | `j`/`k`, arrows select a finding · `enter` reveals it |
 
 ## Code standards
 
@@ -232,6 +271,12 @@ arrows, `left/right` collapse/expand in trees · `enter` open/select ·
 * **Analysis** (`src/analysis`): pure functions with edge cases.
 * **UI on fixtures**: `fixtures::inbox()` installed with
   `LoupeHarness::install_capture` renders every surface deterministically.
+  One test file per area (`shell`, `lens_*`, `widgets`, `settings_help`,
+  `demo`); tests drive Loupe through real input (`click_selector`,
+  `type_keys`), read what was painted (`assert_text_visible`, `pixel`,
+  `bounds_of`) and what Loupe did (`capture`, `state`, `opened_url`).
+* **Generated, not listed**: the help overlay is built from the keymap, and
+  a unit test checks that every `Command` with a key is on it.
 * **UI live** (`tests/live.rs` and each lens's live tests): a real app, the real
   engine and real Loupe. Numbers Loupe shows are cross-checked against ground
   truth (render counters, known entity graphs), idle stays idle, and frames
