@@ -28,6 +28,40 @@ pub struct Keymap {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct BindingIndex(usize);
 
+/// One binding considered by [`Keymap::explain_input`].
+#[cfg(any(feature = "inspector", debug_assertions))]
+#[derive(Clone, Debug)]
+pub(crate) struct ExplainedBinding<'a> {
+    /// Position in the keymap; later bindings take precedence at equal depth.
+    pub index: BindingIndex,
+    /// The binding.
+    pub binding: &'a KeyBinding,
+    /// The depth [`Keymap::bindings_for_input`] ranks the binding at: the length of the context
+    /// stack up to the deepest context its predicate matches, or the whole stack for bindings
+    /// without a predicate. `None` when the predicate doesn't match.
+    pub depth: Option<usize>,
+    /// What became of the binding.
+    pub outcome: InputOutcome,
+}
+
+/// What became of a binding when the keymap resolved an input sequence.
+#[cfg(any(feature = "inspector", debug_assertions))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InputOutcome {
+    /// The keystrokes equal the input and the binding is returned by
+    /// [`Keymap::bindings_for_input`]: dispatch tries it, in order, until an action is handled.
+    Dispatched,
+    /// A `NoAction` or `Unbind` binding, which disables the bindings it outranks.
+    Disables,
+    /// Suppressed by the binding at this index: a disabling binding, or for a binding the input
+    /// is a prefix of, the dispatched binding that makes dispatch stop waiting for more input.
+    OutrankedBy(BindingIndex),
+    /// The input is a strict prefix of the keystrokes: dispatch waits for more input.
+    Waits,
+    /// The keystrokes equal or extend the input, but the predicate doesn't match.
+    ContextMismatch,
+}
+
 fn disabled_binding_matches_context(disabled_binding: &KeyBinding, binding: &KeyBinding) -> bool {
     match (
         &disabled_binding.context_predicate,
@@ -250,6 +284,122 @@ impl Keymap {
             predicate.depth_of(contexts)
         } else {
             Some(contexts.len())
+        }
+    }
+
+    /// Explains how [`Self::bindings_for_input`] resolves `input`: every binding whose keystrokes
+    /// equal or extend the input, and what became of it.
+    ///
+    /// Returns bindings whose keystrokes equal the input in precedence order, then bindings the
+    /// input is a strict prefix of in precedence order, then bindings whose predicate doesn't
+    /// match `context_stack`, latest added first. Bindings with the
+    /// [`InputOutcome::Dispatched`] outcome are exactly the ones `bindings_for_input` returns, in
+    /// the same order, and some binding has the [`InputOutcome::Waits`] outcome exactly when it
+    /// reports pending input. This mirrors `bindings_for_input` rule for rule, so change both
+    /// together; the inspector's key tests check that they agree.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub(crate) fn explain_input<'a>(
+        &'a self,
+        input: &[impl AsKeystroke],
+        context_stack: &[KeyContext],
+    ) -> Vec<ExplainedBinding<'a>> {
+        let mut matches = Vec::new();
+        let mut prefixes = Vec::new();
+        let mut mismatches = Vec::new();
+        for (ix, binding) in self.bindings().enumerate().rev() {
+            let Some(is_prefix) = binding.match_keystrokes(input) else {
+                continue;
+            };
+            let depth = self.binding_enabled(binding, context_stack);
+            let explained = ExplainedBinding {
+                index: BindingIndex(ix),
+                binding,
+                depth,
+                outcome: InputOutcome::ContextMismatch,
+            };
+            match depth {
+                None => mismatches.push(explained),
+                Some(_) if is_prefix => prefixes.push(explained),
+                Some(_) => matches.push(explained),
+            }
+        }
+
+        let by_precedence = |a: &ExplainedBinding, b: &ExplainedBinding| {
+            b.depth.cmp(&a.depth).then(b.index.cmp(&a.index))
+        };
+        matches.sort_by(by_precedence);
+        let first_dispatched = Self::explain_matches(&mut matches);
+        Self::explain_prefixes(&mut prefixes, first_dispatched);
+        prefixes.sort_by(by_precedence);
+
+        matches.extend(prefixes);
+        matches.extend(mismatches);
+        matches
+    }
+
+    /// Applies `bindings_for_input`'s `NoAction` / `Unbind` rules to complete matches sorted by
+    /// precedence. Returns the index of the first dispatched binding.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn explain_matches(matches: &mut [ExplainedBinding]) -> Option<BindingIndex> {
+        let mut no_actions = SmallVec::<[(u32, BindingIndex); 1]>::new();
+        let mut unbinds = SmallVec::<[(BindingIndex, &KeyBinding); 1]>::new();
+        let mut first_dispatched = None;
+        for explained in matches {
+            let binding = explained.binding;
+            let meta = binding.meta.map_or(0, |meta| meta.0);
+            explained.outcome = if is_no_action(&*binding.action) {
+                no_actions.push((meta, explained.index));
+                InputOutcome::Disables
+            } else if let Some(&(_, by)) = no_actions
+                .iter()
+                .find(|(no_action_meta, _)| meta >= *no_action_meta)
+            {
+                InputOutcome::OutrankedBy(by)
+            } else if is_unbind(&*binding.action) {
+                unbinds.push((explained.index, binding));
+                InputOutcome::Disables
+            } else if let Some(&(by, _)) = unbinds
+                .iter()
+                .find(|(_, unbind)| binding_is_unbound(unbind, binding))
+            {
+                InputOutcome::OutrankedBy(by)
+            } else {
+                first_dispatched.get_or_insert(explained.index);
+                InputOutcome::Dispatched
+            };
+        }
+        first_dispatched
+    }
+
+    /// Applies `bindings_for_input`'s pending rules to bindings the input is a strict prefix of,
+    /// in keymap order: bindings added before the first dispatched match are ignored, and the
+    /// latest remaining binding for each keystroke sequence decides whether dispatch waits for it.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn explain_prefixes(prefixes: &mut [ExplainedBinding], first_dispatched: Option<BindingIndex>) {
+        prefixes.sort_by_key(|explained| explained.index);
+        let is_disabling =
+            |binding: &KeyBinding| is_no_action(&*binding.action) || is_unbind(&*binding.action);
+        for ix in 0..prefixes.len() {
+            let explained = &prefixes[ix];
+            let outcome = match first_dispatched {
+                Some(first_dispatched) if first_dispatched > explained.index => {
+                    InputOutcome::OutrankedBy(first_dispatched)
+                }
+                _ if is_disabling(explained.binding) => InputOutcome::Disables,
+                _ => {
+                    let latest = prefixes[ix..]
+                        .iter()
+                        .rev()
+                        .find(|later| later.binding.keystrokes == explained.binding.keystrokes)
+                        .unwrap_or(explained);
+                    if is_disabling(latest.binding) {
+                        InputOutcome::OutrankedBy(latest.index)
+                    } else {
+                        InputOutcome::Waits
+                    }
+                }
+            };
+            prefixes[ix].outcome = outcome;
         }
     }
 

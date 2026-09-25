@@ -633,7 +633,7 @@ impl FocusHandle {
             .dispatch_tree
             .focusable_node_id(self.id)
         {
-            window.dispatch_action_on_node(node_id, action, cx)
+            window.dispatch_action_on_node(node_id, action, None, cx)
         }
     }
 }
@@ -1345,6 +1345,10 @@ pub struct Window {
     /// Where the inspector docks; remembered across toggles.
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector_dock: crate::inspector::InspectorDock,
+    /// The input record being built while an event or action is dispatched
+    /// and the inspector is capturing.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    inspector_input: Option<Box<crate::inspector::InputInFlight>>,
     #[cfg(feature = "profiler")]
     debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay,
     pub(crate) a11y: A11y,
@@ -2047,6 +2051,8 @@ impl Window {
             inspector_capture: None,
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector_dock: Default::default(),
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            inspector_input: None,
             #[cfg(feature = "profiler")]
             debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay::new(),
             a11y: A11y::new(
@@ -2341,7 +2347,7 @@ impl Window {
             window
                 .update(cx, |_, window, cx| {
                     let node_id = window.focus_node_id_in_rendered_frame(focus_id);
-                    window.dispatch_action_on_node(node_id, action.as_ref(), cx);
+                    window.dispatch_action_on_node(node_id, action.as_ref(), None, cx);
                 })
                 .log_err();
         })
@@ -5490,6 +5496,8 @@ impl Window {
     pub fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
         #[cfg(feature = "profiler")]
         self.window_profiler.begin_input(event.kind_name());
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        let input_capture = self.begin_input_capture(&event);
         let update_count_before = self.invalidator.update_count();
         // Track input modality for focus-visible styling and hover suppression.
         // Hover is suppressed during keyboard modality so that keyboard navigation
@@ -5651,10 +5659,13 @@ impl Window {
         #[cfg(feature = "profiler")]
         self.window_profiler.end_input(caused_invalidation);
 
-        DispatchEventResult {
+        let result = DispatchEventResult {
             propagate: cx.propagate_event,
             default_prevented: self.default_prevented,
-        }
+        };
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.finish_input_capture(input_capture, !result.propagate || result.default_prevented);
+        result
     }
 
     fn promote_external_drag_to_platform(&mut self, event: &PlatformInput, cx: &mut App) {
@@ -5894,6 +5905,8 @@ impl Window {
 
         let node_id = self.focus_node_id_in_rendered_frame(self.focus);
         let dispatch_path = self.rendered_frame.dispatch_tree.dispatch_path(node_id);
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.note_input_target(&dispatch_path);
 
         let mut keystroke: Option<Keystroke> = None;
 
@@ -6039,7 +6052,7 @@ impl Window {
 
         if !skip_bindings {
             for binding in match_result.bindings {
-                self.dispatch_action_on_node(node_id, binding.action.as_ref(), cx);
+                self.dispatch_action_on_node(node_id, binding.action.as_ref(), Some(&binding), cx);
                 if !cx.propagate_event {
                     self.dispatch_keystroke_observers(
                         event,
@@ -6190,7 +6203,7 @@ impl Window {
 
             cx.propagate_event = true;
             for binding in replay.bindings {
-                self.dispatch_action_on_node(node_id, binding.action.as_ref(), cx);
+                self.dispatch_action_on_node(node_id, binding.action.as_ref(), Some(&binding), cx);
                 if !cx.propagate_event {
                     self.dispatch_keystroke_observers(
                         &event,
@@ -6225,13 +6238,20 @@ impl Window {
             .unwrap_or_else(|| self.rendered_frame.dispatch_tree.root_node_id())
     }
 
+    /// Dispatches `action` along the path to `node_id`. `_binding` is the key
+    /// binding that produced it, if any, for the inspector.
     fn dispatch_action_on_node(
         &mut self,
         node_id: DispatchNodeId,
         action: &dyn Action,
+        _binding: Option<&KeyBinding>,
         cx: &mut App,
     ) {
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        let action_capture = self.begin_action_capture(node_id, action);
         self.dispatch_action_on_node_inner(node_id, action, cx);
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.finish_action_capture(action_capture, action, _binding, !cx.propagate_event);
 
         if !cx.propagate_event
             && cx.cursor_hide_mode == CursorHideMode::OnTypingAndAction
@@ -6954,17 +6974,45 @@ impl Window {
     /// Resolves keystrokes against the keymap and the focused context stack
     /// without dispatching anything: which binding wins, and why each other
     /// candidate loses.
+    ///
+    /// `keystrokes` is the whole sequence, as if typed from scratch with the
+    /// current focus. The result matches what key dispatch does with the
+    /// latest rendered frame: the winner is the highest-precedence matching
+    /// binding whose action is handled on the focus path or by a global
+    /// listener (bindings above it resolve to
+    /// [`crate::inspector::BindingVerdict::Unhandled`]). It assumes action
+    /// handlers don't call `cx.propagate()`, keystroke interceptors
+    /// (`cx.intercept_keystrokes`) don't stop the keystroke, and the platform
+    /// didn't prefer character input for it (e.g. AltGr on some layouts).
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn inspector_resolve_keystrokes(
         &self,
         keystrokes: &[Keystroke],
-        _cx: &App,
+        cx: &App,
     ) -> crate::inspector::KeyResolution {
-        // Engine slice: Keymap::bindings_for_input + context stack + predicate evaluation.
-        crate::inspector::KeyResolution {
-            keystrokes: keystrokes.iter().cloned().collect(),
-            ..Default::default()
-        }
+        let node_id = self.focus_node_id_in_rendered_frame(self.focus);
+        let dispatch_tree = &self.rendered_frame.dispatch_tree;
+        let keymap = cx.keymap.borrow();
+        crate::inspector::resolve_keystrokes(&keymap, keystrokes, self.context_stack(), |action| {
+            dispatch_tree.is_action_available(action, node_id)
+                || cx
+                    .global_action_listeners
+                    .get(&action.as_any().type_id())
+                    .is_some_and(|listeners| !listeners.is_empty())
+        })
+    }
+
+    /// Every live entity with its type, handle count, observers and notify
+    /// counts, sorted by id. Like [`App::inspector_entities`], but also sees
+    /// this window while it is being updated (for example during render).
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn inspector_entities(&self, cx: &App) -> Vec<crate::inspector::EntityInfo> {
+        let other_windows = cx
+            .windows
+            .values()
+            .filter_map(Option::as_deref)
+            .filter(|window| window.handle.window_id() != self.handle.window_id());
+        crate::inspector::live_entities(cx, std::iter::once(self).chain(other_windows))
     }
 
     /// Where the inspector UI is drawn, while it is open.
@@ -6972,6 +7020,127 @@ impl Window {
     pub fn inspector_bounds(&self) -> Option<Bounds<Pixels>> {
         let capture = self.inspector_capture.as_ref()?;
         Some(capture.dock().split(self.viewport_size).1)
+    }
+
+    /// Starts an input record for `event` while the inspector is capturing.
+    /// Pointer events inside the dock, or while picking, belong to the inspector.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn begin_input_capture(
+        &mut self,
+        event: &PlatformInput,
+    ) -> Option<crate::inspector::InputScope> {
+        let capture = self
+            .inspector_capture
+            .as_deref()
+            .filter(|capture| !capture.is_frozen())?;
+        let mut in_flight = crate::inspector::InputInFlight::for_event(
+            capture,
+            event,
+            self.invalidator.update_count(),
+        );
+        if let Some(position) = in_flight.record.position {
+            in_flight.record.inspector = capture.pick().active
+                || self
+                    .inspector_bounds()
+                    .is_some_and(|dock| dock.contains(&position));
+        }
+        Some(crate::inspector::InputScope {
+            outer: self.inspector_input.replace(Box::new(in_flight)),
+        })
+    }
+
+    /// Records the key context stack of the element a key event is dispatched
+    /// to, and whether that element is inside the inspector.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn note_input_target(&mut self, dispatch_path: &[DispatchNodeId]) {
+        if let Some(mut in_flight) = self.inspector_input.take() {
+            self.describe_input_target(dispatch_path, &mut in_flight.record);
+            self.inspector_input = Some(in_flight);
+        }
+    }
+
+    /// Starts an [`crate::inspector::InputKind::Action`] record for an action
+    /// dispatched outside of any event while the inspector is capturing.
+    /// Actions dispatched while handling an event join that event's record.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn begin_action_capture(
+        &mut self,
+        node_id: DispatchNodeId,
+        action: &dyn Action,
+    ) -> Option<crate::inspector::InputScope> {
+        if self.inspector_input.is_some() {
+            return None;
+        }
+        let capture = self
+            .inspector_capture
+            .as_deref()
+            .filter(|capture| !capture.is_frozen())?;
+        let mut in_flight = crate::inspector::InputInFlight::start(
+            capture,
+            crate::inspector::InputKind::Action,
+            action.name().into(),
+            self.invalidator.update_count(),
+        );
+        let dispatch_path = self.rendered_frame.dispatch_tree.dispatch_path(node_id);
+        self.describe_input_target(&dispatch_path, &mut in_flight.record);
+        self.inspector_input = Some(Box::new(in_flight));
+        Some(crate::inspector::InputScope { outer: None })
+    }
+
+    /// Adds a dispatched action to the record being built, and commits the
+    /// record if [`Self::begin_action_capture`] started it for this action.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn finish_action_capture(
+        &mut self,
+        scope: Option<crate::inspector::InputScope>,
+        action: &dyn Action,
+        binding: Option<&KeyBinding>,
+        handled: bool,
+    ) {
+        if let Some(in_flight) = self.inspector_input.as_deref_mut() {
+            in_flight.push_action(action, binding, handled);
+        }
+        self.finish_input_capture(scope, handled);
+    }
+
+    /// Commits the record started with `scope` and makes the enclosing
+    /// dispatch's record current again.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn finish_input_capture(&mut self, scope: Option<crate::inspector::InputScope>, handled: bool) {
+        let Some(scope) = scope else {
+            return;
+        };
+        let Some(in_flight) = mem::replace(&mut self.inspector_input, scope.outer) else {
+            return;
+        };
+        let record = in_flight.finish(
+            handled,
+            self.invalidator.update_count(),
+            self.pending_input_keystrokes(),
+        );
+        if let Some(capture) = self.inspector_capture.as_deref_mut() {
+            capture.commit_input(record);
+        }
+    }
+
+    /// Fills in the key context stack along `dispatch_path`, outermost first,
+    /// and flags the record when the path runs through the inspector's view.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn describe_input_target(
+        &self,
+        dispatch_path: &[DispatchNodeId],
+        record: &mut crate::inspector::InputRecord,
+    ) {
+        let dispatch_tree = &self.rendered_frame.dispatch_tree;
+        record.context_stack = dispatch_path
+            .iter()
+            .filter_map(|&node_id| dispatch_tree.node(node_id).context.clone())
+            .collect();
+        let inspector_node = self
+            .inspector
+            .as_ref()
+            .and_then(|inspector| dispatch_tree.view_node_id(inspector.entity_id()));
+        record.inspector |= inspector_node.is_some_and(|node_id| dispatch_path.contains(&node_id));
     }
 
     /// Returns true if the window is in inspector mode.

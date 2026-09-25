@@ -599,6 +599,12 @@ impl DispatchTree {
         &self.nodes[node_id.0]
     }
 
+    /// The node where `view_id` was drawn as a view, if it was drawn in this frame.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn view_node_id(&self, view_id: EntityId) -> Option<DispatchNodeId> {
+        self.view_node_ids.get(&view_id).copied()
+    }
+
     fn active_node(&mut self) -> &mut DispatchNode {
         let active_node_id = self.active_node_id().unwrap();
         &mut self.nodes[active_node_id.0]

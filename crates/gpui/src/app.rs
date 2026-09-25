@@ -2797,11 +2797,15 @@ impl App {
     }
 
     /// Every live entity with its type, handle count and observers, for the
-    /// inspector's Entities lens.
+    /// inspector's Entities lens, sorted by id.
+    ///
+    /// Views and notify counts come from the open windows. A window that is
+    /// being updated is not reachable from here, so from inside a window (for
+    /// example while rendering) use [`Window::inspector_entities`], which
+    /// includes it.
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn inspector_entities(&self) -> Vec<crate::inspector::EntityInfo> {
-        // Engine slice: walk the entity map (type names recorded at insert).
-        Vec::new()
+        crate::inspector::live_entities(self, self.windows.values().filter_map(Option::as_deref))
     }
 
     /// Sets the renderer for the inspector.

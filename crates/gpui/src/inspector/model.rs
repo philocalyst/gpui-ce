@@ -524,11 +524,14 @@ pub enum InputKind {
 pub struct ActionRecord {
     /// `Action::name()`.
     pub name: &'static str,
-    /// Whether a listener handled it.
+    /// Whether a listener handled it: an action listener ran and didn't call
+    /// `cx.propagate()` (bubble-phase listeners stop propagation by default).
     pub handled: bool,
-    /// The keystrokes that produced it, when dispatched from a binding.
+    /// The keystrokes of the binding that produced it, e.g. `ctrl-k ctrl-t`,
+    /// when dispatched from a binding.
     pub keystrokes: Option<SharedString>,
-    /// The key context that the winning binding matched, if any.
+    /// The context predicate of that binding as written, e.g. `Editor && mode == full`.
+    /// `None` for bindings without one and for actions not dispatched from a binding.
     pub context: Option<SharedString>,
 }
 
@@ -550,21 +553,29 @@ pub struct InputRecord {
     pub position: Option<Point<Pixels>>,
     /// Keystroke, for key events.
     pub keystroke: Option<Keystroke>,
-    /// Elements under the pointer, topmost first (from the rendered frame).
+    /// Elements under the pointer, topmost first, from the latest captured
+    /// element tree (at most 8; empty before a tree was captured).
     pub hit_path: SmallVec<[ElementKey; 8]>,
-    /// Key context stack at dispatch time, outermost first (key events).
+    /// Key context stack of the dispatch target, outermost first: the focused
+    /// element for key events, the target element for [`InputKind::Action`].
     pub context_stack: SmallVec<[KeyContext; 4]>,
-    /// Actions dispatched while handling this event.
+    /// Actions dispatched while handling this event, in the order they completed.
     pub actions: SmallVec<[ActionRecord; 1]>,
-    /// Whether any listener handled the event / stopped propagation.
+    /// Whether the event was handled, as reported back to the platform: a
+    /// listener stopped propagation (action handlers do by default, and the
+    /// keymap does while it holds a pending multi-stroke prefix) or called
+    /// `window.prevent_default()`. For [`InputKind::Action`], whether the
+    /// action was handled.
     pub handled: bool,
-    /// Handling time.
+    /// Handling time; for coalesced moves, the total over all merged events.
     pub duration: Duration,
-    /// Whether handling it invalidated the window.
+    /// Whether handling it invalidated the window (a view notified or the
+    /// window refreshed before dispatch returned).
     pub caused_redraw: bool,
     /// Number of events merged into this record (mouse moves).
     pub coalesced: u32,
-    /// The event was consumed by the inspector (picking or its own dock).
+    /// The event was consumed by the inspector: pointer events inside its dock
+    /// or while picking, key events and actions targeting an element inside it.
     pub inspector: bool,
 }
 
@@ -577,7 +588,8 @@ pub struct EntityInfo {
     pub type_name: &'static str,
     /// Strong handle count.
     pub strong_count: usize,
-    /// Whether the entity has been rendered as a view in any window.
+    /// Whether the entity is drawn as a view (an `Entity<V: Render>` used as an
+    /// element, cached or not) in the latest rendered frame of an open window.
     pub is_view: bool,
     /// Registered `observe` callbacks watching it.
     pub observers: usize,
@@ -598,8 +610,10 @@ pub struct KeyResolution {
     pub keystrokes: SmallVec<[Keystroke; 2]>,
     /// The focused key context stack, outermost first.
     pub context_stack: Vec<KeyContext>,
-    /// Every binding whose keystrokes match or start with the input, in the
-    /// keymap's precedence order (the winner, if any, first).
+    /// Every binding whose keystrokes match or start with the input: the
+    /// winner, if any, first; then the other complete matches, the longer
+    /// bindings and the context mismatches, each in the keymap's precedence
+    /// order.
     pub candidates: Vec<BindingCandidate>,
 }
 
@@ -609,6 +623,15 @@ impl KeyResolution {
         self.candidates
             .iter()
             .find(|candidate| candidate.verdict == BindingVerdict::Wins)
+    }
+
+    /// Whether GPUI would wait for more keystrokes before running anything.
+    /// The winner still runs if the next keystroke doesn't continue a pending
+    /// binding, or after a one second timeout.
+    pub fn is_pending(&self) -> bool {
+        self.candidates
+            .iter()
+            .any(|candidate| candidate.verdict == BindingVerdict::Pending)
     }
 }
 
@@ -622,7 +645,8 @@ pub struct BindingCandidate {
     /// The binding's context predicate as written, if any.
     pub predicate: Option<SharedString>,
     /// Depth in the context stack at which the predicate matched
-    /// (0 = innermost), when it matched.
+    /// (0 = innermost), when it matched. Bindings without a predicate match
+    /// at 0, where the keymap ranks them.
     pub matched_depth: Option<usize>,
     /// Why it wins or loses.
     pub verdict: BindingVerdict,
@@ -633,17 +657,26 @@ pub struct BindingCandidate {
 pub enum BindingVerdict {
     /// This binding's action would be dispatched.
     Wins,
-    /// Matches, but a binding at a deeper context or later in the keymap wins.
+    /// Matches, but a binding at a deeper context or later in the keymap takes
+    /// precedence: the winner, a `NoAction` / `Unbind` binding that disables
+    /// this one, or, for a binding the input is a prefix of, the complete match
+    /// that makes GPUI stop waiting for more keys.
     Shadowed {
-        /// Index into [`KeyResolution::candidates`] of the binding that wins.
+        /// Index into [`KeyResolution::candidates`] of the binding that takes precedence.
         by: usize,
     },
     /// The keystrokes match but the context predicate is false here.
     ContextMismatch,
-    /// Matches, but the action is `NoAction` / unbound, which disables lower bindings.
+    /// Matches, but the action is `NoAction` / `Unbind`, which disables the
+    /// bindings it outranks (they are [`Self::Shadowed`] by it).
     Disabled,
     /// The input is a prefix of this binding: GPUI would wait for more keys.
     Pending,
+    /// Matches, but nothing on the focus path (and no global listener)
+    /// handles its action, so dispatch falls through to the next binding.
+    /// Applies to the matches ranked above the winner, or to every match when
+    /// nothing wins; matches ranked below the winner are [`Self::Shadowed`].
+    Unhandled,
 }
 
 bitflags::bitflags! {

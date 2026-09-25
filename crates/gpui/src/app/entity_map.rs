@@ -57,6 +57,9 @@ pub(crate) struct EntityMap {
     entities: SecondaryMap<EntityId, Box<dyn Any>>,
     pub accessed_entities: RefCell<FxHashSet<EntityId>>,
     ref_counts: Arc<RwLock<EntityRefCounts>>,
+    /// `type_name` of every inserted entity, for the inspector.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    type_names: SecondaryMap<EntityId, &'static str>,
 }
 
 #[doc(hidden)]
@@ -81,6 +84,8 @@ impl EntityMap {
                     entity_handles: HashMap::default(),
                 },
             })),
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            type_names: SecondaryMap::new(),
         }
     }
 
@@ -126,7 +131,28 @@ impl EntityMap {
 
         let handle = slot.0;
         self.entities.insert(handle.entity_id, Box::new(entity));
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.type_names.insert(handle.entity_id, type_name::<T>());
         handle
+    }
+
+    /// Every inserted entity that still has strong handles, with its type name
+    /// and strong handle count, ordered by id. Includes entities that are
+    /// leased for an update.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn live_entities(&self) -> Vec<(EntityId, &'static str, usize)> {
+        let ref_counts = self.ref_counts.read();
+        let mut live: Vec<_> = ref_counts
+            .counts
+            .iter()
+            .filter_map(|(entity_id, count)| {
+                let count = count.load(SeqCst);
+                let type_name = self.type_names.get(entity_id)?;
+                (count > 0).then_some((entity_id, *type_name, count))
+            })
+            .collect();
+        live.sort_unstable_by_key(|(entity_id, _, _)| *entity_id);
+        live
     }
 
     /// Move an entity to the stack.
@@ -195,6 +221,8 @@ impl EntityMap {
                     "dropped an entity that was referenced"
                 );
                 accessed_entities.remove(&entity_id);
+                #[cfg(any(feature = "inspector", debug_assertions))]
+                self.type_names.remove(entity_id);
                 // If the EntityId was allocated with `Context::reserve`,
                 // the entity may not have been inserted.
                 Some((entity_id, self.entities.remove(entity_id)?))
