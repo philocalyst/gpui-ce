@@ -40,7 +40,7 @@ use gpui::{
     AnyElement, App, ColorExt as _, Context, Entity, FocusHandle, FontWeight, IntoElement,
     KeyBinding, MouseButton, Pixels, Render, SharedString, Styled, Subscription, Window, actions,
     div,
-    inspector::{InspectorCapture, OverlayHighlight},
+    inspector::{ElementKey, ElementTree, InspectorCapture, OverlayHighlight},
     prelude::*,
     px, relative,
 };
@@ -317,10 +317,15 @@ impl Render for AuditLens {
         );
         let filter = self.render_filter(&counts, cx);
         let list = self.render_list(capture, selected, columns, &navigate, theme, cx);
-        let detail = selected
-            .and_then(|ix| findings.get(ix))
-            .map(|finding| render_detail(finding, capture, &navigate, theme));
-        let capture_card = self.render_capture(capture, theme);
+        let detail = selected.and_then(|ix| findings.get(ix)).map(|finding| {
+            render_detail(
+                finding,
+                capture.latest_tree().map(|tree| tree.as_ref()),
+                &navigate,
+                theme,
+            )
+        });
+        let capture_card = self.render_capture(capture);
         let notice = self.notice.clone().map(|notice| {
             div()
                 .px(theme.metrics.gutter)
@@ -494,16 +499,16 @@ fn render_summary(
         .id("loupe-audit-summary")
         .debug_selector(|| "loupe-audit-summary".into())
         .mx(theme.metrics.gutter)
-        .mt(px(6.))
+        .mt(px(4.))
         .mb(px(8.))
-        .p(px(10.))
+        .p(px(12.))
         .rounded(theme.metrics.radius)
         .border_1()
         .border_color(colors.line)
         .bg(colors.surface)
         .flex()
         .flex_col()
-        .gap(px(6.))
+        .gap(px(8.))
         .child(
             div()
                 .flex()
@@ -514,7 +519,6 @@ fn render_summary(
                     div()
                         .min_w_0()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(13.))
                         .child(health(counts, elements, frames)),
                 ),
         )
@@ -522,8 +526,8 @@ fn render_summary(
             div()
                 .flex()
                 .flex_wrap()
-                .gap_x(px(14.))
-                .gap_y(px(2.))
+                .gap_x(px(16.))
+                .gap_y(px(4.))
                 .children(chips),
         )
         .children(start_with)
@@ -604,13 +608,18 @@ impl AuditLens {
                     let expanded = (is_selected && !columns).then(|| {
                         div()
                             .mx(theme.metrics.gutter)
-                            .mb(px(6.))
+                            .mb(px(8.))
                             .rounded(theme.metrics.radius)
                             .border_1()
                             .border_color(colors.line)
                             .bg(colors.surface)
                             .p(px(8.))
-                            .child(detail_text(finding, navigate, theme))
+                            .child(finding_body(
+                                finding,
+                                tree.map(|tree| tree.as_ref()),
+                                navigate,
+                                theme,
+                            ))
                     });
                     div().child(row).children(expanded)
                 });
@@ -628,7 +637,7 @@ impl AuditLens {
             .into_any_element()
     }
 
-    fn render_capture(&mut self, capture: &InspectorCapture, _theme: &'static Theme) -> AnyElement {
+    fn render_capture(&mut self, capture: &InspectorCapture) -> AnyElement {
         let budget = capture.config().budget;
         let overhead = self.overhead.get((capture.generation(), budget), || {
             let stats = frame_stats(capture.frames(), budget);
@@ -692,7 +701,7 @@ fn finding_row(
             div()
                 .flex_initial()
                 .min_w(px(24.))
-                .max_w(px(160.))
+                .max_w(px(110.))
                 .truncate()
                 .font_family(MONO_FONT)
                 .text_size(theme.metrics.mono)
@@ -731,36 +740,16 @@ fn finding_row(
 /// The selected finding, as the right column shows it.
 fn render_detail(
     finding: &Finding,
-    capture: &InspectorCapture,
+    tree: Option<&ElementTree>,
     navigate: &Navigate,
     theme: &'static Theme,
 ) -> AnyElement {
-    let colors = &theme.colors;
     let (icon, tone) = severity_glyph(finding.severity);
-    let tree = capture.latest_tree();
-    let instances: Vec<(gpui::inspector::ElementKey, String)> = finding
-        .elements()
-        .take(LISTED_INSTANCES)
-        .map(|key| {
-            let label = tree.and_then(|tree| tree.get(tree.find(key)?)).map_or_else(
-                || "element".to_string(),
-                |record| {
-                    format!(
-                        "{} {}",
-                        format::element_label(record),
-                        format::size(record.bounds.size)
-                    )
-                },
-            );
-            (key, label)
-        })
-        .collect();
-    let more = (finding.instances as usize).saturating_sub(instances.len());
     div()
         .px(theme.metrics.gutter)
         .flex()
         .flex_col()
-        .gap(px(6.))
+        .gap(px(8.))
         .child(
             div()
                 .flex()
@@ -778,10 +767,76 @@ fn render_detail(
                         .child(finding.title.clone()),
                 ),
         )
-        .child(detail_text(finding, navigate, theme))
-        .when(!instances.is_empty(), |this| {
+        .child(finding_body(finding, tree, navigate, theme))
+        .into_any_element()
+}
+
+/// Why a finding matters, its links and, for several instances, the
+/// elements highlighted in the app. Shared by both layouts.
+fn finding_body(
+    finding: &Finding,
+    tree: Option<&ElementTree>,
+    navigate: &Navigate,
+    theme: &'static Theme,
+) -> AnyElement {
+    let colors = &theme.colors;
+    let instances: Vec<(ElementKey, String)> = finding
+        .elements()
+        .take(LISTED_INSTANCES)
+        .filter_map(|key| {
+            let record = tree.and_then(|tree| tree.get(tree.find(key)?))?;
+            let label = format!(
+                "{} {}",
+                format::element_label(record),
+                format::size(record.bounds.size)
+            );
+            Some((key, label))
+        })
+        .collect();
+    let more = (finding.instances as usize).saturating_sub(instances.len());
+    let links = div()
+        .ml(px(-4.))
+        .flex()
+        .flex_wrap()
+        .gap(px(4.))
+        .children(finding.element.map(|element| {
+            link(
+                "loupe-finding-reveal",
+                "Reveal in Elements",
+                Target::Element(element),
+                navigate,
+                theme,
+            )
+        }))
+        .children(finding.entity.map(|entity| {
+            link(
+                "loupe-finding-entity",
+                "Show entity",
+                Target::Entity(entity),
+                navigate,
+                theme,
+            )
+        }))
+        .children(
+            finding
+                .site
+                .map(|site| site_link("loupe-finding-site", site, navigate, theme)),
+        );
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(
+            div()
+                .text_size(theme.metrics.text_small)
+                .text_color(colors.text_muted)
+                .child(finding.detail.clone()),
+        )
+        .child(links)
+        .when(finding.instances > 1, |this| {
             this.child(
                 div()
+                    .pt(px(4.))
                     .flex()
                     .flex_col()
                     .child(
@@ -789,12 +844,8 @@ fn render_detail(
                             .text_size(theme.metrics.text_small)
                             .text_color(colors.text_muted)
                             .child(format!(
-                                "{} highlighted in the app",
-                                match finding.instances {
-                                    1 => "1 element".to_string(),
-                                    count =>
-                                        format!("{} elements", format::count(u64::from(count))),
-                                }
+                                "{} elements highlighted in the app",
+                                format::count(u64::from(finding.instances))
                             )),
                     )
                     .children(instances.into_iter().enumerate().map(|(ix, (key, label))| {
@@ -816,51 +867,5 @@ fn render_detail(
                     }),
             )
         })
-        .into_any_element()
-}
-
-/// The detail paragraph and links, shared by both layouts.
-fn detail_text(finding: &Finding, navigate: &Navigate, theme: &'static Theme) -> AnyElement {
-    let colors = &theme.colors;
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .child(
-            div()
-                .text_size(theme.metrics.text_small)
-                .text_color(colors.text_muted)
-                .child(finding.detail.clone()),
-        )
-        .child(
-            div()
-                .ml(px(-4.))
-                .flex()
-                .flex_wrap()
-                .gap(px(2.))
-                .children(finding.element.map(|element| {
-                    link(
-                        "loupe-finding-reveal",
-                        "Reveal in Elements",
-                        Target::Element(element),
-                        navigate,
-                        theme,
-                    )
-                }))
-                .children(finding.entity.map(|entity| {
-                    link(
-                        "loupe-finding-entity",
-                        "Show entity",
-                        Target::Entity(entity),
-                        navigate,
-                        theme,
-                    )
-                }))
-                .children(
-                    finding
-                        .site
-                        .map(|site| site_link("loupe-finding-site", site, navigate, theme)),
-                ),
-        )
         .into_any_element()
 }

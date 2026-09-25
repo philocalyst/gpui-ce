@@ -1,8 +1,8 @@
 //! Rendering of the Frames lens: its sections and how they are laid out.
 
 use super::{
-    CONTEXT, FollowLatest, FramesLens, JumpToWorst, NextFrame, Notice, PreviousFrame, TABLE_ROWS,
-    ZoomIn, ZoomOut, ZoomToFit,
+    CONTEXT, Columns, FollowLatest, FramesLens, JumpToWorst, NextFrame, Notice, PreviousFrame,
+    SUMMARY_MAX, SUMMARY_MIN, SUMMARY_SHARE, TABLE_ROWS, ZoomIn, ZoomOut, ZoomToFit,
     bottom_up::{Scope, cell, columns, compare, max_self, scope_frames, table_column},
     export::PERFETTO_URL,
     flame::{BarDetails, FlameData, Geometry, bar_color, bar_details, kind_name, legend},
@@ -11,7 +11,6 @@ use super::{
     },
     over_budget_badge,
     phase_bar::{PhaseBar, PhaseBarView},
-    two_columns,
 };
 use crate::{
     analysis::{
@@ -92,9 +91,10 @@ impl Render for FramesLens {
             .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| this.zoom(None, cx)));
 
         let window_ref: &Window = window;
-        let Some(capture) = window_ref
+        let layout = Columns::of(window_ref);
+        let Some(shown) = window_ref
             .inspector_capture()
-            .filter(|capture| capture.latest_app_frame().is_some())
+            .and_then(|capture| self.derive(capture, window_ref, layout, cx))
         else {
             self.idle_check = None;
             return root.child(
@@ -107,11 +107,9 @@ impl Render for FramesLens {
                     )),
             );
         };
-        let generation = capture.generation();
-        let shown = self.derive(capture, window_ref, cx);
+        let generation = shown.capture.generation();
         let idle_in = shown.stats.idle_in(shown.now);
         let navigate = self.navigator(cx);
-        let columns = two_columns(window_ref);
         let tooltip = self.render_tooltip(&shown, theme);
 
         let caption = div()
@@ -126,15 +124,12 @@ impl Render for FramesLens {
             self.render_frame(&shown, theme, cx),
             self.render_causes(&shown, &navigate, theme),
         ];
-        let detail = vec![
-            self.render_flame(&shown, &navigate, theme, cx),
-            self.render_bottom_up(&shown, columns, theme, cx),
-        ];
-        let tail = vec![
-            self.render_insights(&shown, &navigate, theme),
-            self.render_export(theme, cx),
-        ];
-        let body = if columns {
+        let flame = self.render_flame(&shown, &navigate, theme, cx);
+        let bottom_up = self.render_bottom_up(&shown, layout.wide_table(), theme, cx);
+        let insights = self.render_insights(&shown, &navigate, theme);
+        let export = self.render_export(theme, cx);
+        let body = if layout.two {
+            // The frame's story on the left; where its time went on the right.
             div()
                 .size_full()
                 .flex()
@@ -142,16 +137,16 @@ impl Render for FramesLens {
                     div()
                         .id("loupe-frames-summary")
                         .flex_none()
-                        .w(relative(0.42))
-                        .min_w(px(340.))
-                        .max_w(px(520.))
+                        .w(relative(SUMMARY_SHARE))
+                        .min_w(SUMMARY_MIN)
+                        .max_w(SUMMARY_MAX)
                         .h_full()
                         .overflow_y_scroll()
                         .border_r_1()
                         .border_color(colors.line)
                         .pb_4()
                         .children(summary)
-                        .children(tail),
+                        .child(export),
                 )
                 .child(
                     div()
@@ -161,9 +156,10 @@ impl Render for FramesLens {
                         .h_full()
                         .overflow_y_scroll()
                         .pb_4()
-                        .children(detail.into_iter().enumerate().map(|(ix, section)| {
-                            div().when(ix == 0, |this| this.mt(px(-1.))).child(section)
-                        })),
+                        // The first section's rule would double the pane's edge.
+                        .child(div().mt(px(-1.)).child(flame))
+                        .child(bottom_up)
+                        .child(insights),
                 )
         } else {
             div().size_full().child(
@@ -173,8 +169,10 @@ impl Render for FramesLens {
                     .overflow_y_scroll()
                     .pb_4()
                     .children(summary)
-                    .children(detail)
-                    .children(tail),
+                    .child(flame)
+                    .child(bottom_up)
+                    .child(insights)
+                    .child(export),
             )
         };
         self.schedule_idle_check(generation, idle_in, window, cx);
@@ -195,18 +193,19 @@ impl LensView for FramesLens {
 }
 
 impl FramesLens {
-    /// Refreshes the memoized data for the shown frame.
+    /// Refreshes the memoized data for the shown frame: the selection, or
+    /// the latest app frame. `None` before the app has drawn anything.
     fn derive<'a>(
         &mut self,
         capture: &'a InspectorCapture,
         window: &Window,
+        layout: Columns,
         cx: &mut Context<Self>,
-    ) -> Shown<'a> {
+    ) -> Option<Shown<'a>> {
         let generation = capture.generation();
         let budget = capture.config().budget;
         let selected = self.state.read(cx).selected_frame();
-        let (frame, pinned) = shown_frame(capture, selected)
-            .unwrap_or_else(|| unreachable!("the caller checked there is an app frame"));
+        let (frame, pinned) = shown_frame(capture, selected)?;
         let stats = self
             .stats
             .get((generation, budget), || StatsLine::of(capture));
@@ -218,7 +217,7 @@ impl FramesLens {
         let rows = self.rows.get((generation, frame.id, scope), || {
             bottom_up(scope_frames(capture.frames(), frame, scope))
         });
-        self.sync_table(&rows, two_columns(window), cx);
+        self.sync_table(&rows, layout.wide_table(), cx);
         let focus = pinned.then_some(frame.id);
         let insights = self.insights.get((generation, focus, budget), || {
             let entities = window.inspector_entities(cx);
@@ -231,7 +230,7 @@ impl FramesLens {
                 budget,
             })
         });
-        Shown {
+        Some(Shown {
             capture,
             frame,
             pinned,
@@ -240,7 +239,7 @@ impl FramesLens {
             stats,
             rows,
             insights,
-        }
+        })
     }
 
     /// Hands the table new rows when the memo recomputed them.
@@ -290,8 +289,7 @@ impl FramesLens {
         let grade_bar = div()
             .flex_none()
             .w(px(64.))
-            .h(px(6.))
-            .rounded(px(3.))
+            .h(px(4.))
             .overflow_hidden()
             .flex()
             .bg(colors.surface_2)
@@ -302,7 +300,7 @@ impl FramesLens {
             .id("loupe-frames-stats")
             .debug_selector(|| "loupe-frames-stats".into())
             .px(theme.metrics.gutter)
-            .pt(px(6.))
+            .pt(px(4.))
             .pb(px(8.))
             .flex()
             .flex_col()
@@ -312,7 +310,7 @@ impl FramesLens {
                     .flex()
                     .flex_wrap()
                     .items_baseline()
-                    .gap_x(px(10.))
+                    .gap_x(px(8.))
                     .child(
                         div()
                             .flex()
@@ -321,9 +319,7 @@ impl FramesLens {
                             .child(
                                 div()
                                     .font_family(MONO_FONT)
-                                    .text_size(px(18.))
-                                    .line_height(px(22.))
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .font_weight(FontWeight::BOLD)
                                     .text_color(if idle { colors.text_muted } else { colors.text })
                                     .child(fps),
                             )
@@ -333,7 +329,7 @@ impl FramesLens {
                         div()
                             .flex()
                             .items_baseline()
-                            .gap(px(5.))
+                            .gap(px(4.))
                             .child(label("p50"))
                             .child(value(format::millis(stats.p50)))
                             .child(label("p95"))
@@ -356,7 +352,7 @@ impl FramesLens {
                             .id("loupe-frames-grades")
                             .flex()
                             .items_center()
-                            .gap(px(6.))
+                            .gap(px(8.))
                             .child(grade_bar)
                             .child(
                                 div()
@@ -441,7 +437,7 @@ impl FramesLens {
             .h(theme.metrics.control)
             .flex()
             .items_center()
-            .gap(px(6.))
+            .gap(px(8.))
             .child(
                 Button::new("loupe-frames-previous")
                     .icon(IconName::ChevronLeft)
@@ -456,7 +452,7 @@ impl FramesLens {
                     .truncate()
                     .font_family(MONO_FONT)
                     .text_color(colors.text)
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::BOLD)
                     .child(frame_title(frame, shown.now)),
             )
             .child(Pill::new(grade).tone(tone))
@@ -481,10 +477,10 @@ impl FramesLens {
                     .px(theme.metrics.gutter)
                     .pt(px(4.))
                     .pb(px(8.))
-                    .child(PhaseBarView::new(PhaseBar::new(
-                        &frame.timings,
-                        shown.budget,
-                    ))),
+                    .child(
+                        PhaseBarView::new(PhaseBar::new(&frame.timings, shown.budget))
+                            .replayed(frame.inspector_only),
+                    ),
             )
             .into_any_element()
     }
@@ -521,7 +517,7 @@ impl FramesLens {
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap_x(px(2.))
+                    .gap_x(px(4.))
                     .when(line.from_inspector, |this| this.opacity(0.55))
                     .child(div().flex_none().size(px(5.)).mx(px(4.)).rounded_full().bg(
                         if line.from_inspector {
@@ -559,7 +555,7 @@ impl FramesLens {
                 .child(
                     div()
                         .flex_none()
-                        .pl(px(2.))
+                        .pl(px(4.))
                         .text_color(colors.text_muted)
                         .child("Input"),
                 )
@@ -600,7 +596,7 @@ impl FramesLens {
             })
             .children(rows)
             .child(input_row)
-            .child(div().h(px(6.)))
+            .child(div().h(px(8.)))
             .into_any_element()
     }
 
@@ -711,8 +707,8 @@ impl FramesLens {
             .flex()
             .flex_wrap()
             .items_center()
-            .gap_x(px(10.))
-            .gap_y(px(2.))
+            .gap_x(px(8.))
+            .gap_y(px(4.))
             .text_size(theme.metrics.text_small)
             .text_color(colors.text_muted)
             .children(legend(&data.layout).into_iter().map(|kind| {
@@ -721,12 +717,7 @@ impl FramesLens {
                     .flex()
                     .items_center()
                     .gap(px(4.))
-                    .child(
-                        div()
-                            .size(px(8.))
-                            .rounded(px(2.))
-                            .bg(bar_color(kind, theme)),
-                    )
+                    .child(div().size(px(8.)).bg(bar_color(kind, theme)))
                     .child(kind_name(kind))
             }))
             .child(div().flex_1())
@@ -737,12 +728,24 @@ impl FramesLens {
                     .child("wheel zooms · drag pans · double-click fits"),
             );
 
+        let replayed = data.replayed.then(|| {
+            div()
+                .px(theme.metrics.gutter)
+                .pb(px(4.))
+                .text_size(theme.metrics.text_small)
+                .text_color(colors.text_muted)
+                .child(
+                    "Loupe drew this frame for itself: the app was replayed from its previous \
+                     frame, not rendered, so its views show as reused.",
+                )
+        });
         div()
             .child(header)
-            .child(div().px(px(2.)).child(chart))
+            .children(replayed)
+            .child(chart)
             .child(legend_row)
             .children(self.render_selected_bar(&data, shown, navigate, theme, cx))
-            .child(div().h(px(6.)))
+            .child(div().h(px(8.)))
             .into_any_element()
     }
 
@@ -772,7 +775,7 @@ impl FramesLens {
         Some(
             div()
                 .mx(theme.metrics.gutter)
-                .mt(px(6.))
+                .mt(px(8.))
                 .px(px(8.))
                 .py(px(4.))
                 .rounded(theme.metrics.radius)
@@ -783,13 +786,8 @@ impl FramesLens {
                 .flex_wrap()
                 .items_center()
                 .gap_x(px(8.))
-                .gap_y(px(2.))
-                .child(
-                    div()
-                        .size(px(8.))
-                        .rounded(px(2.))
-                        .bg(bar_color(flame_bar.kind, theme)),
-                )
+                .gap_y(px(4.))
+                .child(div().size(px(8.)).bg(bar_color(flame_bar.kind, theme)))
                 .child(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
@@ -836,7 +834,7 @@ impl FramesLens {
             return None;
         }
         let colors = &theme.colors;
-        let (bars, position) = self.flame.hovered()?;
+        let (bars, anchor) = self.flame.hovered()?;
         let data = self.flame.data()?;
         let details: BarDetails = bar_details(data, bars.clone())?;
         let embedded = details
@@ -859,26 +857,26 @@ impl FramesLens {
                 )
         };
         let hint = match details.view {
-            Some(_) => Some("Click selects its element · ⇧-click reveals it"),
+            Some(_) => Some("Click selects its element · shift-click reveals it"),
             None if bars.len() > 1 => Some("Click to zoom in on them"),
             None => None,
         };
         Some(
             deferred(
                 anchored()
-                    .position(*position + point(px(14.), px(16.)))
+                    .position(*anchor + point(px(-12.), px(6.)))
                     .snap_to_window_with_margin(px(8.))
                     .child(
                         floating_surface(theme)
                             .id("loupe-flame-tooltip")
                             .debug_selector(|| "loupe-flame-tooltip".into())
                             .px_2()
-                            .py(px(6.))
+                            .py(px(8.))
                             .min_w(px(180.))
                             .max_w(px(360.))
                             .flex()
                             .flex_col()
-                            .gap(px(2.))
+                            .gap(px(4.))
                             .child(
                                 div()
                                     .flex()
@@ -900,7 +898,7 @@ impl FramesLens {
                             )
                             .children(site.map(|(label, site)| fact(label, format::location(site))))
                             .children(hint.map(|hint| {
-                                div().pt(px(2.)).text_color(colors.text_faint).child(hint)
+                                div().pt(px(4.)).text_color(colors.text_faint).child(hint)
                             })),
                     ),
             )
@@ -950,7 +948,7 @@ impl FramesLens {
         let body = if rows.is_empty() {
             div()
                 .px(theme.metrics.gutter)
-                .pb(px(6.))
+                .pb(px(8.))
                 .text_color(colors.text_muted)
                 .child("No view rendered or reused in this frame")
                 .into_any_element()
@@ -983,7 +981,7 @@ impl FramesLens {
         div()
             .child(header)
             .child(body)
-            .child(div().h(px(6.)))
+            .child(div().h(px(8.)))
             .into_any_element()
     }
 
@@ -1006,7 +1004,7 @@ impl FramesLens {
                 this.child(
                     div()
                         .px(theme.metrics.gutter)
-                        .pb(px(6.))
+                        .pb(px(8.))
                         .flex()
                         .items_center()
                         .gap_2()

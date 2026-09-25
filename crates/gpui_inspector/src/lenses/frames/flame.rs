@@ -73,6 +73,12 @@ pub(crate) struct FlameData {
     pub frame_start: Duration,
     /// When the frame should have ended: its start plus the budget.
     pub budget_end: Duration,
+    /// The app's share of the frame.
+    pub app_total: Duration,
+    /// Loupe's share of the frame.
+    pub loupe: Duration,
+    /// Drawn only for Loupe: the app was replayed, not rendered.
+    pub replayed: bool,
     /// Rows and bars.
     pub layout: FlameLayout,
     /// For each bar of `layout.bars`, the view it stands for.
@@ -120,6 +126,9 @@ impl FlameData {
             frame: frame.id,
             frame_start: frame.start,
             budget_end: frame.start + budget,
+            app_total: frame.timings.app_total(),
+            loupe: frame.timings.inspector,
+            replayed: frame.inspector_only,
             layout,
             views,
             lanes,
@@ -279,6 +288,7 @@ fn nice_step(raw: f64) -> f64 {
         .unwrap_or(10.0 * magnitude)
 }
 
+/// `0`, `5.0 ms` or `−2.0 ms`: time from the frame's start, for the axis.
 fn offset_label(nanos: f64) -> String {
     let magnitude = format::duration(Duration::from_nanos(nanos.abs().round() as u64));
     if nanos.abs() < 0.5 {
@@ -287,6 +297,16 @@ fn offset_label(nanos: f64) -> String {
         format!("−{magnitude}")
     } else {
         magnitude
+    }
+}
+
+/// `+5.0 ms`, `−2.0 ms` or `at the start`: when a bar starts, relative to
+/// the frame's start.
+fn start_label(nanos: f64) -> String {
+    match offset_label(nanos) {
+        zero if zero == "0" => "at the frame's start".to_string(),
+        label if nanos > 0.0 => format!("+{label}"),
+        label => label,
     }
 }
 
@@ -359,7 +379,9 @@ struct Press {
 pub(crate) struct FlameState {
     data: Option<Rc<FlameData>>,
     zoom: RangeZoom,
+    /// The bars under the pointer, and where their tooltip goes.
     hovered: Option<(Range<usize>, Point<Pixels>)>,
+    pointer: Option<Point<Pixels>>,
     selected: Option<usize>,
     press: Option<Press>,
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -371,6 +393,7 @@ impl Default for FlameState {
             data: None,
             zoom: RangeZoom::new(Duration::ZERO..Duration::ZERO),
             hovered: None,
+            pointer: None,
             selected: None,
             press: None,
             bounds: Rc::default(),
@@ -405,7 +428,7 @@ impl FlameState {
         &self.zoom
     }
 
-    /// The hovered bars (one, or a merged run) and the pointer position.
+    /// The hovered bars (one, or a merged run) and where their tooltip goes.
     pub fn hovered(&self) -> Option<&(Range<usize>, Point<Pixels>)> {
         self.hovered.as_ref()
     }
@@ -437,14 +460,27 @@ impl FlameState {
         bar_at(&placed, &geometry, data.rows(), position).map(|bar| bar.bars.clone())
     }
 
-    /// Tracks the pointer. Returns whether the hovered bars changed.
+    /// Tracks the pointer. Returns whether the hovered bars changed (moving
+    /// along one bar changes nothing: its tooltip stays where the pointer
+    /// entered it, under the bar, so hovering does not re-render the lens).
     pub fn hover(&mut self, position: Option<Point<Pixels>>) -> bool {
-        let hovered = position.and_then(|position| Some((self.hit(position)?, position)));
-        let changed =
-            self.hovered.as_ref().map(|(bars, _)| bars) != hovered.as_ref().map(|(bars, _)| bars);
-        let moved = self.hovered.as_ref().map(|(_, at)| at) != hovered.as_ref().map(|(_, at)| at);
-        self.hovered = hovered;
-        changed || moved
+        self.pointer = position;
+        let bars = position.and_then(|position| self.hit(position));
+        if bars.as_ref() == self.hovered.as_ref().map(|(bars, _)| bars) {
+            return false;
+        }
+        self.hovered = bars.zip(position).map(|(bars, position)| {
+            let bottom = self
+                .data
+                .as_ref()
+                .and_then(|data| data.layout.bars.get(bars.start))
+                .zip(self.geometry())
+                .map_or(position.y, |(bar, geometry)| {
+                    geometry.row_top(bar.row) + ROW_HEIGHT
+                });
+            (bars, point(position.x, bottom))
+        });
+        true
     }
 
     /// Zooms by a wheel `delta` (pixels; up zooms in) around `position`,
@@ -466,10 +502,9 @@ impl FlameState {
     /// Zooms by `factor` around the hovered point, or the middle.
     pub fn zoom_by(&mut self, factor: f64) {
         let anchor = self
-            .hovered
-            .as_ref()
+            .pointer
             .zip(self.geometry())
-            .map_or(0.5, |((_, at), geometry)| geometry.anchor(at.x));
+            .map_or(0.5, |(at, geometry)| geometry.anchor(at.x));
         self.zoom.zoom(factor, anchor);
     }
 
@@ -584,9 +619,15 @@ impl FlamePainter {
                 colors.text_faint,
                 window,
             );
+            // Right of the line, unless that runs off the chart.
+            let label_x = if x + px(3.) + label.width() > bounds.right() {
+                x - px(3.) - label.width()
+            } else {
+                x + px(3.)
+            };
             label
                 .paint(
-                    point(x + px(3.), bounds.top()),
+                    point(label_x, bounds.top()),
                     AXIS_HEIGHT,
                     TextAlign::Left,
                     None,
@@ -665,7 +706,7 @@ impl FlamePainter {
         if self.emphasized.is_some() && !emphasized && first.kind != BarKind::Frame {
             color = color.opacity(0.3);
         }
-        window.paint_quad(fill(rect, color).corner_radii(px(2.)));
+        window.paint_quad(fill(rect, color));
 
         let hovered = self.hovered.as_ref() == Some(&placed.bars);
         let selected = !placed.is_merged() && self.selected == Some(placed.bars.start);
@@ -748,7 +789,7 @@ pub(crate) fn bar_details(data: &FlameData, bars: Range<usize>) -> Option<BarDet
     let layout = &data.layout;
     let run = layout.bars.get(bars.clone())?;
     let first = run.first()?;
-    let starts = offset_label(first.start.as_nanos() as f64 - data.frame_start.as_nanos() as f64);
+    let starts = start_label(first.start.as_nanos() as f64 - data.frame_start.as_nanos() as f64);
     if run.len() > 1 {
         let busy: Duration = run.iter().map(|bar| bar.duration).sum();
         let end = run.iter().map(|bar| bar.end()).max().unwrap_or(first.start);
@@ -769,7 +810,12 @@ pub(crate) fn bar_details(data: &FlameData, bars: Range<usize>) -> Option<BarDet
     if let Some(view) = view {
         facts.push(("Self", format::duration(view.self_time)));
     }
-    facts.push(("Starts", starts));
+    if first.kind == BarKind::Frame {
+        facts.push(("App", format::duration(data.app_total)));
+        facts.push(("Loupe", format::duration(data.loupe)));
+    } else {
+        facts.push(("Starts", starts));
+    }
     let (title, site) = match first.kind {
         BarKind::View(_) => (
             view.map_or_else(
@@ -786,6 +832,7 @@ pub(crate) fn bar_details(data: &FlameData, bars: Range<usize>) -> Option<BarDet
             "Task".to_string(),
             first.site.map(|site| ("Spawned at", site)),
         ),
+        BarKind::Frame => (format!("Frame #{}", data.frame), None),
         _ => (first.label.to_string(), None),
     };
     Some(BarDetails {
@@ -996,9 +1043,13 @@ mod tests {
         assert!(state.hover(Some(list)));
         assert!(!state.hover(Some(list)));
         assert!(
-            state.hover(Some(list + point(px(2.), px(0.)))),
-            "moved: the tooltip follows"
+            !state.hover(Some(list + point(px(2.), px(0.)))),
+            "along the same bar the tooltip stays put"
         );
+        let geometry = state.geometry().unwrap();
+        let (_, anchor) = state.hovered().unwrap().clone();
+        assert_eq!(anchor, point(list.x, geometry.row_top(2) + ROW_HEIGHT));
+        assert!(state.hover(Some(center_of(&state, "App"))));
         assert!(state.hover(None));
         assert!(state.hovered().is_none());
     }
@@ -1045,13 +1096,23 @@ mod tests {
             [
                 ("Duration", "24.0 ms".to_string()),
                 ("Self", "24.0 ms".to_string()),
-                ("Starts", "2.0 ms".to_string()),
+                ("Starts", "+2.0 ms".to_string()),
             ]
         );
         let sort = bar_details(&data, position("sort")..position("sort") + 1).unwrap();
         assert_eq!(sort.site.map(|(label, _)| label), Some("Opened at"));
         let action = bar_details(&data, position("app::Open")..position("app::Open") + 1).unwrap();
         assert_eq!(action.facts[1], ("Starts", "−10.0 ms".to_string()));
+        let frame_bar = bar_details(&data, 0..1).unwrap();
+        assert_eq!(frame_bar.title, "Frame #0");
+        assert_eq!(
+            frame_bar.facts,
+            [
+                ("Duration", "30.0 ms".to_string()),
+                ("App", "30.0 ms".to_string()),
+                ("Loupe", "0 ns".to_string()),
+            ]
+        );
         let views = position("App")..position("Sidebar") + 1;
         let merged = bar_details(&data, views).unwrap();
         assert_eq!(merged.title, "3 items");

@@ -7,10 +7,12 @@ use crate::{
     widgets::{self, ColumnWidth, Tooltip},
 };
 use gpui::{
-    AnyElement, ColorExt as _, IntoElement, Styled, div, inspector::FrameRecord, prelude::*, px,
-    relative,
+    AnyElement, IntoElement, Styled, div, inspector::FrameRecord, prelude::*, px, relative,
 };
 use std::{cmp::Ordering, collections::VecDeque, rc::Rc, time::Duration};
+
+/// Width of the share bar in the self time cells.
+const SHARE_BAR: f32 = 24.;
 
 /// Which frames the table aggregates.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -77,7 +79,7 @@ pub(crate) fn table_column(column: Column) -> widgets::Column {
         Column::Calls => numeric("Calls", 46.),
         Column::Outcomes => numeric("R / C", 54.).unsortable(),
         Column::Total => numeric("Total", 62.),
-        Column::SelfTime => numeric("Self", 70.),
+        Column::SelfTime => numeric("Self", 60. + SHARE_BAR),
         Column::Mean => numeric("Mean", 58.),
         Column::Max => numeric("Max", 58.),
     }
@@ -144,7 +146,7 @@ pub(crate) fn cell(
         Column::Calls => mono(format::count(u64::from(row.calls))).into_any_element(),
         Column::Outcomes => div()
             .flex()
-            .gap(px(3.))
+            .gap(px(4.))
             .font_family(MONO_FONT)
             .text_size(theme.metrics.mono)
             .child(format::count(u64::from(row.rendered)))
@@ -157,25 +159,26 @@ pub(crate) fn cell(
             .into_any_element(),
         Column::Total => mono(format::duration(row.total)).into_any_element(),
         Column::SelfTime => {
+            // A small bar of its share of the largest self time, then the number.
             let share = stats::ratio(row.self_time, max_self) as f32;
             div()
-                .relative()
-                .w_full()
-                .h(px(16.))
                 .flex()
                 .items_center()
-                .justify_end()
+                .gap(px(4.))
                 .child(
                     div()
-                        .absolute()
-                        .right_0()
-                        .top(px(2.))
-                        .h(px(12.))
-                        .w(relative(share))
-                        .rounded(px(2.))
-                        .bg(theme.phase(Phase::Render).opacity(0.28)),
+                        .flex_none()
+                        .w(px(SHARE_BAR))
+                        .h(px(4.))
+                        .bg(colors.surface_2)
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(share))
+                                .bg(theme.phase(Phase::Render)),
+                        ),
                 )
-                .child(mono(format::duration(row.self_time)).relative())
+                .child(mono(format::duration(row.self_time)))
                 .into_any_element()
         }
         Column::Mean => mono(format::duration(row.mean)).into_any_element(),

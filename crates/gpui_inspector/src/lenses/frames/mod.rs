@@ -12,10 +12,12 @@
 //! ```
 //!
 //! The lens shows the frame selected in the pulse strip, or follows the
-//! latest app frame. Narrow docks stack everything in one scrolling column;
-//! wide and bottom docks put the frame's story on the left and the flame
-//! chart and bottom-up table on the right. Everything derived from the
-//! capture is memoized per capture generation and selection.
+//! latest app frame; zooming or clicking the flame chart pins the frame on
+//! screen. Frames Loupe drew for itself replay the app, and say so. Narrow
+//! docks stack everything in one scrolling column; wide and bottom docks
+//! put the frame's story on the left and where its time went (flame chart,
+//! bottom-up, insights) on the right. Everything derived from the capture
+//! is memoized per capture generation and selection.
 
 mod bottom_up;
 mod export;
@@ -37,7 +39,7 @@ use self::{
 use super::{
     RailBadge,
     highlights::{LensHighlights, element_highlight},
-    links::{Navigate, Target, follow},
+    links::{Navigate, follow},
     memo::Memo,
     observe_state,
 };
@@ -104,12 +106,46 @@ pub(crate) fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// Whether the lens gets two columns in `window`.
-fn two_columns(window: &Window) -> bool {
-    LensLayout::of(window) == LensLayout::SideBySide
-        && window
+/// How the lens lays itself out in its dock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Columns {
+    /// The frame's story beside where its time went, or one column.
+    two: bool,
+    /// The width of the pane holding the flame chart and bottom-up table.
+    detail: Pixels,
+}
+
+/// The summary column's share of a two-column lens, and its limits.
+const SUMMARY_SHARE: f32 = 0.42;
+const SUMMARY_MIN: Pixels = px(340.);
+const SUMMARY_MAX: Pixels = px(520.);
+/// Detail panes at least this wide show every bottom-up column.
+const WIDE_TABLE: Pixels = px(600.);
+
+impl Columns {
+    /// The layout for a lens `width` wide, docked where `layout` says.
+    fn new(layout: LensLayout, width: Pixels) -> Self {
+        let two = layout == LensLayout::SideBySide && width >= TWO_COLUMNS_WIDTH;
+        let detail = if two {
+            width - (width * SUMMARY_SHARE).clamp(SUMMARY_MIN, SUMMARY_MAX)
+        } else {
+            width
+        };
+        Self { two, detail }
+    }
+
+    /// The layout for Loupe's dock in `window`.
+    fn of(window: &Window) -> Self {
+        let width = window
             .inspector_bounds()
-            .is_some_and(|bounds| bounds.size.width >= TWO_COLUMNS_WIDTH)
+            .map_or(Pixels::ZERO, |bounds| bounds.size.width);
+        Self::new(LensLayout::of(window), width)
+    }
+
+    /// Whether the bottom-up table has room for every column.
+    fn wide_table(self) -> bool {
+        self.detail >= WIDE_TABLE
+    }
 }
 
 /// A message about the last thing the lens did for the user.
@@ -187,16 +223,14 @@ impl FramesLens {
 
     fn navigator(&self, cx: &mut Context<Self>) -> Navigate {
         let this = cx.entity().downgrade();
-        Rc::new(move |target, window, cx| {
-            this.update(cx, |this, cx| this.navigate(target, window, cx))
-                .ok();
+        Rc::new(move |target, _, cx| {
+            this.update(cx, |this, cx| {
+                if let Some(message) = follow(target, &this.state, cx) {
+                    this.notify_user(message, None, Tone::Neutral, cx);
+                }
+            })
+            .ok();
         })
-    }
-
-    fn navigate(&mut self, target: Target, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(message) = follow(target, &self.state, cx) {
-            self.notify_user(message, None, Tone::Neutral, cx);
-        }
     }
 
     fn notify_user(
@@ -271,15 +305,15 @@ impl FramesLens {
         if self.flame.is_dragging() {
             return;
         }
-        let before = self.flame.hovered().map(|(bars, _)| bars.clone());
         if !self.flame.hover(Some(event.position)) {
             return;
         }
-        let after = self.flame.hovered().map(|(bars, _)| bars.clone());
-        if before != after {
-            let highlight = after.and_then(|bars| self.bar_highlight(bars.start, window, cx));
-            self.highlights.hover(highlight.map(|h| vec![h]), window);
-        }
+        let highlight = self
+            .flame
+            .hovered()
+            .and_then(|(bars, _)| self.bar_highlight(bars.start, window, cx));
+        self.highlights
+            .hover(highlight.map(|highlight| vec![highlight]), window);
         cx.notify();
     }
 
@@ -320,7 +354,7 @@ impl FramesLens {
         };
         if bars.len() > 1 {
             // A merged run: zoom until its bars stand alone.
-            let run = &data.layout.bars[bars.clone()];
+            let run = &data.layout.bars[bars];
             let start = run.iter().map(|bar| bar.start).min().unwrap_or_default();
             let end = run.iter().map(|bar| bar.end()).max().unwrap_or(start);
             self.flame.show_range(start..end);
@@ -328,7 +362,7 @@ impl FramesLens {
             return;
         }
         let reveal = event.modifiers.shift || event.modifiers.secondary();
-        self.select_bar(Some(bars.start), reveal, window, cx);
+        self.select_bar(bars.start, reveal, window, cx);
     }
 
     fn flame_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -344,14 +378,13 @@ impl FramesLens {
     /// and with `reveal` shown in Elements.
     fn select_bar(
         &mut self,
-        bar: Option<usize>,
+        bar: usize,
         reveal: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.flame.select(bar);
-        let element = bar.and_then(|bar| self.bar_element(bar, window));
-        if let Some(element) = element {
+        self.flame.select(Some(bar));
+        if let Some(element) = self.bar_element(bar, window) {
             self.state.update(cx, |state, cx| {
                 state.select_element(Some(element), cx);
                 if reveal {
@@ -418,15 +451,12 @@ impl FramesLens {
         cx.notify();
     }
 
-    /// Pins highlights over every element of the emphasized view type in
-    /// the shown frame. Returns whether the overlay changed.
+    /// Pins highlights over every element of the emphasized view type.
+    /// Returns whether the overlay changed.
     fn pin_emphasized(&mut self, window: &mut Window, cx: &App) -> bool {
         let color = Theme::of(window, cx).colors.accent.opacity(0.16);
-        let frame = self.flame.data().map(|data| data.frame);
         let highlights = match (self.emphasized, window.inspector_capture()) {
-            (Some(type_name), Some(capture)) => {
-                emphasized_highlights(capture, frame, type_name, color)
-            }
+            (Some(type_name), Some(capture)) => view_highlights(capture, type_name, color),
             _ => Vec::new(),
         };
         self.highlights.pin(highlights, window)
@@ -547,19 +577,16 @@ fn highlight_element(
         })
 }
 
-/// Highlights over the elements of every view of `type_name` drawn in
-/// `frame` (or, without one, in the latest tree).
-fn emphasized_highlights(
+/// Highlights over every view of `type_name` in the latest tree.
+fn view_highlights(
     capture: &InspectorCapture,
-    frame: Option<u64>,
     type_name: &'static str,
     color: Hsla,
 ) -> Vec<OverlayHighlight> {
     let Some(tree) = capture.latest_tree() else {
         return Vec::new();
     };
-    let frame = frame.unwrap_or(tree.frame);
-    let name = format::type_name(type_name);
+    let label = SharedString::from(format::type_name(type_name).into_owned());
     tree.elements
         .iter()
         .filter(|record| {
@@ -568,8 +595,10 @@ fn emphasized_highlights(
                 ElementKind::View { type_name: drawn, .. } if drawn == type_name
             )
         })
-        .filter_map(|record| {
-            highlight_element(capture, frame, record.key?, name.to_string(), color)
+        .map(|record| OverlayHighlight {
+            bounds: record.bounds,
+            color,
+            label: Some(label.clone()),
         })
         .collect()
 }
@@ -592,4 +621,59 @@ fn over_budget_badge(capture: &InspectorCapture) -> Option<RailBadge> {
         _ => Tone::Crit,
     };
     Some(RailBadge::alert(format::count(warn + crit), tone).marker(IconName::TriangleUp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures::{FrameBuilder, ms, steady_frames};
+    use gpui::inspector::CauseKind;
+
+    #[test]
+    fn columns_split_only_wide_docks() {
+        let narrow = Columns::new(LensLayout::Stacked, px(400.));
+        assert_eq!((narrow.two, narrow.detail), (false, px(400.)));
+        assert!(!narrow.wide_table());
+        let default_dock = Columns::new(LensLayout::SideBySide, px(560.));
+        assert!(!default_dock.two, "the default right dock keeps one column");
+        assert!(!default_dock.wide_table());
+        let wide = Columns::new(LensLayout::SideBySide, px(1280.));
+        assert_eq!((wide.two, wide.detail), (true, px(760.)));
+        assert!(wide.wide_table());
+        let just = Columns::new(LensLayout::SideBySide, px(760.));
+        assert_eq!((just.two, just.detail), (true, px(420.)));
+        assert!(!just.wide_table());
+    }
+
+    #[test]
+    fn the_rail_counts_recent_frames_over_budget() {
+        let mut capture = steady_frames(30, 4.0);
+        assert_eq!(over_budget_badge(&capture), None, "all within budget");
+        FrameBuilder::new()
+            .at(ms(510.))
+            .app_time(ms(20.), ms(0.3))
+            .push(&mut capture);
+        let warn = over_budget_badge(&capture).unwrap();
+        assert_eq!((warn.text.as_ref(), warn.tone), ("1", Tone::Warn));
+        assert_eq!(warn.marker, Some(IconName::TriangleUp));
+        FrameBuilder::new()
+            .at(ms(540.))
+            .app_time(ms(40.), ms(0.3))
+            .push(&mut capture);
+        let crit = over_budget_badge(&capture).unwrap();
+        assert_eq!((crit.text.as_ref(), crit.tone), ("2", Tone::Crit));
+
+        // Only the last second counts, and Loupe's own frames never do.
+        FrameBuilder::new()
+            .at(ms(3_000.))
+            .app_time(ms(4.), ms(0.3))
+            .push(&mut capture);
+        FrameBuilder::new()
+            .at(ms(3_020.))
+            .app_time(ms(90.), ms(0.3))
+            .cause(CauseKind::Input { event: "MouseMove" }, true)
+            .inspector_only()
+            .push(&mut capture);
+        assert_eq!(over_budget_badge(&capture), None);
+    }
 }

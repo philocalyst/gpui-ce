@@ -13,8 +13,8 @@ use crate::{
     theme::{MONO_FONT, Phase, Theme},
 };
 use gpui::{
-    App, Bounds, ColorExt as _, Hsla, IntoElement, Pixels, RenderOnce, Styled, TextAlign, Window,
-    canvas, div, fill, inspector::PhaseTimings, point, prelude::*, px, size,
+    App, Bounds, Hsla, IntoElement, Pixels, RenderOnce, Styled, TextAlign, Window, canvas, div,
+    fill, inspector::PhaseTimings, point, prelude::*, px, size,
 };
 use std::time::Duration;
 
@@ -162,12 +162,23 @@ const LABEL_PADDING: f32 = 5.;
 #[derive(IntoElement)]
 pub(crate) struct PhaseBarView {
     bar: PhaseBar,
+    replayed: bool,
 }
 
 impl PhaseBarView {
     /// A view of `bar`.
     pub fn new(bar: PhaseBar) -> Self {
-        Self { bar }
+        Self {
+            bar,
+            replayed: false,
+        }
+    }
+
+    /// Marks a frame drawn only for Loupe, whose app phases replayed the
+    /// previous frame: the verdict says so instead of naming a phase.
+    pub fn replayed(mut self, replayed: bool) -> Self {
+        self.replayed = replayed;
+        self
     }
 }
 
@@ -183,12 +194,7 @@ impl RenderOnce for PhaseBarView {
                 .flex()
                 .items_center()
                 .gap(px(4.))
-                .child(
-                    div()
-                        .size(px(8.))
-                        .rounded(px(2.))
-                        .bg(segment_color(segment.phase, theme)),
-                )
+                .child(div().size(px(8.)).bg(segment_color(segment.phase, theme)))
                 .child(div().text_color(colors.text_muted).child(segment.name()))
                 .child(
                     div()
@@ -201,7 +207,7 @@ impl RenderOnce for PhaseBarView {
         div()
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(px(8.))
             .child(
                 canvas(
                     |_, _, _| {},
@@ -217,8 +223,8 @@ impl RenderOnce for PhaseBarView {
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap_x(px(10.))
-                    .gap_y(px(2.))
+                    .gap_x(px(8.))
+                    .gap_y(px(4.))
                     .text_size(theme.metrics.text_small)
                     .children(legend)
                     .child(
@@ -227,7 +233,7 @@ impl RenderOnce for PhaseBarView {
                             .flex()
                             .items_center()
                             .gap(px(4.))
-                            .child(div().w(px(1.5)).h(px(10.)).bg(colors.text))
+                            .child(div().w(px(2.)).h(px(8.)).bg(colors.text))
                             .child(div().text_color(colors.text_muted).child("budget"))
                             .child(
                                 div()
@@ -238,12 +244,19 @@ impl RenderOnce for PhaseBarView {
                             ),
                     ),
             )
-            .children(self.bar.verdict().map(|verdict| {
-                div()
-                    .text_size(theme.metrics.text_small)
-                    .text_color(colors.text_muted)
-                    .child(verdict)
-            }))
+            .children(
+                if self.replayed {
+                    Some("Drawn only for Loupe: the app's part replayed its previous frame".into())
+                } else {
+                    self.bar.verdict()
+                }
+                .map(|verdict: String| {
+                    div()
+                        .text_size(theme.metrics.text_small)
+                        .text_color(colors.text_muted)
+                        .child(verdict)
+                }),
+            )
     }
 }
 
@@ -261,7 +274,7 @@ fn paint_bar(
         point(bounds.left(), bounds.top() + px(TICK_OVERHANG)),
         size(width, px(BAR_HEIGHT)),
     );
-    window.paint_quad(fill(bar, colors.surface_2).corner_radii(px(3.)));
+    window.paint_quad(fill(bar, colors.surface_2));
     let font_size = theme.metrics.text_small;
     for segment in segments {
         let left = bar.left() + width * segment.start;
@@ -282,17 +295,22 @@ fn paint_bar(
                 .ok();
         }
     }
-    let tick_x = (bar.left() + width * budget_at).min(bar.right() - px(1.5));
+    // The tick: a line in the text color with a halo of the background, so
+    // it reads on every phase hue, standing out above and below the bar.
+    let tick_x = (bar.left() + width * budget_at - px(1.)).clamp(bar.left(), bar.right() - px(2.));
+    window.paint_quad(fill(
+        Bounds::new(
+            point(tick_x - px(1.), bounds.top()),
+            size(px(4.), bounds.size.height),
+        ),
+        colors.bg,
+    ));
     window.paint_quad(fill(
         Bounds::new(
             point(tick_x, bounds.top()),
-            size(px(1.5), bounds.size.height),
+            size(px(2.), bounds.size.height),
         ),
         colors.text,
-    ));
-    window.paint_quad(fill(
-        Bounds::new(point(tick_x - px(2.), bounds.top()), size(px(5.5), px(1.5))),
-        colors.text.opacity(0.9),
     ));
 }
 

@@ -777,6 +777,36 @@ fn a_slow_render_is_explained_from_pulse_to_perfetto() {
         .expect("the view span is exported");
     assert!(span["dur"].as_f64().unwrap() >= 30_000.0, "{span}");
     std::fs::remove_dir_all(dir).ok();
+
+    // A frame Loupe drew for itself replayed the app: it says so, and its
+    // views are reused, not rendered.
+    let replayed = harness.capture(|capture| {
+        let frame = capture
+            .frames()
+            .iter()
+            .find(|frame| frame.inspector_only && frame.id > slow)
+            .expect("hovering Loupe drew frames for itself");
+        assert!(
+            frame
+                .views
+                .iter()
+                .all(|view| view.outcome == gpui::inspector::ViewOutcome::Cached)
+        );
+        frame.id
+    });
+    harness.update_state(|state, cx| state.select_frame(Some(replayed), cx));
+    harness.assert_text_visible("Loupe only");
+    harness.assert_text_visible("Loupe drew this frame for itself");
+    harness.assert_text_visible("Drawn only for Loupe");
+    harness.assert_text_visible("Loupe updated itself");
+    harness.screenshot("live-replayed-frame");
+    harness.click_text(Lens::Frames.question());
+    harness.type_keys("left");
+    assert_eq!(
+        harness.state(|state| state.selected_frame()),
+        Some(slow),
+        "stepping back from Loupe's frame lands on the app's"
+    );
 }
 
 #[test]

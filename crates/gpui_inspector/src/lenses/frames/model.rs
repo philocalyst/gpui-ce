@@ -240,8 +240,8 @@ pub(crate) fn cause_summary(kind: &CauseKind) -> String {
     }
 }
 
-/// The frame's causes as lines: the app's first, then Loupe's, each in the
-/// order they first happened.
+/// The frame's causes as lines, the app's in the order they first happened,
+/// then Loupe's (folded into one line when there are several).
 pub(crate) fn cause_lines(causes: &[RenderCause]) -> Vec<CauseLine> {
     let mut lines: Vec<(&RenderCause, CauseLine)> = Vec::new();
     for cause in causes {
@@ -271,9 +271,27 @@ pub(crate) fn cause_lines(causes: &[RenderCause]) -> Vec<CauseLine> {
             )),
         }
     }
-    let mut lines: Vec<CauseLine> = lines.into_iter().map(|(_, line)| line).collect();
-    lines.sort_by_key(|line| line.from_inspector);
-    lines
+    let (mut app, loupe): (Vec<CauseLine>, Vec<CauseLine>) = lines
+        .into_iter()
+        .map(|(_, line)| line)
+        .partition(|line| !line.from_inspector);
+    // Loupe's own views notifying each other is one fact, not a list.
+    match loupe.len() {
+        0 | 1 => app.extend(loupe),
+        _ => app.push(CauseLine {
+            summary: "Loupe updated itself".to_string(),
+            count: loupe.iter().map(|line| line.count).sum(),
+            site: None,
+            before: loupe
+                .iter()
+                .map(|line| line.before)
+                .max()
+                .unwrap_or_default(),
+            entity: None,
+            from_inspector: true,
+        }),
+    }
+    app
 }
 
 /// The input handled before a frame.
@@ -542,6 +560,28 @@ mod tests {
         );
         assert_eq!(lines[0].entity, Some(EntityId::from(6u64)));
         assert!(lines[2].from_inspector, "Loupe's causes come last");
+    }
+
+    #[test]
+    fn loupes_own_causes_fold_into_one_line() {
+        let site = Location::caller();
+        let causes = [
+            cause(notify(90), site, 0.3, true),
+            cause(CauseKind::Initial, site, 0.0, false),
+            cause(notify(91), site, 0.1, true),
+            cause(notify(91), site, 0.2, true),
+        ];
+        let sentences: Vec<String> = cause_lines(&causes)
+            .iter()
+            .map(CauseLine::sentence)
+            .collect();
+        assert_eq!(
+            sentences,
+            [
+                format!("First frame · {}", format::location(site)),
+                "Loupe updated itself ×3 · 300 µs before · by Loupe".to_string(),
+            ]
+        );
     }
 
     #[test]

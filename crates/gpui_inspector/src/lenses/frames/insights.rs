@@ -45,15 +45,20 @@ pub(crate) fn insight_row(
     let links = insight_links(insight, shown_frame);
     div()
         .px(theme.metrics.gutter)
-        .py(px(6.))
+        .py(px(8.))
         .flex()
         .gap_2()
         .child(
-            div().flex_none().pt(px(2.)).child(
-                Icon::new(icon)
-                    .size(theme.metrics.icon)
-                    .color(tone.color(theme)),
-            ),
+            div()
+                .flex_none()
+                .h(theme.metrics.line_height)
+                .flex()
+                .items_center()
+                .child(
+                    Icon::new(icon)
+                        .size(theme.metrics.icon)
+                        .color(tone.color(theme)),
+                ),
         )
         .child(
             div()
@@ -61,7 +66,7 @@ pub(crate) fn insight_row(
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .gap(px(2.))
+                .gap(px(4.))
                 .child(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
@@ -83,11 +88,11 @@ pub(crate) fn insight_row(
                 .when(!links.is_empty(), |this| {
                     this.child(
                         div()
-                            .pt(px(2.))
+                            .pt(px(4.))
                             .ml(px(-4.))
                             .flex()
                             .flex_wrap()
-                            .gap(px(2.))
+                            .gap(px(4.))
                             .children(links.into_iter().enumerate().map(
                                 |(link_ix, (target, label))| {
                                     link(
