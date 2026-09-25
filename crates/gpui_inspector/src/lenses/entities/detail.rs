@@ -8,11 +8,11 @@
 use super::{EntitiesLens, entity_label, kind_chip};
 use crate::{
     analysis::{
-        entities::{EntityRow, format_rate, history, peak, source_path, summary, view_element},
-        format,
+        entities::{EntityRow, format_rate, history, peak, summary, view_element},
+        format, source,
     },
     state::Lens,
-    theme::{MONO_FONT, Theme},
+    theme::{LoupeSettings, MONO_FONT, Theme},
     widgets::{
         Button, ButtonSize, ButtonStyle, EmptyState, Icon, IconName, Prose, SectionHeader,
         Sparkline, Tooltip,
@@ -143,7 +143,9 @@ impl EntitiesLens {
         let copied = self.copied == Some(id);
         let file = std::env::current_dir()
             .ok()
-            .and_then(|cwd| source_path(site.file(), &cwd));
+            .map(|cwd| source::resolve_source_path(site.file(), &cwd, |path| path.exists()))
+            .filter(|path| path.exists());
+        let editor = LoupeSettings::get(cx).editor;
         div().flex().flex_col().child(header).child(
             div()
                 .px(theme.metrics.gutter)
@@ -201,13 +203,14 @@ impl EntitiesLens {
                         .label("Open")
                         .size(ButtonSize::Small)
                         .disabled(file.is_none())
-                        .tooltip(if file.is_some() {
-                            "Open the file with the system's default app"
-                        } else {
-                            "The file isn't under the working directory"
+                        .tooltip(match file {
+                            Some(_) => format!("Open in {}", editor.label()),
+                            None => "The file isn't under the working directory".to_string(),
                         })
                         .when_some(file, |this, file| {
-                            this.on_click(move |_, _, cx| cx.open_with_system(&file))
+                            let url =
+                                editor.url(&file.to_string_lossy(), site.line(), site.column());
+                            this.on_click(move |_, _, cx| cx.open_url(&url))
                         }),
                 ),
         )

@@ -15,13 +15,7 @@ use gpui::{
     EntityId, SharedString,
     inspector::{ElementKey, ElementKind, ElementTree, EntityInfo, NotifyStats},
 };
-use std::{
-    cmp::Ordering,
-    collections::VecDeque,
-    panic::Location,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{cmp::Ordering, collections::VecDeque, panic::Location, time::Duration};
 
 /// Buckets of notify history the engine keeps (60 s).
 pub const HISTORY_BUCKETS: usize = 120;
@@ -457,19 +451,6 @@ pub fn view_element(tree: &ElementTree, id: EntityId) -> Option<ElementKey> {
     })
 }
 
-/// Where the source file `file` (as recorded by `#[track_caller]`) lives on
-/// disk: itself when absolute, otherwise the first existing match under
-/// `cwd` or one of its ancestors (paths are relative to the build's root).
-pub fn source_path(file: &str, cwd: &Path) -> Option<PathBuf> {
-    let path = Path::new(file);
-    if path.is_absolute() {
-        return path.exists().then(|| path.to_path_buf());
-    }
-    cwd.ancestors()
-        .map(|dir| dir.join(path))
-        .find(|candidate| candidate.is_file())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,13 +658,5 @@ mod tests {
         let tree = builder.build();
         assert_eq!(view_element(&tree, entity(9)), key);
         assert_eq!(view_element(&tree, entity(8)), None);
-    }
-
-    #[test]
-    fn source_files_resolve_against_the_working_directory_or_its_ancestors() {
-        let cwd = std::env::current_dir().unwrap();
-        let this_file = Location::caller().file();
-        assert!(source_path(this_file, &cwd).is_some(), "{this_file}");
-        assert!(source_path("no/such/file.rs", &cwd).is_none());
     }
 }
