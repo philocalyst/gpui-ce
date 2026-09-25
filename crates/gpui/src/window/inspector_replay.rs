@@ -122,6 +122,55 @@ impl Window {
         Some(layers)
     }
 
+    /// Whether reusing a range of the previous frame also moves the ranges
+    /// that the cached views inside it recorded (see
+    /// [`Self::rebase_nested_views`]): while the inspector is open, since a
+    /// replayed app reads them.
+    pub(super) fn keeps_nested_views_in_step(&self) -> bool {
+        self.inspector_capture.is_some()
+    }
+
+    /// Makes the cached views drawn inside a range that this frame reuses
+    /// from the previous one follow what they drew to where it now sits.
+    /// `accessed` is the range's span of the previous frame's element states.
+    ///
+    /// A cached view inside a reused one is copied with it, but keeps the
+    /// ranges it recorded when it last drew. That is harmless on its own: it
+    /// renders again whenever the view around it does, so those ranges are
+    /// never read. A replay, though, copies the app's layers wholesale, and
+    /// a cached view directly inside the app's (uncached) root is reused on
+    /// the next frame that renders the root, from the ranges it recorded.
+    /// Those moved: what the replayed frame drew before the copy (in the
+    /// paint phase, everything prepainted, the inspector included) differs
+    /// from the frame that recorded them. So while the inspector is open,
+    /// every reuse keeps the ranges of the views it copies in step, and they
+    /// are right whenever a replay copies them again.
+    pub(super) fn rebase_nested_views(
+        &mut self,
+        accessed: Range<usize>,
+        rebase: impl Fn(&mut crate::view::ViewElementState),
+    ) {
+        let view_state = TypeId::of::<crate::view::ViewElementState>();
+        let frame = &mut self.rendered_frame;
+        for key in &frame.accessed_element_states[accessed] {
+            if key.1 != view_state {
+                continue;
+            }
+            let state = frame
+                .element_states
+                .get_mut(key)
+                .and_then(|state| {
+                    state
+                        .inner
+                        .downcast_mut::<Option<crate::view::ViewElementState>>()
+                })
+                .and_then(Option::as_mut);
+            if let Some(state) = state {
+                rebase(state);
+            }
+        }
+    }
+
     /// Keeps where this frame drew (or replayed) the app, for the next one.
     pub(super) fn store_app_layers(&mut self, layers: AppLayers, replayed: bool) {
         if self.inspector_capture.is_none() {

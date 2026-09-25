@@ -328,11 +328,30 @@ impl<V: View> IntoElement for ViewElement<V> {
     }
 }
 
-struct ViewElementState {
+/// What a cached view keeps between frames: where in the frame it drew, to
+/// reuse that on a later frame if nothing it depends on changed.
+pub(crate) struct ViewElementState {
     prepaint_range: Range<PrepaintStateIndex>,
     paint_range: Range<PaintIndex>,
     cache_key: ViewElementCacheKey,
     accessed_entities: FxHashSet<EntityId>,
+}
+
+#[cfg(any(feature = "inspector", debug_assertions))]
+impl ViewElementState {
+    /// Follows what the view prepainted to where a reuse of an enclosing
+    /// prepaint range starting at `from` put it, starting at `to`.
+    pub(crate) fn rebase_prepaint(&mut self, from: &PrepaintStateIndex, to: &PrepaintStateIndex) {
+        let range = &self.prepaint_range;
+        self.prepaint_range = range.start.rebased(from, to)..range.end.rebased(from, to);
+    }
+
+    /// Follows what the view painted to where a reuse of an enclosing
+    /// paint range starting at `from` put it, starting at `to`.
+    pub(crate) fn rebase_paint(&mut self, from: &PaintIndex, to: &PaintIndex) {
+        let range = &self.paint_range;
+        self.paint_range = range.start.rebased(from, to)..range.end.rebased(from, to);
+    }
 }
 
 struct ViewElementCacheKey {

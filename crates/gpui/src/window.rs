@@ -1201,6 +1201,88 @@ pub(crate) struct PaintIndex {
     painted_text_index: usize,
 }
 
+#[cfg(any(feature = "inspector", debug_assertions))]
+impl PrepaintStateIndex {
+    /// Where this index into a prepaint range starting at `from` lands once
+    /// the range is reused starting at `to`: every item keeps its offset.
+    pub(crate) fn rebased(&self, from: &Self, to: &Self) -> Self {
+        let rebase = |index: usize, from: usize, to: usize| to + (index - from);
+        Self {
+            hitboxes_index: rebase(self.hitboxes_index, from.hitboxes_index, to.hitboxes_index),
+            tooltips_index: rebase(self.tooltips_index, from.tooltips_index, to.tooltips_index),
+            deferred_draws_index: rebase(
+                self.deferred_draws_index,
+                from.deferred_draws_index,
+                to.deferred_draws_index,
+            ),
+            dispatch_tree_index: rebase(
+                self.dispatch_tree_index,
+                from.dispatch_tree_index,
+                to.dispatch_tree_index,
+            ),
+            accessed_element_states_index: rebase(
+                self.accessed_element_states_index,
+                from.accessed_element_states_index,
+                to.accessed_element_states_index,
+            ),
+            line_layout_index: self
+                .line_layout_index
+                .rebased(&from.line_layout_index, &to.line_layout_index),
+        }
+    }
+}
+
+#[cfg(any(feature = "inspector", debug_assertions))]
+impl PaintIndex {
+    /// Where this index into a paint range starting at `from` lands once the
+    /// range is reused starting at `to`: every item keeps its offset.
+    pub(crate) fn rebased(&self, from: &Self, to: &Self) -> Self {
+        let rebase = |index: usize, from: usize, to: usize| to + (index - from);
+        Self {
+            scene_index: rebase(self.scene_index, from.scene_index, to.scene_index),
+            mouse_listeners_index: rebase(
+                self.mouse_listeners_index,
+                from.mouse_listeners_index,
+                to.mouse_listeners_index,
+            ),
+            input_handlers_index: rebase(
+                self.input_handlers_index,
+                from.input_handlers_index,
+                to.input_handlers_index,
+            ),
+            cursor_styles_index: rebase(
+                self.cursor_styles_index,
+                from.cursor_styles_index,
+                to.cursor_styles_index,
+            ),
+            accessed_element_states_index: rebase(
+                self.accessed_element_states_index,
+                from.accessed_element_states_index,
+                to.accessed_element_states_index,
+            ),
+            tab_handle_index: rebase(
+                self.tab_handle_index,
+                from.tab_handle_index,
+                to.tab_handle_index,
+            ),
+            window_control_hitboxes_index: rebase(
+                self.window_control_hitboxes_index,
+                from.window_control_hitboxes_index,
+                to.window_control_hitboxes_index,
+            ),
+            line_layout_index: self
+                .line_layout_index
+                .rebased(&from.line_layout_index, &to.line_layout_index),
+            #[cfg(any(test, feature = "test-support"))]
+            painted_text_index: rebase(
+                self.painted_text_index,
+                from.painted_text_index,
+                to.painted_text_index,
+            ),
+        }
+    }
+}
+
 impl Frame {
     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
         Frame {
@@ -3838,6 +3920,10 @@ impl Window {
     }
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        let reused_at = self
+            .keeps_nested_views_in_step()
+            .then(|| (range.start.clone(), self.prepaint_index()));
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()
@@ -3886,6 +3972,13 @@ impl Window {
                     paint_range: deferred_draw.paint_range.clone(),
                 }),
         );
+
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        if let Some((from, to)) = reused_at {
+            let accessed =
+                from.accessed_element_states_index..range.end.accessed_element_states_index;
+            self.rebase_nested_views(accessed, |view| view.rebase_prepaint(&from, &to));
+        }
     }
 
     pub(crate) fn paint_index(&self) -> PaintIndex {
@@ -3904,6 +3997,10 @@ impl Window {
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        let reused_at = self
+            .keeps_nested_views_in_step()
+            .then(|| (range.start.clone(), self.paint_index()));
         self.next_frame.cursor_styles.extend(
             self.rendered_frame.cursor_styles
                 [range.start.cursor_styles_index..range.end.cursor_styles_index]
@@ -3951,6 +4048,13 @@ impl Window {
             range.start.scene_index..range.end.scene_index,
             &self.rendered_frame.scene,
         );
+
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        if let Some((from, to)) = reused_at {
+            let accessed =
+                from.accessed_element_states_index..range.end.accessed_element_states_index;
+            self.rebase_nested_views(accessed, |view| view.rebase_paint(&from, &to));
+        }
     }
 
     /// Push a text style onto the stack, and call a function with that style active.
