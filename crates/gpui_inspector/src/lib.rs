@@ -26,6 +26,7 @@ use gpui::{
 };
 use std::borrow::Cow;
 
+pub use analysis::source::EditorUrl;
 pub use commands::{Command, DockSide};
 pub use lenses::ExportDirectory;
 pub use loupe::{Loupe, REFRESH_INTERVAL};

@@ -100,6 +100,7 @@ pub struct ScrubField {
     step: f32,
     precision: usize,
     unit: Option<SharedString>,
+    compact: bool,
     focus: FocusHandle,
     drag: Option<DragOrigin>,
     editor: Option<(Entity<EditableTextState>, Subscription)>,
@@ -121,6 +122,7 @@ impl ScrubField {
             step,
             precision: 2,
             unit: None,
+            compact: false,
             focus: cx.focus_handle(),
             drag: None,
             editor: None,
@@ -130,6 +132,13 @@ impl ScrubField {
     /// Shows a unit after the value, e.g. `px`.
     pub fn with_unit(mut self, unit: impl Into<SharedString>) -> Self {
         self.unit = Some(unit.into());
+        self
+    }
+
+    /// Draws only the value until hovered or focused, centered and as
+    /// narrow as it fits, for values embedded in a diagram; zero is dimmed.
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
         self
     }
 
@@ -226,24 +235,35 @@ impl Render for ScrubField {
         let theme = Theme::of(window, cx);
         let colors = &theme.colors;
         let focused = self.focus.contains_focused(window, cx);
+        let (fill, border) = match (self.compact, focused) {
+            (_, true) => (colors.surface_2, colors.accent),
+            (true, false) => (gpui::transparent_black(), gpui::transparent_black()),
+            (false, false) => (colors.surface_2, colors.line),
+        };
+        let text_color = if self.compact && self.value == 0. && !focused {
+            colors.text_faint
+        } else {
+            colors.text
+        };
         let field = div()
             .id("scrub")
             .key_context(SCRUB_CONTEXT)
             .track_focus(&self.focus)
             .h(theme.metrics.control_small)
-            .min_w(px(40.))
-            .px(px(5.))
+            .min_w(if self.compact { px(22.) } else { px(40.) })
+            .px(if self.compact { px(3.) } else { px(5.) })
             .flex()
             .items_center()
+            .when(self.compact, |this| this.justify_center())
             .gap(px(2.))
             .rounded(theme.metrics.radius)
-            .bg(colors.surface_2)
+            .bg(fill)
             .border_1()
-            .border_color(if focused { colors.accent } else { colors.line })
+            .border_color(border)
             .font_family(MONO_FONT)
             .text_size(theme.metrics.mono)
             .line_height(theme.metrics.line_height)
-            .text_color(colors.text)
+            .text_color(text_color)
             .on_action(
                 cx.listener(|this, _: &ScrubIncrement, _, cx| this.nudge_by(true, false, cx)),
             )
@@ -285,7 +305,7 @@ impl Render for ScrubField {
         let field_id = cx.entity_id();
         field
             .cursor_ew_resize()
-            .hover(|style| style.border_color(colors.line_strong))
+            .hover(|style| style.bg(colors.surface_2).border_color(colors.line_strong))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event, window, cx| this.begin_drag(event, window, cx)),

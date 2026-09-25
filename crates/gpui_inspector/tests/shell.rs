@@ -125,6 +125,7 @@ fn shell_renders_every_surface_in_both_themes() {
         cx.set_global(LoupeSettings {
             appearance: Appearance::Dark,
             density: Density::Comfortable,
+            ..LoupeSettings::default()
         })
     });
     harness.draw();
@@ -307,7 +308,7 @@ fn status_bar_shows_breadcrumb_timings_and_memory() {
     ] {
         harness.assert_text_visible(text);
     }
-    harness.assert_text_visible("SELECTION");
+    harness.assert_text_visible("WHY THIS SIZE");
     harness.screenshot("status-breadcrumb");
     assert_eq!(
         harness.capture(|capture| capture.overlay().selected),
