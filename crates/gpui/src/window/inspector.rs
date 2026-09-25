@@ -203,11 +203,11 @@ impl Window {
         self.refresh_for(RefreshReason::Inspector);
     }
 
-    /// Hides an app-caused refresh from the inspector's cached views while
-    /// they draw, returning the flag to restore afterwards.
+    /// While the inspector's cached views draw, re-renders them only if this
+    /// frame's refresh reaches the inspector (an app-caused refresh does
+    /// not; one caused by the inspector's own input refreshes nothing else).
+    /// Returns the flag to restore afterwards.
     fn suspend_app_refresh(&mut self) -> bool {
-        let refreshing = self.refreshing;
-        self.refreshing = refreshing && self.refresh_reaches_inspector;
-        refreshing
+        mem::replace(&mut self.refreshing, self.refresh_reaches_inspector)
     }
 }

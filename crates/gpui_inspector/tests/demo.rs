@@ -41,6 +41,32 @@ fn the_app_draws_after_a_frame_loupe_drew_for_itself() {
 }
 
 #[test]
+fn clicking_loupe_does_not_render_the_app() {
+    let mut harness = demo();
+    harness.click_text("Simulate jank");
+    harness.advance(Duration::from_millis(100));
+    // Leaving the jank button is the app's business: it drops its hover style.
+    let freeze = harness.find_text("Freeze").expect("the Freeze button");
+    harness.hover(freeze.center());
+    harness.advance(Duration::from_millis(100));
+    let before = harness.capture(|capture| capture.latest_frame().map_or(0, |frame| frame.id));
+    harness.click(freeze.center());
+    harness.advance(Duration::from_millis(100));
+    harness.capture(|capture| {
+        let frames: Vec<_> = capture
+            .frames()
+            .iter()
+            .filter(|frame| frame.id > before)
+            .collect();
+        assert!(!frames.is_empty());
+        for frame in frames {
+            assert!(frame.inspector_only, "{:?}", frame.causes);
+            assert_eq!(frame.rendered_views().count(), 0, "{:?}", frame.views);
+        }
+    });
+}
+
+#[test]
 fn holding_from_the_keyboard_keeps_a_tooltip_on_screen() {
     let mut harness = demo();
     // The detail pane's star button (the sidebar also has a "Starred" item).

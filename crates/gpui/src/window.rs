@@ -72,6 +72,8 @@ mod inspector_hooks;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod inspector_input;
 #[cfg(any(feature = "inspector", debug_assertions))]
+use inspector_input::RefreshScope;
+#[cfg(any(feature = "inspector", debug_assertions))]
 mod inspector_overlay;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod inspector_pick;
@@ -1496,11 +1498,16 @@ pub struct Window {
     /// and the inspector is capturing.
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector_input: Option<Box<crate::inspector::InputInFlight>>,
-    /// Whether this frame's refresh also re-renders the inspector: only
-    /// resizes, window state changes and toggling do; the app's own
-    /// `refresh()` calls re-render the app alone.
+    /// Whether this frame re-renders the inspector's views: resizes, window
+    /// state changes, toggling and refreshes asked for while the inspector's
+    /// own input is dispatched do; the app's own `refresh()` calls re-render
+    /// the app alone (see [`RefreshScope`]).
     #[cfg(any(feature = "inspector", debug_assertions))]
     refresh_reaches_inspector: bool,
+    /// Whether the event being dispatched is the inspector's own: a
+    /// refresh its listeners ask for re-renders the inspector alone.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    dispatching_inspector_input: bool,
     /// Where the app was last drawn, to replay it on the inspector's own frames.
     #[cfg(any(feature = "inspector", debug_assertions))]
     app_replay: inspector_replay::AppReplay,
@@ -2211,6 +2218,8 @@ impl Window {
             #[cfg(any(feature = "inspector", debug_assertions))]
             refresh_reaches_inspector: false,
             #[cfg(any(feature = "inspector", debug_assertions))]
+            dispatching_inspector_input: false,
+            #[cfg(any(feature = "inspector", debug_assertions))]
             app_replay: Default::default(),
             #[cfg(feature = "profiler")]
             debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay::new(),
@@ -2351,8 +2360,13 @@ impl Window {
         if self.invalidator.not_drawing() {
             #[cfg(any(feature = "inspector", debug_assertions))]
             {
-                self.note_refresh_reason(reason);
-                self.refresh_reaches_inspector |= !matches!(reason, RefreshReason::Code(_));
+                let scope = self.refresh_scope(reason);
+                self.note_refresh_reason(reason, scope);
+                self.refresh_reaches_inspector |= scope != RefreshScope::App;
+                if scope == RefreshScope::Inspector {
+                    self.invalidator.set_dirty(true);
+                    return;
+                }
             }
             #[cfg(not(any(feature = "inspector", debug_assertions)))]
             let _ = reason;
@@ -5991,6 +6005,8 @@ impl Window {
             }
             PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_) => event,
         };
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        let outer_inspector_dispatch = self.begin_inspector_dispatch(&event);
 
         if let Some(any_mouse_event) = event.mouse_event() {
             self.dispatch_mouse_event(any_mouse_event, cx);
@@ -6021,6 +6037,10 @@ impl Window {
         // this very event, such as the inspector's hold, may want to keep).
         if modality_changed {
             self.refresh();
+        }
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        {
+            self.dispatching_inspector_input = outer_inspector_dispatch;
         }
 
         let caused_invalidation = self.invalidator.update_count() > update_count_before;

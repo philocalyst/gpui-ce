@@ -179,4 +179,46 @@ impl Window {
             .focusable_node_id(focus)
             .is_some_and(|node| dispatch_tree.view_contains(inspector.entity_id(), node))
     }
+
+    /// Notes whether `event`, about to be dispatched, is the inspector's own
+    /// (see [`Self::refresh_scope`]). Returns what to restore once it is.
+    pub(super) fn begin_inspector_dispatch(&mut self, event: &PlatformInput) -> bool {
+        let ours = self.is_inspector_input(event);
+        mem::replace(&mut self.dispatching_inspector_input, ours)
+    }
+
+    /// Which views a refresh for `reason` re-renders.
+    ///
+    /// The app's own `refresh()` re-renders the app alone, so the inspector's
+    /// cached UI is not disturbed. A refresh asked for while the inspector's
+    /// own input is dispatched (an element's active state on a click in the
+    /// dock, a focus change to Loupe's root...) re-renders the inspector
+    /// alone, so the app is not disturbed either: the frame replays it. Only
+    /// the blanket refresh is the inspector's; an app entity notified while
+    /// handling that input still renders its views, and so do the app
+    /// changes the inspector makes on purpose (style overrides, forced
+    /// states, holds). When the focus moves from the app into the inspector
+    /// this way, the replayed app keeps drawing its element as focused until
+    /// the app next renders: inspecting the app does not perturb it.
+    pub(super) fn refresh_scope(&self, reason: RefreshReason) -> RefreshScope {
+        match reason {
+            RefreshReason::Code(_) if self.dispatching_inspector_input => RefreshScope::Inspector,
+            RefreshReason::Code(_) => RefreshScope::App,
+            RefreshReason::Resize | RefreshReason::WindowState | RefreshReason::Inspector => {
+                RefreshScope::Everything
+            }
+        }
+    }
+}
+
+/// Which views a window refresh re-renders while the inspector is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RefreshScope {
+    /// The app's views; the inspector's cached views are reused.
+    App,
+    /// Every view, the inspector's included.
+    Everything,
+    /// The inspector's views alone; the app is replayed if nothing else
+    /// changed it.
+    Inspector,
 }

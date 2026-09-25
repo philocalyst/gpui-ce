@@ -4,8 +4,8 @@
 use super::*;
 use crate::{
     self as gpui, AnyElement, AnyView, App, AppContext as _, Bounds, Context, Entity, EntityId,
-    Hsla, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Pixels, Point,
-    Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
+    FocusHandle, Hsla, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Pixels,
+    Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _, TestAppContext, TouchPhase,
     VisualTestContext, Window, WindowControlArea, blue, deferred, div, point,
     proptest::{collection::vec, prelude::*},
@@ -1066,7 +1066,7 @@ fn the_capture_clock_is_the_executors(cx: &mut TestAppContext) {
 
     // An installed fixture goes on from the end of its recording.
     let mut fixture = InspectorCapture::new_for_test();
-    let mut recorded = frame.clone();
+    let mut recorded = frame;
     recorded.start = Duration::from_secs(12);
     recorded.timings.total = Duration::from_millis(5);
     fixture.push_frame_for_test(recorded);
@@ -2164,6 +2164,171 @@ fn holding_from_the_keyboard_keeps_the_hover_state_on_screen(cx: &mut TestAppCon
     assert_eq!(drawn(cx).tooltip, None);
     assert!(!painted_color(cx, red()));
     assert!(painted_color(cx, blue()));
+}
+
+/// The inspector's UI, drawn cached like Loupe: it takes the focus on a
+/// mouse down, has a button with an active style that `on_press` handles,
+/// and refreshes the window on any key.
+struct Controls {
+    focus: FocusHandle,
+    renders: usize,
+    on_press: Rc<dyn Fn(&mut App)>,
+}
+
+impl Render for Controls {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.renders += 1;
+        let on_press = self.on_press.clone();
+        div()
+            .id("controls")
+            .size_full()
+            .track_focus(&self.focus)
+            .on_mouse_down(
+                crate::MouseButton::Left,
+                cx.listener(|this, _, window, cx| window.focus(&this.focus, cx)),
+            )
+            .on_key_down(|_, window, _| window.refresh())
+            .child(
+                div()
+                    .id("press")
+                    .w(px(40.))
+                    .h(px(40.))
+                    .bg(blue())
+                    .active(|style| style.bg(red()))
+                    .on_click(move |_, _, cx| on_press(cx)),
+            )
+    }
+}
+
+type ControlsSlot = Rc<RefCell<Option<Entity<Controls>>>>;
+
+fn controls_dock(
+    cx: &mut VisualTestContext,
+    on_press: impl Fn(&mut App) + 'static,
+) -> ControlsSlot {
+    let dock: ControlsSlot = Rc::default();
+    let slot = dock.clone();
+    let on_press: Rc<dyn Fn(&mut App)> = Rc::new(on_press);
+    cx.update(|_, cx| {
+        cx.set_inspector_renderer(Box::new(move |inspector, _, cx| {
+            let view = inspector
+                .ui_state(|| {
+                    cx.new(|cx| Controls {
+                        focus: cx.focus_handle(),
+                        renders: 0,
+                        on_press: on_press.clone(),
+                    })
+                })
+                .clone();
+            *slot.borrow_mut() = Some(view.clone());
+            AnyView::from(view)
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element()
+        }))
+    });
+    dock
+}
+
+/// Where the inspector drew its button.
+fn press_position(cx: &mut VisualTestContext) -> Point<Pixels> {
+    cx.update(|window, _| window.inspector_bounds().unwrap().origin) + point(px(20.), px(20.))
+}
+
+#[gpui::test]
+fn the_inspectors_own_input_does_not_render_the_app(cx: &mut TestAppContext) {
+    let (view, cx) = replayed(cx);
+    let dock = controls_dock(cx, |_| {});
+    open(cx);
+    let dock = dock.borrow().clone().expect("the dock rendered");
+    let dock_renders = |cx: &mut VisualTestContext| dock.read_with(cx, |dock, _| dock.renders);
+    let (rendered, dock_rendered) = (renders(&view, cx), dock_renders(cx));
+    let first_frame = latest_frame(cx).id;
+
+    // A click in the dock: the button's active state and the dock taking
+    // the focus refresh the window, and only the inspector draws.
+    let press = press_position(cx);
+    cx.simulate_click(press, Modifiers::none());
+    let frames = read(cx, |capture| {
+        capture
+            .frames()
+            .iter()
+            .filter(|frame| frame.id > first_frame)
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    assert!(!frames.is_empty());
+    for frame in &frames {
+        assert!(frame.inspector_only, "{:?}", frame.causes);
+        assert!(frame.tree.is_none(), "the app was replayed");
+        assert!(frame.causes.iter().all(|cause| cause.from_inspector));
+    }
+    assert_eq!(renders(&view, cx), rendered, "no app view rendered");
+    assert!(
+        dock_renders(cx) > dock_rendered,
+        "the dock showed its press"
+    );
+    assert!(cx.update(|window, cx| dock.read(cx).focus.is_focused(window)));
+
+    // So does a key the focused dock handles by refreshing the window.
+    let dock_rendered = dock_renders(cx);
+    cx.simulate_keystrokes("x");
+    assert!(latest_frame(cx).inspector_only);
+    assert_eq!(renders(&view, cx), rendered);
+    assert_eq!(dock_renders(cx), dock_rendered + 1);
+
+    // The app's own refresh still renders the app alone.
+    cx.update(|window, _| window.refresh());
+    assert!(!latest_frame(cx).inspector_only);
+    assert_eq!(renders(&view, cx).0, rendered.0 + 1);
+    assert_eq!(dock_renders(cx), dock_rendered + 1);
+}
+
+#[gpui::test]
+fn the_inspectors_input_still_renders_the_app_views_it_changes(cx: &mut TestAppContext) {
+    let (view, cx) = parent(cx, true);
+    let child = view.read_with(cx, |parent, _| parent.child.entity_id());
+    let notified = view.clone();
+    controls_dock(cx, move |cx| notified.update(cx, |_, cx| cx.notify()));
+    open(cx);
+
+    // The dock's button notifies the app's root view: it renders, but its
+    // cached child is reused, since the dock's refreshes stay the
+    // inspector's.
+    let press = press_position(cx);
+    cx.simulate_click(press, Modifiers::none());
+    let frame = read(cx, |capture| {
+        capture
+            .frames()
+            .iter()
+            .rev()
+            .find(|frame| !frame.inspector_only)
+            .cloned()
+    })
+    .expect("the app drew");
+    let outcome = |entity: EntityId| {
+        frame
+            .views
+            .iter()
+            .find(|span| span.entity == entity)
+            .map(|span| span.outcome)
+    };
+    assert_eq!(outcome(view.entity_id()), Some(ViewOutcome::Rendered));
+    assert_eq!(outcome(child), Some(ViewOutcome::Cached));
+    let notify = frame
+        .causes
+        .iter()
+        .find(|cause| {
+            matches!(cause.kind, CauseKind::Notify { entity, .. } if entity == view.entity_id())
+        })
+        .expect("the notify caused the frame");
+    assert!(!notify.from_inspector);
+    assert!(
+        frame
+            .causes
+            .iter()
+            .filter(|cause| cause.kind == CauseKind::Refresh)
+            .all(|cause| cause.from_inspector)
+    );
 }
 
 #[gpui::test]

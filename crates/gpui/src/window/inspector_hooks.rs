@@ -312,15 +312,17 @@ impl Window {
         }
     }
 
-    /// Records why the window refreshes.
-    pub(super) fn note_refresh_reason(&self, reason: RefreshReason) {
+    /// Records why the window refreshes: a refresh that re-renders the
+    /// inspector alone is the inspector's own doing.
+    pub(super) fn note_refresh_reason(&self, reason: RefreshReason, scope: RefreshScope) {
         let (kind, site) = match reason {
             RefreshReason::Code(site) => (CauseKind::Refresh, Some(site)),
             RefreshReason::Resize => (CauseKind::Resize, None),
             RefreshReason::WindowState => (CauseKind::WindowState, None),
             RefreshReason::Inspector => return,
         };
-        self.invalidator.note_cause(kind, site, false);
+        self.invalidator
+            .note_cause(kind, site, scope == RefreshScope::Inspector);
     }
 
     /// Schedules a frame for the inspector's overlays without invalidating
