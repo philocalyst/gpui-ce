@@ -263,6 +263,11 @@ fn empty_states_say_what_to_do() {
     harness.assert_text_visible("Release app");
     harness.click_text("Release app");
     assert!(!harness.capture(|capture| capture.is_holding()));
+    // The toolbar's pin is the same command: the lens follows it.
+    harness.click_selector("loupe-hold");
+    harness.assert_text_visible("Release app");
+    harness.click_selector("loupe-hold");
+    harness.assert_text_visible("Hold app");
 
     let mut empty = LoupeHarness::new(size(px(1280.), px(800.)), |_, cx| cx.new(|_| InboxApp));
     empty.open_loupe();

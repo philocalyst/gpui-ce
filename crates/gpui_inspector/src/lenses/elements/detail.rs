@@ -357,20 +357,18 @@ impl ElementsLens {
                     .on_click(|_, window, _| window.start_inspector_pick()),
             )
             .child(Kbd::new(keys::PICK));
+        // The same command as the toolbar's pin, so both stay in step.
         let hold = Button::new("elements-hold-app")
-            .icon(if holding {
-                IconName::Play
-            } else {
-                IconName::Pause
-            })
+            .icon(IconName::Hold)
             .label(if holding { "Release app" } else { "Hold app" })
             .size(ButtonSize::Small)
             .toggle_state(holding)
-            .tooltip("Keep the app still (a hover menu stays open) while you pick")
-            .on_click(cx.listener(move |_, _, window, cx| {
-                if let Some(capture) = window.inspector_capture_mut() {
-                    capture.set_holding(!holding);
-                }
+            .tooltip_keys(
+                "Keep the app still (a hover menu stays open) while you pick",
+                keys::HOLD,
+            )
+            .on_click(cx.listener(|_, _, window, cx| {
+                crate::loupe::toggle_hold(window, cx);
                 cx.notify();
             }));
         div()
