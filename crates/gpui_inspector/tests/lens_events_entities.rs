@@ -328,6 +328,83 @@ fn the_detail_tells_where_a_fixture_click_went() {
     harness.shot("events-detail-click-light");
 }
 
+#[test]
+fn links_from_frames_reveal_their_input_and_entity_through_any_filter() {
+    let (mut harness, _) = inbox_harness(1280., 800.);
+    // Hide the click that drew frame 234 behind the kind chip and the text
+    // filter, bury it under newer input, and switch to the key tester.
+    show(&mut harness, Lens::Events);
+    harness.click_selector("events-kind-1");
+    harness.click_text("Filter events · -exclude");
+    harness.type_text("zebra");
+    harness.click_text("Key tester");
+    harness.click_selector("events-key-tester");
+    push_input(&mut harness, |capture| {
+        (0..60)
+            .map(|ix| InputBuilder::key(ms(9_000. + ix as f64), "n").push(capture))
+            .last()
+            .unwrap()
+    });
+    harness.assert_text_visible("No events match");
+
+    harness.update_state(|state, cx| {
+        state.select_frame(Some(234), cx);
+        state.set_lens(Lens::Frames, cx);
+    });
+    harness.click_text("Open in Events");
+    assert_eq!(harness.state(|state| state.lens()), Lens::Events);
+    let seq = harness.state(|state| state.selected_input()).unwrap();
+
+    // The filter widened as far as the click needed: every app record is
+    // listed again, the field is empty, and Loupe's input stays hidden.
+    let app = app_input(&mut harness);
+    harness.assert_text_visible(&format!("{} events", app.len()));
+    assert_eq!(
+        harness.state(|state| state.filters().events.to_string()),
+        ""
+    );
+    // The row scrolled into view, following paused, and the Event pane
+    // tells the story.
+    let row = harness.bounds_of(&format!("events-row-{seq}"));
+    let dock = harness.update(|window, _| window.inspector_bounds().unwrap());
+    assert!(dock.contains(&row.center()), "{row:?} is in {dock:?}");
+    assert!(harness.find_text("Paused").is_some());
+    assert!(
+        harness.find_text(" new").is_none(),
+        "records the filter hid are not new"
+    );
+    harness.assert_text_visible("HIT PATH");
+    harness.shot("events-revealed");
+    // The log has the keyboard: j/k move on from the revealed row.
+    let listed: Vec<u64> = app.iter().map(|record| record.seq).collect();
+    let ix = listed.iter().position(|&listed| listed == seq).unwrap();
+    harness.type_keys("k");
+    assert_eq!(
+        harness.state(|state| state.selected_input()),
+        Some(listed[ix - 1])
+    );
+
+    // Entities: a view hidden by the Models chip comes back when a frame's
+    // cause links to it.
+    show(&mut harness, Lens::Entities);
+    harness.click_selector("entities-kind-2");
+    assert!(harness.find_text("IssueList").is_none());
+    harness.update_state(|state, cx| {
+        state.select_frame(None, cx);
+        state.set_lens(Lens::Frames, cx);
+    });
+    harness.click_text("IssueList notified");
+    assert_eq!(harness.state(|state| state.lens()), Lens::Entities);
+    assert_eq!(
+        harness.state(|state| state.selected_entity()),
+        Some(fixtures::entities::ISSUE_LIST.into())
+    );
+    harness.assert_text_visible("7 entities · 5 views · 5 notifying");
+    let row = harness.bounds_of("entities-row-3");
+    assert!(dock.contains(&row.center()), "{row:?} is in {dock:?}");
+    harness.assert_text_visible("It is drawn as a view, so each notify re-renders it");
+}
+
 // ---------------------------------------------------------------------------
 // The live mail app.
 
@@ -868,6 +945,65 @@ fn the_key_tester_looks_right_in_light_and_narrow_docks() {
     harness.set_appearance(Appearance::Light);
     harness.type_keys("ctrl-d");
     harness.shot("key-tester-narrow-light");
+}
+
+#[test]
+fn a_held_app_resolves_keys_the_same_and_the_tester_still_dispatches_nothing() {
+    let mut mail = Mail::open(1280., 800.);
+    let editor_focus = mail.editor_focus();
+    let harness = &mut mail.harness;
+    show(harness, Lens::Events);
+    harness.click_text("Key tester");
+    harness.click_selector("loupe-hold");
+    assert!(harness.capture(|capture| capture.is_holding()));
+    let renders = mail.renders.total();
+
+    // Held frames replay the app, and the tester still sees its focus path.
+    let harness = &mut mail.harness;
+    harness.click_selector("events-key-tester");
+    for (input, winner) in [
+        ("ctrl-s", Some("mail::Save")),
+        ("ctrl-u", Some("mail::Archive")),
+        ("ctrl-d", None),
+    ] {
+        harness.type_keys(input);
+        match winner {
+            Some(winner) => harness.assert_text_visible(&format!("Runs {winner}")),
+            None => harness.assert_text_visible("Nothing runs"),
+        }
+        assert_eq!(
+            engine_winner(harness, input, &editor_focus).as_deref(),
+            winner,
+            "{input}"
+        );
+    }
+    harness.assert_text_visible("Editor mode=full");
+    harness.shot("key-tester-held");
+    assert!(mail.actions_run().is_empty(), "{:?}", mail.actions_run());
+    assert_eq!(mail.renders.total(), renders, "a held app never renders");
+
+    // Releasing runs nothing the tester captured.
+    let harness = &mut mail.harness;
+    harness.click_selector("loupe-hold");
+    harness.draw();
+    assert!(!harness.capture(|capture| capture.is_holding()));
+    assert!(mail.actions_run().is_empty(), "{:?}", mail.actions_run());
+
+    // Held again, real keys still reach the app, run what the tester said,
+    // and land in the log.
+    let harness = &mut mail.harness;
+    harness.click_selector("loupe-hold");
+    mail.focus_editor();
+    let harness = &mut mail.harness;
+    assert!(harness.capture(|capture| capture.is_holding()));
+    harness.type_keys("ctrl-s ctrl-u");
+    harness.advance(REFRESH_INTERVAL);
+    assert_eq!(mail.actions_run(), ["Save", "Archive"]);
+    let typed = app_input(&mut mail.harness)
+        .iter()
+        .filter(|record| record.kind == InputKind::KeyDown)
+        .count();
+    assert_eq!(typed, 2);
 }
 
 // ---------------------------------------------------------------------------

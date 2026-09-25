@@ -171,10 +171,13 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
    a capture box that stops keys with a keystroke interceptor (before any
    binding) and resolves them against the app's focus via
    `inspector_resolve_keystrokes_for`, showing the winner and why each other
-   binding loses.
+   binding loses. A record opened from another lens (Frames' *Open in
+   Events*) shows in the Event pane with the log paused, focused and scrolled
+   to it; filters that hid it widen only as far as needed.
 4. **Entities** — *What's alive, who's watching it, who keeps poking it?*
    Sortable table (id, type, kind, refs, observers, notifies/s sparkline, last
    notify site); detail with 60 s sparkline, *Reveal in Elements*, *Notify*.
+   An entity opened from another lens is revealed the same way.
 5. **Audit** — *What should I fix first?* Continuous rules over the latest tree,
    frames and entities (clickable without keyboard access, low contrast,
    zero-size hitboxes with listeners, render hot spots, expensive render,

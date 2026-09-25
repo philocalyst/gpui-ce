@@ -226,6 +226,30 @@ impl EntityFilter {
         };
         kind && (self.show_loupe || !row.loupe) && self.text.matches(&row.haystack)
     }
+
+    /// This filter, widened only as far as it takes to list `row`: a kind
+    /// chip that hides it goes back to All, a text filter that hides it
+    /// clears, and Loupe's own entities show when it is Loupe's.
+    pub fn widened_for(&self, row: &EntityRow) -> EntityFilter {
+        let kind_only = EntityFilter {
+            kind: self.kind,
+            text: TextFilter::default(),
+            show_loupe: true,
+        };
+        EntityFilter {
+            kind: if kind_only.matches(row) {
+                self.kind
+            } else {
+                KindFilter::All
+            },
+            text: if self.text.matches(&row.haystack) {
+                self.text.clone()
+            } else {
+                TextFilter::default()
+            },
+            show_loupe: self.show_loupe || row.loupe,
+        }
+    }
 }
 
 /// The table's columns.
@@ -549,6 +573,21 @@ mod tests {
         assert_eq!(listed(&filter), [entity(3)]);
         assert!(rows[2].loupe && !rows[0].loupe);
         assert!(is_loupe_type("gpui::inspector::conditional::Inspector"));
+
+        // Widening lists a hidden row, and keeps what did not hide it.
+        filter.kind = KindFilter::Models;
+        filter.show_loupe = false;
+        assert_eq!(
+            filter.widened_for(&rows[0]),
+            EntityFilter {
+                kind: KindFilter::All,
+                text: TextFilter::default(),
+                show_loupe: false,
+            }
+        );
+        filter.text = TextFilter::parse("store");
+        assert_eq!(filter.widened_for(&rows[1]), filter);
+        assert!(filter.widened_for(&rows[2]).matches(&rows[2]));
     }
 
     #[test]

@@ -99,6 +99,9 @@ pub(crate) struct EntitiesLens {
     sort: (EntityColumn, SortDirection),
     /// The table pane's size along the split, once the user dragged it.
     split: Option<Pixels>,
+    /// The shared entity selection this lens last showed, to tell when
+    /// something else (a link, the palette) selected an entity.
+    shown_entity: Option<EntityId>,
     /// The entity whose last notify site was just copied.
     copied: Option<EntityId>,
     badge: Cell<Option<(u64, usize)>>,
@@ -114,7 +117,10 @@ impl EntitiesLens {
             // This view is cached: re-render when what it draws changes (the
             // shared state, the field's caret and focus, the table's sort,
             // selection and scroll).
-            cx.observe(&state, |_, _, cx| cx.notify()),
+            cx.observe(&state, |this, _, cx| {
+                this.widen_for_selection(cx);
+                cx.notify();
+            }),
             cx.observe(&filter_field, |_, _, cx| cx.notify()),
             cx.observe(&table, |_, _, cx| cx.notify()),
             cx.subscribe(&filter_field, |this, field, _: &TextChanged, cx| {
@@ -135,6 +141,7 @@ impl EntitiesLens {
                 }
             }),
         ];
+        let shown_entity = state.read(cx).selected_entity();
         Self {
             state,
             filter_field,
@@ -147,6 +154,7 @@ impl EntitiesLens {
             columns: Rc::from([]),
             sort: (EntityColumn::Rate, SortDirection::Descending),
             split: None,
+            shown_entity,
             copied: None,
             badge: Cell::new(None),
             _subscriptions: subscriptions,
@@ -157,6 +165,28 @@ impl EntitiesLens {
     fn selected_row(&self, cx: &App) -> Option<&EntityRow> {
         let id = self.state.read(cx).selected_entity()?;
         self.rows.iter().find(|row| row.id == id)
+    }
+
+    /// When something else selected an entity the filter hides, widens the
+    /// filter to list it (the table then reveals it, see [`Self::refresh`]).
+    fn widen_for_selection(&mut self, cx: &mut Context<Self>) {
+        let selected = self.state.read(cx).selected_entity();
+        if selected == self.shown_entity {
+            return;
+        }
+        self.shown_entity = selected;
+        let Some(row) = self.selected_row(cx) else {
+            return;
+        };
+        let widened = self.filter.widened_for(row);
+        if widened != self.filter {
+            let clears_text = widened.text != self.filter.text;
+            self.filter = widened;
+            if clears_text {
+                self.filter_field
+                    .update(cx, |field, cx| field.emplace("", cx));
+            }
+        }
     }
 
     fn set_kind(&mut self, kind: KindFilter, cx: &mut Context<Self>) {

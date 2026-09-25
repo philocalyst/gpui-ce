@@ -61,6 +61,9 @@ pub(crate) struct EventsLens {
     key_tester: Entity<KeyTester>,
     /// The log pane's size along the split, once the user dragged it.
     split: Option<Pixels>,
+    /// The shared input selection this lens last showed, to tell when
+    /// something else (a link from Frames, the palette) selected a record.
+    shown_input: Option<u64>,
     /// The element this lens asked the overlay to highlight.
     hovered_element: Option<ElementKey>,
     badge: Cell<Option<(BadgeKey, usize)>>,
@@ -81,6 +84,7 @@ impl EventsLens {
             cx.observe_in(&state, window, |this, _, window, cx| {
                 this.key_tester
                     .update(cx, |tester, cx| tester.note_app_focus(window, cx));
+                this.reveal_selection(window, cx);
                 cx.notify();
             }),
             // This view is cached: re-render when the field's caret, selection
@@ -104,6 +108,7 @@ impl EventsLens {
                 },
             ),
         ];
+        let shown_input = state.read(cx).selected_input();
         Self {
             state,
             filter_field,
@@ -112,6 +117,7 @@ impl EventsLens {
             pane: Pane::default(),
             key_tester,
             split: None,
+            shown_input,
             hovered_element: None,
             badge: Cell::new(None),
             _subscriptions: subscriptions,
@@ -128,6 +134,39 @@ impl EventsLens {
     fn toggle_loupe_input(&mut self, cx: &mut Context<Self>) {
         self.filter.show_loupe = !self.filter.show_loupe;
         cx.notify();
+    }
+
+    /// Shows a record that something else selected (a link from Frames):
+    /// the Event pane, following paused, and the log focused and scrolled
+    /// to the record, with the filter widened if it hid it.
+    fn reveal_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.state.read(cx).selected_input();
+        if selected == self.shown_input {
+            return;
+        }
+        self.shown_input = selected;
+        let Some(seq) = selected else {
+            return;
+        };
+        self.log.focus(window, cx);
+        self.pane = Pane::Event;
+        let row_height = Theme::of(window, cx).metrics.row;
+        let Some(capture) = window.inspector_capture() else {
+            self.log.pause(false);
+            return;
+        };
+        self.log.refresh(capture, &self.filter, row_height);
+        self.log.pause(false);
+        if let Some(widened) = self.log.widened_filter(capture, &self.filter, seq) {
+            let clears_text = widened.text != self.filter.text;
+            self.filter = widened;
+            self.log.refresh(capture, &self.filter, row_height);
+            if clears_text {
+                self.filter_field
+                    .update(cx, |field, cx| field.emplace("", cx));
+            }
+        }
+        self.log.scroll_to(seq);
     }
 
     fn show_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {

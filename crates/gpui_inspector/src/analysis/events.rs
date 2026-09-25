@@ -119,6 +119,26 @@ impl LogFilter {
             && self.kind.matches(record)
             && self.text.matches(haystack)
     }
+
+    /// This filter, widened only as far as it takes to list `record`
+    /// (searchable as `haystack`): a kind chip that hides it goes back to
+    /// All, a text filter that hides it clears, and Loupe's own input shows
+    /// when it is Loupe's.
+    pub fn widened_for(&self, record: &InputRecord, haystack: &str) -> LogFilter {
+        LogFilter {
+            kind: if self.kind.matches(record) {
+                self.kind
+            } else {
+                KindFilter::All
+            },
+            text: if self.text.matches(haystack) {
+                self.text.clone()
+            } else {
+                TextFilter::default()
+            },
+            show_loupe: self.show_loupe || record.inspector,
+        }
+    }
 }
 
 /// Searchable text for every record in the capture's input ring, kept in
@@ -176,6 +196,15 @@ impl LogIndex {
             })
             .map(|(record, _)| record.seq)
             .collect()
+    }
+
+    /// The searchable text of the record `seq`, if it is indexed.
+    pub fn haystack(&self, seq: u64) -> Option<&str> {
+        let ix = self
+            .entries
+            .binary_search_by_key(&seq, |(seq, _)| *seq)
+            .ok()?;
+        Some(&self.entries[ix].1)
     }
 
     /// Number of indexed records.
@@ -501,6 +530,45 @@ mod tests {
     }
 
     #[test]
+    fn filters_widen_only_as_far_as_a_record_needs() {
+        let mut ours = click(0);
+        ours.inspector = true;
+        let theirs = with_action(key(1, "ctrl-k"), "workspace::OpenPalette", true);
+        let hay = |record: &InputRecord| record_haystack(record, |_| None);
+        let keys = LogFilter {
+            kind: KindFilter::Keys,
+            text: TextFilter::parse("palette"),
+            show_loupe: false,
+        };
+        // Already listed: nothing changes.
+        assert_eq!(keys.widened_for(&theirs, &hay(&theirs)), keys);
+        // Loupe's click: every part of the filter hid it.
+        let widened = keys.widened_for(&ours, &hay(&ours));
+        assert_eq!(
+            widened,
+            LogFilter {
+                kind: KindFilter::All,
+                text: TextFilter::default(),
+                show_loupe: true,
+            }
+        );
+        assert!(widened.matches(&ours, &hay(&ours)));
+        // An app click under a text filter it matches keeps the text.
+        let app = click(2);
+        let mouse = LogFilter {
+            text: TextFilter::parse("mouse"),
+            ..keys
+        };
+        assert_eq!(
+            mouse.widened_for(&app, &hay(&app)),
+            LogFilter {
+                kind: KindFilter::All,
+                ..mouse
+            }
+        );
+    }
+
+    #[test]
     fn haystacks_cover_keys_actions_contexts_and_hit_elements() {
         let mut record = with_action(key(0, "ctrl-s"), "mail::Save", true);
         contexts(&mut record, &["Workspace", "Editor mode=full"]);
@@ -537,6 +605,8 @@ mod tests {
         index.sync(&ring, |_| None);
         assert_eq!(index.len(), 3);
         assert_eq!(index.visible(&ring, &all), [1, 2, 3]);
+        assert!(index.haystack(3).is_some_and(|hay| hay.contains('b')));
+        assert_eq!(index.haystack(0), None);
 
         // The newest record is re-indexed: moves coalesce into it.
         ring.back_mut().unwrap().detail = "zebra".into();

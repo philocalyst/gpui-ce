@@ -42,7 +42,8 @@ enum Follow {
     Following,
     /// The view stays put.
     Paused {
-        /// The newest listed record when following stopped.
+        /// The newest record in the ring when following stopped, listed
+        /// or not: records the filter shows later are not new.
         after: Option<u64>,
         /// Paused by scrolling up, so scrolling back down resumes.
         by_scroll: bool,
@@ -214,16 +215,40 @@ impl EventLog {
         self.rows.last().copied()
     }
 
+    /// The filter to list the record `seq` with, when `filter` hides it
+    /// (as of the last refresh).
+    pub fn widened_filter(
+        &self,
+        capture: &InspectorCapture,
+        filter: &LogFilter,
+        seq: u64,
+    ) -> Option<LogFilter> {
+        let record = record_at(capture.input(), seq)?;
+        let widened = filter.widened_for(record, self.index.haystack(seq)?);
+        (widened != *filter).then_some(widened)
+    }
+
+    /// Scrolls the record `seq` to the middle of the log, if it is listed.
+    pub fn scroll_to(&self, seq: u64) {
+        if let Some(row) = self.row_of(seq) {
+            self.scroll.scroll_to_item(row, ScrollStrategy::Center);
+        }
+    }
+
     fn row_of(&self, seq: u64) -> Option<usize> {
         self.rows.binary_search(&seq).ok()
     }
 
     /// Stops following; scrolling back to the end resumes only when
     /// scrolling up paused it.
-    fn pause(&mut self, by_scroll: bool) {
+    pub fn pause(&mut self, by_scroll: bool) {
         if self.follow == Follow::Following {
             self.follow = Follow::Paused {
-                after: self.rows.last().copied(),
+                after: self
+                    .key
+                    .as_ref()
+                    .and_then(|key| key.newest)
+                    .map(|(seq, _)| seq),
                 by_scroll,
             };
         }
@@ -270,6 +295,7 @@ impl EventsLens {
     pub(super) fn select_input(&mut self, seq: u64, cx: &mut Context<Self>) {
         self.log.pause(false);
         self.pane = Pane::Event;
+        self.shown_input = Some(seq);
         if let Some(row) = self.log.row_of(seq) {
             self.log.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
         }
