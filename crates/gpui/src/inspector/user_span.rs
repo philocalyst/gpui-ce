@@ -2,6 +2,7 @@
 //! frames. See [`span`] and [`inspector_span!`](crate::inspector_span).
 
 use crate::SharedString;
+use std::marker::PhantomData;
 
 /// Opens a span named `name` at the caller's location, ending when the
 /// returned guard is dropped. Spans show in the inspector's flame chart next
@@ -29,19 +30,24 @@ pub fn span(name: impl Into<SharedString>) -> SpanGuard {
     {
         SpanGuard {
             open: recording::open(name, std::panic::Location::caller()),
+            _not_send: PhantomData,
         }
     }
     #[cfg(not(any(feature = "inspector", debug_assertions)))]
     {
         let _ = name;
-        SpanGuard {}
+        SpanGuard {
+            _not_send: PhantomData,
+        }
     }
 }
 
-/// Keeps a span opened by [`span`] open; dropping it ends the span.
+/// Keeps a span opened by [`span`] open; dropping it ends the span. Spans
+/// belong to the thread that draws, so the guard cannot leave it.
 pub struct SpanGuard {
     #[cfg(any(feature = "inspector", debug_assertions))]
     open: Option<recording::OpenSpan>,
+    _not_send: PhantomData<*const ()>,
 }
 
 impl Drop for SpanGuard {
