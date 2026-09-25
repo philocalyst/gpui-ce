@@ -432,6 +432,12 @@ impl InspectorCapture {
         self.dock
     }
 
+    /// Moves or resizes the dock. The window lays the app out in the
+    /// remaining space on its next frame.
+    pub fn set_dock(&mut self, dock: InspectorDock) {
+        self.dock = dock;
+    }
+
     /// Live style overrides, keyed by element path. Applied on top of the
     /// element's own style every frame while the inspector is open.
     pub fn overrides(&self) -> &FxHashMap<PathKey, StyleRefinement> {
