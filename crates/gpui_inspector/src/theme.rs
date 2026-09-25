@@ -5,7 +5,7 @@
 //! one in [`LoupeSettings`]. Color only ever means state: neutrals for chrome,
 //! the accent for selection and focus, and ok / warn / crit for budgets.
 
-use crate::analysis::stats::Grade;
+use crate::analysis::{source::EditorUrl, stats::Grade};
 use gpui::{App, Global, Hsla, Pixels, Window, WindowAppearance, px, rgb, rgb_to_hsla, rgba};
 use std::{sync::LazyLock, time::Duration};
 
@@ -44,6 +44,8 @@ pub struct LoupeSettings {
     pub appearance: Appearance,
     /// Row and control sizing.
     pub density: Density,
+    /// How source links open in an editor.
+    pub editor: EditorUrl,
 }
 
 impl Global for LoupeSettings {}

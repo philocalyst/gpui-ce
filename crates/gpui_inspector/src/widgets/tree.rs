@@ -17,9 +17,9 @@ use crate::{
     },
 };
 use gpui::{
-    Action, AnyElement, App, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, RenderOnce, ScrollStrategy, Styled, UniformListScrollHandle, Window, div,
-    prelude::*, px, uniform_list,
+    Action, AnyElement, App, Bounds, Context, ElementId, Entity, EventEmitter, FocusHandle,
+    Focusable, IntoElement, Pixels, Point, RenderOnce, ScrollStrategy, Styled,
+    UniformListDecoration, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -410,6 +410,7 @@ pub struct TreeRow<K> {
 }
 
 type RowRenderer<K> = Rc<dyn Fn(&TreeRow<K>, &mut Window, &mut App) -> AnyElement>;
+type HeaderRenderer<K> = Rc<dyn Fn(&TreeModel<K>, usize, &Window, &App) -> Option<AnyElement>>;
 
 /// Renders a [`TreeState`]. Fills its parent; rows are `Theme::metrics.row` tall.
 #[derive(IntoElement)]
@@ -417,6 +418,7 @@ pub struct Tree<K: Clone + Eq + Hash + 'static> {
     id: ElementId,
     state: Entity<TreeState<K>>,
     render_row: RowRenderer<K>,
+    pinned_header: Option<HeaderRenderer<K>>,
 }
 
 impl<K: Clone + Eq + Hash + 'static> Tree<K> {
@@ -431,7 +433,61 @@ impl<K: Clone + Eq + Hash + 'static> Tree<K> {
             id: id.into(),
             state: state.clone(),
             render_row: Rc::new(render_row),
+            pinned_header: None,
         }
+    }
+
+    /// While the list is scrolled, pins the element `header` returns over
+    /// its top edge (one row tall), given the model and the visible row just
+    /// below it: e.g. a breadcrumb of that row's ancestors. It is laid out
+    /// with the rows, so it always matches the scroll position.
+    pub fn pinned_header(
+        mut self,
+        header: impl Fn(&TreeModel<K>, usize, &Window, &App) -> Option<AnyElement> + 'static,
+    ) -> Self {
+        self.pinned_header = Some(Rc::new(header));
+        self
+    }
+}
+
+/// Draws a [`Tree::pinned_header`] as a decoration of the list.
+struct PinnedHeader<K: Clone + Eq + Hash + 'static> {
+    state: Entity<TreeState<K>>,
+    header: HeaderRenderer<K>,
+}
+
+impl<K: Clone + Eq + Hash + 'static> UniformListDecoration for PinnedHeader<K> {
+    fn compute(
+        &self,
+        _visible_range: std::ops::Range<usize>,
+        bounds: Bounds<Pixels>,
+        scroll_offset: Point<Pixels>,
+        item_height: Pixels,
+        item_count: usize,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        // Decorations are laid out in content space; the header sits at the
+        // viewport's top edge.
+        let scrolled = -scroll_offset.y;
+        let root = div().w(bounds.size.width).h(bounds.size.height);
+        if scrolled <= Pixels::ZERO || item_height <= Pixels::ZERO || item_count == 0 {
+            return root.into_any_element();
+        }
+        // The first row whose top is at or below the header's bottom edge.
+        let below = ((scrolled + item_height) / item_height - 0.01).ceil() as usize;
+        let state = self.state.read(cx);
+        let header = (self.header)(&state.model, below.min(item_count - 1), window, cx);
+        root.children(header.map(|header| {
+            div()
+                .absolute()
+                .top(scrolled)
+                .left_0()
+                .w(bounds.size.width)
+                .h(item_height)
+                .child(header)
+        }))
+        .into_any_element()
     }
 }
 
@@ -449,6 +505,10 @@ impl<K: Clone + Eq + Hash + 'static> RenderOnce for Tree<K> {
         };
         let list_state = state.clone();
         let render_row = self.render_row.clone();
+        let pinned_header = self.pinned_header.clone().map(|header| PinnedHeader {
+            state: state.clone(),
+            header,
+        });
         let list = uniform_list(self.id.clone(), row_count, move |range, window, cx| {
             let theme = Theme::of(window, cx);
             let rows: Vec<(TreeRow<K>, bool, bool)> = {
@@ -540,6 +600,10 @@ impl<K: Clone + Eq + Hash + 'static> RenderOnce for Tree<K> {
         })
         .size_full()
         .track_scroll(&scroll);
+        let list = match pinned_header {
+            Some(header) => list.with_decoration(header),
+            None => list,
+        };
 
         let activate_state = state.clone();
         div()

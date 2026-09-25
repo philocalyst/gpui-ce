@@ -80,6 +80,20 @@ pub enum IconName {
     Command,
     /// Small solid triangle pointing up: over budget.
     TriangleUp,
+    /// Mouse pointer: clickable.
+    Cursor,
+    /// Viewfinder corners: focusable.
+    Focus,
+    /// Vertical double arrow: scrolls.
+    Scroll,
+    /// Keyboard: key or action listeners.
+    Keyboard,
+    /// Counter-clockwise arrow: revert.
+    Revert,
+    /// Plus: add.
+    Plus,
+    /// Clock face: an earlier point in time.
+    Clock,
     /// Push pin: hold the app still.
     Hold,
     /// Disclosure pointing back: the previous item.
@@ -88,19 +102,15 @@ pub enum IconName {
     Info,
     /// Octagon with an exclamation mark: a critical problem.
     Critical,
-    /// A keyboard: key input.
-    Keyboard,
     /// A mouse: clicks and other button input.
     Mouse,
     /// A pointer arrow: pointer moves.
     Pointer,
-    /// A double-headed vertical arrow: scrolling.
-    Scroll,
 }
 
 impl IconName {
     /// Every glyph, for galleries and pickers.
-    pub const ALL: [IconName; 36] = [
+    pub const ALL: [IconName; 41] = [
         IconName::Pick,
         IconName::Outline,
         IconName::Flash,
@@ -129,14 +139,19 @@ impl IconName {
         IconName::Entity,
         IconName::Command,
         IconName::TriangleUp,
+        IconName::Cursor,
+        IconName::Focus,
+        IconName::Scroll,
+        IconName::Keyboard,
+        IconName::Revert,
+        IconName::Plus,
+        IconName::Clock,
         IconName::Hold,
         IconName::ChevronLeft,
         IconName::Info,
         IconName::Critical,
-        IconName::Keyboard,
         IconName::Mouse,
         IconName::Pointer,
-        IconName::Scroll,
     ];
 
     /// A stable name, also the sprite atlas key.
@@ -170,14 +185,19 @@ impl IconName {
             IconName::Entity => "loupe/entity",
             IconName::Command => "loupe/command",
             IconName::TriangleUp => "loupe/triangle-up",
+            IconName::Cursor => "loupe/cursor",
+            IconName::Focus => "loupe/focus",
+            IconName::Scroll => "loupe/scroll",
+            IconName::Keyboard => "loupe/keyboard",
+            IconName::Revert => "loupe/revert",
+            IconName::Plus => "loupe/plus",
+            IconName::Clock => "loupe/clock",
             IconName::Hold => "loupe/hold",
             IconName::ChevronLeft => "loupe/chevron-left",
             IconName::Info => "loupe/info",
             IconName::Critical => "loupe/critical",
-            IconName::Keyboard => "loupe/keyboard",
             IconName::Mouse => "loupe/mouse",
             IconName::Pointer => "loupe/pointer",
-            IconName::Scroll => "loupe/scroll",
         }
     }
 
@@ -244,6 +264,25 @@ impl IconName {
             ),
             IconName::Command => glyph!(r##"<path d="M3.4 4.4 7 8l-3.6 3.6M8.6 11.8h4"/>"##),
             IconName::TriangleUp => glyph!(r##"<path d="M8 3.6 13.2 12H2.8z" fill="#000"/>"##),
+            IconName::Cursor => glyph!(
+                r##"<path d="M3.6 2.2v10.4l2.9-2.7 2 4.2 1.9-.9-2-4.1h4z" fill="#000" fill-opacity=".2"/>"##
+            ),
+            IconName::Focus => glyph!(
+                r##"<path d="M2 5.4V3a1 1 0 0 1 1-1h2.4M10.6 2H13a1 1 0 0 1 1 1v2.4M14 10.6V13a1 1 0 0 1-1 1h-2.4M5.4 14H3a1 1 0 0 1-1-1v-2.4"/><circle cx="8" cy="8" r="1.7" fill="#000" stroke="none"/>"##
+            ),
+            IconName::Scroll => {
+                glyph!(r##"<path d="M8 2.2v11.6M5 5 8 2.2 11 5M5 11 8 13.8 11 11"/>"##)
+            }
+            IconName::Keyboard => glyph!(
+                r##"<rect x="1.6" y="3.8" width="12.8" height="8.4" rx="1.4"/><path d="M4.5 6.7h.01M7 6.7h.01M9.5 6.7h.01M11.8 6.7h.01M5.2 9.4h5.6"/>"##
+            ),
+            IconName::Revert => {
+                glyph!(r##"<path d="M3.2 7.2a5 5 0 1 1 1.4 4.3"/><path d="M2.6 3.4v3.9h3.9"/>"##)
+            }
+            IconName::Plus => glyph!(r##"<path d="M8 3v10M3 8h10"/>"##),
+            IconName::Clock => {
+                glyph!(r##"<circle cx="8" cy="8" r="6.1"/><path d="M8 4.6V8l2.4 1.6"/>"##)
+            }
             IconName::Hold => glyph!(
                 r##"<path d="M9.6 1.9 14.1 6.4l-1.9.7-2.4 2.4.4 3-1.2 1.2-6.8-6.8L3.4 5.7l3 .4 2.4-2.4z"/><path d="M5.7 10.3 1.9 14.1"/>"##
             ),
@@ -254,17 +293,11 @@ impl IconName {
             IconName::Critical => glyph!(
                 r##"<path d="M5.5 1.9h5l3.6 3.6v5l-3.6 3.6h-5l-3.6-3.6v-5z"/><path d="M8 4.8v3.6"/><circle cx="8" cy="10.9" r=".8" fill="#000" stroke="none"/>"##
             ),
-            IconName::Keyboard => glyph!(
-                r##"<rect x="1.4" y="3.8" width="13.2" height="8.4" rx="1.4"/><path d="M4.3 6.6h.01M6.8 6.6h.01M9.2 6.6h.01M11.7 6.6h.01M5.2 9.4h5.6"/>"##
-            ),
             IconName::Mouse => glyph!(
                 r##"<rect x="4.1" y="1.8" width="7.8" height="12.4" rx="3.9"/><path d="M8 4.3v2.3"/>"##
             ),
             IconName::Pointer => {
                 glyph!(r##"<path d="M3.6 2.4 12.8 7.5 8.6 8.7 6.7 12.8z" fill="#000"/>"##)
-            }
-            IconName::Scroll => {
-                glyph!(r##"<path d="M8 2.2v11.6M5 5.2 8 2.2l3 3M5 10.8l3 3 3-3"/>"##)
             }
         }
     }

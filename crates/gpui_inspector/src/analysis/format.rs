@@ -328,7 +328,7 @@ fn crate_name(package: &str) -> &str {
 /// type name; plain elements use the snake-case name of their builder).
 pub fn element_label(record: &ElementRecord) -> String {
     let name = match record.kind {
-        ElementKind::Element { type_name } => snake_case(short_type_name(type_name)),
+        ElementKind::Element { .. } => record.kind.display_name().into_owned(),
         ElementKind::View { type_name, .. } | ElementKind::Component { type_name } => {
             self::type_name(type_name).into_owned()
         }
@@ -337,23 +337,6 @@ pub fn element_label(record: &ElementRecord) -> String {
         Some(id) => format!("{name}#{id}"),
         None => name,
     }
-}
-
-/// `UniformList` → `uniform_list`, `HTMLView` → `html_view`.
-fn snake_case(name: &str) -> String {
-    let chars: Vec<char> = name.chars().collect();
-    let mut snake = String::with_capacity(name.len() + 4);
-    for (ix, &char) in chars.iter().enumerate() {
-        if char.is_uppercase() && ix > 0 {
-            let previous_lower = chars[ix - 1].is_lowercase();
-            let next_lower = chars.get(ix + 1).is_some_and(|next| next.is_lowercase());
-            if previous_lower || (chars[ix - 1].is_uppercase() && next_lower) {
-                snake.push('_');
-            }
-        }
-        snake.extend(char.to_lowercase());
-    }
-    snake
 }
 
 /// A readable version of a `type_name`: module paths are dropped from every
@@ -635,9 +618,10 @@ mod tests {
                 "HTMLView#ünï"
             ]
         );
-        assert_eq!(snake_case("HTMLView"), "html_view");
-        assert_eq!(snake_case("Svg"), "svg");
-        assert_eq!(snake_case(""), "");
+        let element = |type_name| ElementKind::Element { type_name }.display_name();
+        assert_eq!(element("web::HTMLView"), "html_view");
+        assert_eq!(element("gpui::Svg"), "svg");
+        assert_eq!(element(""), "");
     }
 
     #[test]
