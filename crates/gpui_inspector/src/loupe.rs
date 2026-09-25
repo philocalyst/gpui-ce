@@ -59,7 +59,7 @@ fn min_app_size(viewport: Pixels) -> Pixels {
 actions!(
     loupe,
     [
-        /// Opens the command palette.
+        /// Opens (or closes) the command palette.
         OpenPalette,
         /// Freezes or resumes recording.
         ToggleFreeze,
@@ -663,9 +663,12 @@ impl Loupe {
     fn render_palette(&self, theme: &Theme) -> Option<impl IntoElement + use<>> {
         let (palette, _) = self.palette.as_ref()?;
         Some(
+            // A scrim that swallows clicks: clicking outside only dismisses.
             div()
+                .id("loupe-palette-scrim")
                 .absolute()
                 .inset_0()
+                .occlude()
                 .bg(theme.colors.shadow.opacity(0.35))
                 .flex()
                 .justify_center()
@@ -723,9 +726,13 @@ impl Render for Loupe {
             .text_size(theme.metrics.text)
             .line_height(theme.metrics.line_height)
             .text_color(colors.text)
-            .on_action(
-                cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette("", window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
+                if this.palette.is_some() {
+                    this.close_palette(window, cx);
+                } else {
+                    this.open_palette("", window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleFreeze, window, cx| {
                 this.run(Command::ToggleFreeze, window, cx)
             }))

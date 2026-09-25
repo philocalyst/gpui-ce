@@ -255,6 +255,11 @@ fn palette_filters_and_runs_commands_and_finds_elements() {
         Some(elements.row_3)
     );
 
+    // The shortcut toggles the palette.
+    harness.type_keys("secondary-k");
+    harness.type_keys("secondary-k");
+    assert!(!harness.app(|cx| loupe.read(cx).is_palette_open()));
+
     harness.type_keys("secondary-k");
     harness.type_text("@store");
     let matches = harness.app(|cx| loupe.read(cx).palette_matches(cx));
@@ -262,6 +267,28 @@ fn palette_filters_and_runs_commands_and_finds_elements() {
     harness.screenshot("palette-entities");
     harness.type_keys("escape");
     assert!(!harness.app(|cx| loupe.read(cx).is_palette_open()));
+
+    // Clicking outside dismisses without clicking through: the breadcrumb
+    // under the scrim (the lowest "IssueList" on screen) stays unclicked.
+    harness.type_keys("secondary-k");
+    let crumb = lowest_text(&mut harness, "IssueList");
+    harness.click(crumb.center());
+    assert!(!harness.app(|cx| loupe.read(cx).is_palette_open()));
+    assert_eq!(
+        harness.state(|state| state.selected_element()),
+        Some(elements.row_3)
+    );
+}
+
+/// The visible bounds of the lowest painted line equal to `text`.
+fn lowest_text(harness: &mut LoupeHarness, text: &str) -> gpui::Bounds<gpui::Pixels> {
+    harness
+        .painted_text()
+        .into_iter()
+        .filter(|line| line.text.as_ref() == text)
+        .map(|line| line.visible_bounds())
+        .max_by(|a, b| f32::from(a.origin.y).total_cmp(&f32::from(b.origin.y)))
+        .unwrap_or_else(|| panic!("{text:?} is not painted"))
 }
 
 #[test]
@@ -289,13 +316,7 @@ fn status_bar_shows_breadcrumb_timings_and_memory() {
     );
 
     // The breadcrumb is the lowest "IssueList" on screen (the lens also names it).
-    let crumb = harness
-        .painted_text()
-        .into_iter()
-        .filter(|line| line.text.as_ref() == "IssueList")
-        .map(|line| line.visible_bounds())
-        .max_by(|a, b| f32::from(a.origin.y).total_cmp(&f32::from(b.origin.y)))
-        .unwrap();
+    let crumb = lowest_text(&mut harness, "IssueList");
     harness.click(crumb.center());
     assert_eq!(
         harness.state(|state| state.selected_element()),
