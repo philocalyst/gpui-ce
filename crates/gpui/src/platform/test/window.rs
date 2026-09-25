@@ -86,6 +86,11 @@ impl TestWindow {
             Some(r) => r.sprite_atlas(),
             None => Arc::new(TestAtlas::new()),
         };
+        let (appearance, scale_factor) = platform
+            .upgrade()
+            .map_or((WindowAppearance::Light, 2.0), |platform| {
+                platform.window_defaults()
+            });
         Self(Rc::new(Mutex::new(TestWindowState {
             bounds: params.bounds,
             display,
@@ -113,8 +118,8 @@ impl TestWindow {
             text_input_state_changes: Vec::new(),
             visible: params.show,
             is_fullscreen: false,
-            appearance: WindowAppearance::Light,
-            scale_factor: 2.0,
+            appearance,
+            scale_factor,
             external_drag_files: Vec::new(),
             start_external_drag_result: false,
         })))

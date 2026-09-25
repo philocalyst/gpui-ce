@@ -44,6 +44,7 @@ pub struct HeadlessAppContext {
     pub foreground_executor: ForegroundExecutor,
     dispatcher: TestDispatcher,
     text_system: Arc<TextSystem>,
+    platform: Rc<TestPlatform>,
 }
 
 impl HeadlessAppContext {
@@ -89,7 +90,7 @@ impl HeadlessAppContext {
         let text_system = Arc::new(TextSystem::new(platform_text_system));
         let http_client = crate::http_client::FakeHttpClient::with_404_response();
         let app = App::new_app(
-            platform,
+            platform.clone(),
             AssetRegistry::from(asset_source).into(),
             http_client,
         );
@@ -101,6 +102,7 @@ impl HeadlessAppContext {
             foreground_executor,
             dispatcher,
             text_system,
+            platform,
         }
     }
 
@@ -172,6 +174,12 @@ impl HeadlessAppContext {
     pub fn capture_screenshot(&mut self, window: AnyWindowHandle) -> Result<RgbaImage> {
         let mut app = self.app.borrow_mut();
         app.update_window(window, |_, window, _| window.render_to_image())?
+    }
+
+    /// Sets the appearance and scale factor windows opened from now on start
+    /// with (light and 2.0 by default), so even their first frame has them.
+    pub fn set_window_defaults(&mut self, appearance: WindowAppearance, scale_factor: f32) {
+        self.platform.set_window_defaults(appearance, scale_factor);
     }
 
     /// Changes the display scale factor of a window (2.0 by default), as

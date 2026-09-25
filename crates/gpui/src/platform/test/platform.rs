@@ -16,7 +16,7 @@ use collections::VecDeque;
 use futures::channel::oneshot;
 use parking_lot::Mutex;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::Arc,
@@ -44,6 +44,8 @@ pub(crate) struct TestPlatform {
     pub expect_restart:
         RefCell<Option<oneshot::Sender<(Option<PathBuf>, Vec<std::ffi::OsString>)>>>,
     headless_renderer_factory: Option<Box<dyn Fn() -> Option<Box<dyn PlatformHeadlessRenderer>>>>,
+    /// The appearance and scale factor windows opened from now on start with.
+    window_defaults: Cell<(WindowAppearance, f32)>,
     weak: Weak<Self>,
 }
 
@@ -159,7 +161,18 @@ impl TestPlatform {
             system_notifications: Default::default(),
             text_system,
             headless_renderer_factory,
+            window_defaults: Cell::new((WindowAppearance::Light, 2.0)),
         })
+    }
+
+    /// Sets the appearance and scale factor that windows opened from now on
+    /// start with (light and 2.0 by default), so their first frame has them.
+    pub(crate) fn set_window_defaults(&self, appearance: WindowAppearance, scale_factor: f32) {
+        self.window_defaults.set((appearance, scale_factor));
+    }
+
+    pub(crate) fn window_defaults(&self) -> (WindowAppearance, f32) {
+        self.window_defaults.get()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -453,7 +466,7 @@ impl Platform for TestPlatform {
     }
 
     fn window_appearance(&self) -> WindowAppearance {
-        WindowAppearance::Light
+        self.window_defaults.get().0
     }
 
     fn open_url(&self, url: &str) {
