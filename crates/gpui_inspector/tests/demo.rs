@@ -41,6 +41,31 @@ fn the_app_draws_after_a_frame_loupe_drew_for_itself() {
 }
 
 #[test]
+fn holding_from_the_keyboard_keeps_a_tooltip_on_screen() {
+    let mut harness = demo();
+    // The detail pane's star button (the sidebar also has a "Starred" item).
+    let star = harness
+        .painted_text()
+        .into_iter()
+        .filter(|line| line.text == "Starred")
+        .map(|line| line.bounds)
+        .max_by(|a, b| f32::from(a.origin.x).total_cmp(&f32::from(b.origin.x)))
+        .expect("the star button");
+    harness.hover(star.center());
+    harness.advance(Duration::from_millis(600));
+    harness.assert_text_visible("Star this issue");
+
+    harness.type_keys(
+        gpui_inspector::Command::ToggleHold
+            .keys()
+            .expect("a shortcut"),
+    );
+    harness.advance(Duration::from_millis(100));
+    assert!(harness.capture(|capture| capture.is_holding()));
+    harness.assert_text_visible("Star this issue");
+}
+
+#[test]
 fn loupe_keeps_up_with_an_app_that_draws_every_frame() {
     let mut harness = demo_with(InboxOptions { live_sync: true });
     let loupe = harness.loupe();

@@ -2019,6 +2019,77 @@ fn holding_replays_the_app_until_release(cx: &mut TestAppContext) {
     assert_eq!(renders(&view, cx).0, released.0 + 1);
 }
 
+crate::actions!(inspector_tests, [HoldApp]);
+
+/// A button with a hover color and a tooltip.
+struct Hoverable;
+
+impl Render for Hoverable {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(
+            div()
+                .id("button")
+                .w(px(40.))
+                .h(px(40.))
+                .bg(blue())
+                .hover(|style| style.bg(red()))
+                .tooltip(|_, cx| cx.new(|_| Tip).into())
+                .on_click(cx.listener(|_, _, _, _| {})),
+        )
+    }
+}
+
+#[gpui::test]
+fn holding_from_the_keyboard_keeps_the_hover_state_on_screen(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| Hoverable);
+    open(cx);
+    // Held from a shortcut the way Loupe does it: a global action whose
+    // handler runs once the key's dispatch is over.
+    cx.update(|window, cx| {
+        let handle = window.window_handle();
+        cx.bind_keys([crate::KeyBinding::new("ctrl-shift-h", HoldApp, None)]);
+        cx.on_action(move |_: &HoldApp, cx| {
+            cx.defer(move |cx| {
+                handle
+                    .update(cx, |_, window, cx| window.set_inspector_holding(true, cx))
+                    .ok();
+            })
+        });
+    });
+    let painted_color = |cx: &mut VisualTestContext, color: Hsla| {
+        cx.update(|window, _| {
+            window
+                .painted_quads()
+                .iter()
+                .any(|quad| quad.background.as_solid() == Some(color))
+        })
+    };
+    let button = record(&latest_tree(cx), "button").bounds;
+    cx.simulate_mouse_move(button.center(), None, Modifiers::none());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.run_until_parked();
+    let hovered = drawn(cx);
+    assert!(hovered.tooltip.is_some(), "the tooltip shows");
+    assert!(painted_color(cx, red()), "the hover color shows");
+
+    cx.simulate_keystrokes("ctrl-shift-h");
+    assert!(read(cx, |capture| capture.is_holding()));
+    assert!(app_replayed(cx));
+    let held = drawn(cx);
+    assert_eq!(held.tooltip, hovered.tooltip, "the tooltip stays");
+    assert!(painted_color(cx, red()), "and so does the hover color");
+    assert_eq!(held.quads, hovered.quads);
+
+    // Released, the app draws as the keyboard left it: no hover, no tooltip.
+    cx.update(|window, cx| window.set_inspector_holding(false, cx));
+    cx.run_until_parked();
+    assert!(!app_replayed(cx));
+    assert_eq!(drawn(cx).tooltip, None);
+    assert!(!painted_color(cx, red()));
+    assert!(painted_color(cx, blue()));
+}
+
 #[gpui::test]
 fn resizing_renders_a_held_app(cx: &mut TestAppContext) {
     let (view, cx) = replayed(cx);

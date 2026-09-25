@@ -5874,9 +5874,7 @@ impl Window {
             PlatformInput::Touch(_) => InputModality::Touch,
             _ => self.last_input_modality,
         };
-        if self.last_input_modality != old_modality {
-            self.refresh();
-        }
+        let modality_changed = self.last_input_modality != old_modality;
 
         // Handlers may set this to false by calling `stop_propagation`.
         cx.propagate_event = true;
@@ -6016,6 +6014,14 @@ impl Window {
         // Must run after the move is dispatched: the platform owns the gesture afterwards, so this
         // is the last chance for drag listeners to see the pointer leave and reset their state.
         self.promote_external_drag_to_platform(&event, cx);
+
+        // Redraw for the new modality once the event is handled, not before: dispatching a key
+        // draws pending changes first, and that frame would already drop the hover styles and
+        // tooltip that were on screen when the key was pressed (and that a shortcut handled by
+        // this very event, such as the inspector's hold, may want to keep).
+        if modality_changed {
+            self.refresh();
+        }
 
         let caused_invalidation = self.invalidator.update_count() > update_count_before;
         if caused_invalidation {
