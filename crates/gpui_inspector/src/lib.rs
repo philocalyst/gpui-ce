@@ -6,17 +6,26 @@
 //! [`gpui::inspector::InspectorCapture`], which records frames, element trees
 //! and input only while Loupe is open. See `DESIGN.md` for the architecture.
 
+mod commands;
+mod lenses;
 mod loupe;
+mod palette;
+mod shell;
+mod state;
 pub mod theme;
 pub mod widgets;
+
 
 use gpui::{
     App, AppContext as _, IntoElement as _, KeyBinding, StyleRefinement, Styled as _, actions,
 };
 use std::borrow::Cow;
 
-pub use loupe::Loupe;
-pub use theme::{MONO_FONT, UI_FONT};
+pub use commands::{Command, DockSide};
+pub use loupe::{Loupe, REFRESH_INTERVAL};
+pub use palette::fuzzy;
+pub use state::{Filters, Lens, LensLayout, LoupeState};
+pub use theme::{LoupeSettings, MONO_FONT, UI_FONT};
 
 actions!(
     loupe,
@@ -46,22 +55,11 @@ pub fn init(cx: &mut App) {
         log::warn!("loupe: failed to load its fonts: {error}");
     }
 
-    let toggle = if cfg!(target_os = "macos") {
-        "cmd-alt-i"
-    } else {
-        "ctrl-shift-i"
-    };
-    let pick = if cfg!(target_os = "macos") {
-        "cmd-shift-c"
-    } else {
-        "ctrl-shift-c"
-    };
     cx.bind_keys([
-        KeyBinding::new(toggle, ToggleInspector, None),
-        KeyBinding::new(pick, TogglePick, None),
+        KeyBinding::new(commands::keys::TOGGLE, ToggleInspector, None),
+        KeyBinding::new(commands::keys::PICK, TogglePick, None),
     ]);
     loupe::bind_keys(cx);
-    widgets::bind_keys("Loupe", cx);
 
     cx.on_action(|_: &ToggleInspector, cx| {
         if let Some(window) = cx.active_window() {
