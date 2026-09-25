@@ -30,9 +30,10 @@ use crate::{
         why_size::{self, SizeExplanation},
     },
     loupe::Cancel,
+    settings::LoupeSettings,
     shell::pulse::cause_summary,
     state::{LensLayout, LoupeState},
-    theme::{LoupeSettings, Theme},
+    theme::Theme,
     widgets::{EmptyState, IconName, Split, TreeEvent, TreeState, text_field_state},
 };
 use box_model::BoxFields;
@@ -1151,9 +1152,8 @@ mod tests {
         assert!(std::path::Path::new(path).exists(), "{path} exists");
 
         harness.app(|cx| {
-            cx.set_global(LoupeSettings {
-                editor: source::EditorUrl::VsCode,
-                ..LoupeSettings::get(cx)
+            LoupeSettings::update(cx, |settings| {
+                settings.editor = source::Editor::VsCode.into();
             })
         });
         harness.click_selector("elements-source");

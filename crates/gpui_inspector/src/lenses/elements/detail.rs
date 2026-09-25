@@ -10,8 +10,9 @@ use crate::{
         why_size::AxisExplanation,
     },
     commands::keys,
+    settings::LoupeSettings,
     state::Lens,
-    theme::{LoupeSettings, MONO_FONT, Theme},
+    theme::{MONO_FONT, Theme},
     widgets::{
         Button, ButtonSize, ButtonStyle, EmptyState, Icon, IconName, Kbd, Pill, SectionHeader,
         Tone, Tooltip,
@@ -477,7 +478,7 @@ impl ElementsLens {
 
         let source = match selection.source.clone() {
             Some((location, path)) => {
-                let editor = LoupeSettings::get(cx).editor;
+                let editor = LoupeSettings::get(cx).editor.clone();
                 let full_path = format!("{path}:{}:{}", location.line(), location.column());
                 div()
                     .flex_none()

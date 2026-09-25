@@ -2,12 +2,12 @@
 //! editable text (IME, selection, clipboard and undo included).
 
 use crate::{
-    theme::{Theme, UI_FONT},
+    theme::{MONO_FONT, Theme, UI_FONT},
     widgets::{Icon, IconName},
 };
 use gpui::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, Focusable as _, IntoElement,
-    RenderOnce, SharedString, Styled, Window, div, prelude::*, px,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, Focusable as _, FontFeatures,
+    IntoElement, RenderOnce, SharedString, Styled, Window, div, prelude::*, px,
 };
 use gpui_elements::editable_text::{EditableTextState, StringStorage, text_input};
 
@@ -27,6 +27,7 @@ pub struct TextField {
     icon: Option<IconName>,
     trailing: Option<AnyElement>,
     borderless: bool,
+    mono: bool,
 }
 
 impl TextField {
@@ -39,6 +40,7 @@ impl TextField {
             icon: None,
             trailing: None,
             borderless: false,
+            mono: false,
         }
     }
 
@@ -66,6 +68,12 @@ impl TextField {
         self.borderless = true;
         self
     }
+
+    /// Sets the text in the mono font, for code such as URL templates.
+    pub fn mono(mut self) -> Self {
+        self.mono = true;
+        self
+    }
 }
 
 impl RenderOnce for TextField {
@@ -82,8 +90,15 @@ impl RenderOnce for TextField {
             .flex()
             .items_center()
             .gap(px(6.))
-            .font_family(UI_FONT)
-            .text_size(theme.metrics.text)
+            .map(|this| {
+                if self.mono {
+                    this.font_family(MONO_FONT)
+                        .font_features(FontFeatures::disable_ligatures())
+                        .text_size(theme.metrics.mono)
+                } else {
+                    this.font_family(UI_FONT).text_size(theme.metrics.text)
+                }
+            })
             .line_height(theme.metrics.line_height)
             .text_color(colors.text)
             .cursor_text()

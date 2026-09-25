@@ -84,17 +84,17 @@ actions!(
 );
 
 /// Key context of the Frames lens.
-const CONTEXT: &str = "LoupeFrames";
+pub(crate) const CONTEXT: &str = "LoupeFrames";
 /// Below this width the lens stacks in one column: the flame chart and the
 /// bottom-up table need the room.
 const TWO_COLUMNS_WIDTH: Pixels = px(760.);
 /// Most bottom-up rows shown before the table scrolls.
 const TABLE_ROWS: usize = 10;
 
-/// Binds the lens' keys.
-pub(crate) fn bind_keys(cx: &mut App) {
+/// The lens' keys.
+pub(crate) fn key_bindings() -> [KeyBinding; 8] {
     let context = Some(CONTEXT);
-    cx.bind_keys([
+    [
         KeyBinding::new("left", PreviousFrame, context),
         KeyBinding::new("right", NextFrame, context),
         KeyBinding::new("w", JumpToWorst, context),
@@ -103,7 +103,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("+", ZoomIn, context),
         KeyBinding::new("-", ZoomOut, context),
         KeyBinding::new("0", ZoomToFit, context),
-    ]);
+    ]
 }
 
 /// How the lens lays itself out in its dock.

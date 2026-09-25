@@ -84,12 +84,12 @@ impl LoupeHarness {
 
     /// Chooses Loupe's palette.
     pub fn set_appearance(&mut self, appearance: Appearance) {
-        self.cx.update(|cx| {
-            cx.set_global(LoupeSettings {
-                appearance,
-                ..LoupeSettings::get(cx)
-            })
-        });
+        self.update_settings(|settings| settings.appearance = appearance);
+    }
+
+    /// Changes Loupe's settings (as the settings popover would) and draws.
+    pub fn update_settings(&mut self, change: impl FnOnce(&mut LoupeSettings)) {
+        self.cx.update(|cx| LoupeSettings::update(cx, change));
         self.draw();
     }
 
@@ -334,6 +334,24 @@ impl LoupeHarness {
             };
             self.type_keys(&keystroke);
         }
+    }
+
+    /// The color of the last frame at `position`, as RGBA bytes.
+    pub fn pixel(&mut self, position: Point<Pixels>) -> [u8; 4] {
+        self.draw();
+        let scale = self.update(|window, _| window.scale_factor());
+        let image = self
+            .cx
+            .capture_screenshot(self.window)
+            .expect("headless renderer captures screenshots");
+        let device = |value: Pixels| (f32::from(value) * scale) as u32;
+        image.get_pixel(device(position.x), device(position.y)).0
+    }
+
+    /// The last URL Loupe (or the app) opened, e.g. a source link's
+    /// editor URL.
+    pub fn opened_url(&self) -> Option<String> {
+        self.cx.opened_url()
     }
 
     /// Saves the last frame as `target/loupe-shots/<name>.png` and returns its path.

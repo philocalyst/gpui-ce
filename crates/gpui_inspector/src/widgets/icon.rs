@@ -106,11 +106,15 @@ pub enum IconName {
     Mouse,
     /// A pointer arrow: pointer moves.
     Pointer,
+    /// Two sliders: settings.
+    Settings,
+    /// Circled question mark: help.
+    Help,
 }
 
 impl IconName {
     /// Every glyph, for galleries and pickers.
-    pub const ALL: [IconName; 41] = [
+    pub const ALL: [IconName; 43] = [
         IconName::Pick,
         IconName::Outline,
         IconName::Flash,
@@ -152,6 +156,8 @@ impl IconName {
         IconName::Critical,
         IconName::Mouse,
         IconName::Pointer,
+        IconName::Settings,
+        IconName::Help,
     ];
 
     /// A stable name, also the sprite atlas key.
@@ -198,6 +204,8 @@ impl IconName {
             IconName::Critical => "loupe/critical",
             IconName::Mouse => "loupe/mouse",
             IconName::Pointer => "loupe/pointer",
+            IconName::Settings => "loupe/settings",
+            IconName::Help => "loupe/help",
         }
     }
 
@@ -299,6 +307,12 @@ impl IconName {
             IconName::Pointer => {
                 glyph!(r##"<path d="M3.6 2.4 12.8 7.5 8.6 8.7 6.7 12.8z" fill="#000"/>"##)
             }
+            IconName::Settings => glyph!(
+                r##"<path d="M2 4.8h6M12.6 4.8H14M2 11.2h1.4M8 11.2h6"/><circle cx="10.3" cy="4.8" r="1.8"/><circle cx="5.7" cy="11.2" r="1.8"/>"##
+            ),
+            IconName::Help => glyph!(
+                r##"<circle cx="8" cy="8" r="6.2"/><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.5.2-.8.6-.8 1.1v.3"/><circle cx="8" cy="11.3" r=".8" fill="#000" stroke="none"/>"##
+            ),
         }
     }
 }

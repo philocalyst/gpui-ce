@@ -11,8 +11,9 @@ use crate::{
         entities::{EntityRow, format_rate, history, peak, summary, view_element},
         format, source,
     },
+    settings::LoupeSettings,
     state::Lens,
-    theme::{LoupeSettings, MONO_FONT, Theme},
+    theme::{MONO_FONT, Theme},
     widgets::{
         Button, ButtonSize, ButtonStyle, EmptyState, Icon, IconName, Prose, SectionHeader,
         Sparkline, Tooltip,
@@ -145,7 +146,7 @@ impl EntitiesLens {
             .ok()
             .map(|cwd| source::resolve_source_path(site.file(), &cwd, |path| path.exists()))
             .filter(|path| path.exists());
-        let editor = LoupeSettings::get(cx).editor;
+        let editor = LoupeSettings::get(cx).editor.clone();
         div().flex().flex_col().child(header).child(
             div()
                 .px(theme.metrics.gutter)

@@ -5,8 +5,8 @@ use crate::{
     widgets::{Icon, IconName},
 };
 use gpui::{
-    AnyElement, App, FontWeight, IntoElement, RenderOnce, SharedString, Styled, Window, div,
-    prelude::*, px,
+    AnyElement, App, FontWeight, IntoElement, Pixels, RenderOnce, SharedString, Styled, Window,
+    div, prelude::*, px,
 };
 
 /// `CAUSES  3                                   [Copy]`
@@ -17,6 +17,7 @@ pub struct SectionHeader {
     actions: Vec<AnyElement>,
     rule: bool,
     disclosure: Option<bool>,
+    gutter: Option<Pixels>,
 }
 
 impl SectionHeader {
@@ -28,7 +29,15 @@ impl SectionHeader {
             actions: Vec::new(),
             rule: false,
             disclosure: None,
+            gutter: None,
         }
+    }
+
+    /// Sets the horizontal padding, to line up with the rows below (the
+    /// theme's pane gutter by default).
+    pub fn gutter(mut self, gutter: Pixels) -> Self {
+        self.gutter = Some(gutter);
+        self
     }
 
     /// A short muted value after the label, such as a count.
@@ -63,7 +72,7 @@ impl RenderOnce for SectionHeader {
         div()
             .flex_none()
             .h(theme.metrics.property_row)
-            .px(theme.metrics.gutter)
+            .px(self.gutter.unwrap_or(theme.metrics.gutter))
             .flex()
             .items_center()
             .gap_2()

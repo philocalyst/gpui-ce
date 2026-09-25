@@ -5,8 +5,8 @@
 //! one in [`LoupeSettings`]. Color only ever means state: neutrals for chrome,
 //! the accent for selection and focus, and ok / warn / crit for budgets.
 
-use crate::analysis::{source::EditorUrl, stats::Grade};
-use gpui::{App, Global, Hsla, Pixels, Window, WindowAppearance, px, rgb, rgb_to_hsla, rgba};
+use crate::{analysis::stats::Grade, settings::LoupeSettings};
+use gpui::{App, Hsla, Pixels, Window, WindowAppearance, px, rgb, rgb_to_hsla, rgba};
 use std::{sync::LazyLock, time::Duration};
 
 /// The UI font Loupe renders with. Embedded, so every platform looks the same.
@@ -34,27 +34,6 @@ pub enum Density {
     Compact,
     /// 4 px taller rows and controls and 1 px larger text.
     Comfortable,
-}
-
-/// Loupe's user preferences. A global because they outlive any one Loupe and
-/// apply to every inspected window.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LoupeSettings {
-    /// Palette choice.
-    pub appearance: Appearance,
-    /// Row and control sizing.
-    pub density: Density,
-    /// How source links open in an editor.
-    pub editor: EditorUrl,
-}
-
-impl Global for LoupeSettings {}
-
-impl LoupeSettings {
-    /// The current settings, or the defaults if none were set.
-    pub fn get(cx: &App) -> Self {
-        cx.try_global::<Self>().copied().unwrap_or_default()
-    }
 }
 
 /// Semantic colors. Names describe roles, not hues.

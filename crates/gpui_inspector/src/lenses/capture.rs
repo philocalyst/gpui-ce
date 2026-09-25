@@ -1,118 +1,66 @@
 //! Capture controls and Loupe's self-cost, shared by the Frames and Audit
-//! lenses: the frame budget (which grades every frame), the capture level
-//! (what each frame records) and what recording costs.
+//! lenses and the settings popover: the frame budget (which grades every
+//! frame), the capture level (what each frame records) and what recording
+//! costs.
+//!
+//! The controls change [`LoupeSettings`]; every open Loupe copies the new
+//! values into its window's capture and re-renders.
 
 use crate::{
     analysis::format,
-    state::LoupeState,
+    settings::{
+        CAPTURE_LEVELS, FrameBudget, LoupeSettings, capture_level_label, capture_level_summary,
+    },
     theme::{MONO_FONT, Theme},
     widgets::{Segment, Segmented},
 };
 use gpui::{
-    App, Entity, IntoElement, RenderOnce, SharedString, Styled, Window, div,
-    inspector::CaptureLevel, prelude::*, px,
+    App, IntoElement, RenderOnce, SharedString, Styled, Window, div, inspector::CaptureLevel,
+    prelude::*, px,
 };
 use std::time::Duration;
 
-/// The frame budgets Loupe offers: refresh rate and time per frame.
-pub(crate) const BUDGETS: [(u32, Duration); 3] = [
-    (60, Duration::from_micros(16_667)),
-    (120, Duration::from_micros(8_333)),
-    (144, Duration::from_micros(6_944)),
-];
-
-/// The capture levels, cheapest first, with what each adds.
-pub(crate) const LEVELS: [(CaptureLevel, &str, &str); 3] = [
-    (
-        CaptureLevel::Frames,
-        "Frames",
-        "Timings, causes and view renders only",
-    ),
-    (
-        CaptureLevel::Tree,
-        "Tree",
-        "Plus element trees: picking, layout and hit checks",
-    ),
-    (
-        CaptureLevel::Full,
-        "Full",
-        "Plus element details: styles, text, contrast and accessibility checks",
-    ),
-];
-
-/// The offered budget closest to `budget`.
-pub(crate) fn budget_index(budget: Duration) -> usize {
-    BUDGETS
+/// `60 Hz | 120 Hz | 144 Hz`, setting the frame budget.
+pub(crate) fn budget_control(id: &'static str, budget: FrameBudget) -> Segmented {
+    FrameBudget::ALL
         .iter()
-        .enumerate()
-        .min_by_key(|(_, (_, offered))| offered.abs_diff(budget))
-        .map_or(0, |(ix, _)| ix)
-}
-
-/// The position of `level` in [`LEVELS`].
-pub(crate) fn level_index(level: CaptureLevel) -> usize {
-    LEVELS
-        .iter()
-        .position(|(offered, _, _)| *offered == level)
-        .unwrap_or(0)
-}
-
-/// Re-renders the shell and every lens: grades and memo keys changed
-/// without the capture's generation moving.
-fn refresh_everything(state: &Entity<LoupeState>, cx: &mut App) {
-    state.update(cx, |_, cx| cx.notify());
-}
-
-/// `60 Hz | 120 Hz | 144 Hz`, setting the capture's frame budget.
-pub(crate) fn budget_control(
-    id: &'static str,
-    budget: Duration,
-    state: &Entity<LoupeState>,
-) -> Segmented {
-    let state = state.clone();
-    BUDGETS
-        .iter()
-        .fold(Segmented::new(id), |control, (hz, per_frame)| {
-            control.segment(Segment::label(format!("{hz} Hz")).tooltip(format!(
+        .fold(Segmented::new(id), |control, budget| {
+            control.segment(Segment::label(budget.label()).tooltip(format!(
                 "Grade frames against a {} budget",
-                format::duration(*per_frame)
+                format::duration(budget.duration())
             )))
         })
-        .selected(budget_index(budget))
-        .on_select(move |ix, window, cx| {
-            if let Some(capture) = window.inspector_capture_mut() {
-                capture.config_mut().budget = BUDGETS[*ix].1;
-            }
-            refresh_everything(&state, cx);
+        .selected(
+            FrameBudget::ALL
+                .iter()
+                .position(|b| *b == budget)
+                .unwrap_or(0),
+        )
+        .on_select(|ix, _, cx| {
+            LoupeSettings::update(cx, |settings| settings.budget = FrameBudget::ALL[*ix]);
         })
 }
 
 /// `Frames | Tree | Full`, setting what the capture records.
-pub(crate) fn level_control(
-    id: &'static str,
-    level: CaptureLevel,
-    state: &Entity<LoupeState>,
-) -> Segmented {
-    let state = state.clone();
-    LEVELS
+pub(crate) fn level_control(id: &'static str, level: CaptureLevel) -> Segmented {
+    CAPTURE_LEVELS
         .iter()
-        .fold(Segmented::new(id), |control, (_, label, what)| {
-            control.segment(Segment::label(*label).tooltip(*what))
+        .fold(Segmented::new(id), |control, level| {
+            control.segment(
+                Segment::label(capture_level_label(*level)).tooltip(capture_level_summary(*level)),
+            )
         })
-        .selected(level_index(level))
-        .on_select(move |ix, window, cx| {
-            if let Some(capture) = window.inspector_capture_mut() {
-                capture.config_mut().level = LEVELS[*ix].0;
-            }
-            refresh_everything(&state, cx);
+        .selected(CAPTURE_LEVELS.iter().position(|l| *l == level).unwrap_or(0))
+        .on_select(|ix, _, cx| {
+            LoupeSettings::update(cx, |settings| {
+                settings.capture_level = CAPTURE_LEVELS[*ix];
+            });
         })
 }
 
 /// What recording costs, and the controls that change it.
 #[derive(IntoElement)]
 pub(crate) struct CaptureCard {
-    /// Shared state, notified when a control changes the capture.
-    pub state: Entity<LoupeState>,
     /// Current capture level.
     pub level: CaptureLevel,
     /// Current frame budget.
@@ -164,26 +112,20 @@ impl RenderOnce for CaptureCard {
                 .text_color(colors.text_faint)
                 .child(text)
         };
-        let level_note = LEVELS[level_index(self.level)].2;
         div()
             .flex()
             .flex_col()
             .pb_1()
             .child(
                 row("Level")
-                    .child(level_control(
-                        "loupe-capture-level",
-                        self.level,
-                        &self.state,
-                    ))
-                    .child(note(level_note.into())),
+                    .child(level_control("loupe-capture-level", self.level))
+                    .child(note(capture_level_summary(self.level).into())),
             )
             .child(
                 row("Budget")
                     .child(budget_control(
                         "loupe-capture-budget",
-                        self.budget,
-                        &self.state,
+                        FrameBudget::nearest(self.budget),
                     ))
                     .child(note(
                         format!("{} per frame", format::duration(self.budget)).into(),
@@ -212,27 +154,5 @@ impl RenderOnce for CaptureCard {
                         .into(),
                     )),
             )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn budgets_snap_to_the_nearest_rate() {
-        assert_eq!(budget_index(Duration::from_micros(16_667)), 0);
-        assert_eq!(budget_index(Duration::from_millis(16)), 0);
-        assert_eq!(budget_index(Duration::from_millis(8)), 1);
-        assert_eq!(budget_index(Duration::from_millis(7)), 2);
-        assert_eq!(budget_index(Duration::from_millis(1)), 2);
-        assert_eq!(budget_index(Duration::from_secs(1)), 0);
-    }
-
-    #[test]
-    fn levels_round_trip() {
-        for (ix, (level, _, _)) in LEVELS.iter().enumerate() {
-            assert_eq!(level_index(*level), ix);
-        }
     }
 }

@@ -23,6 +23,7 @@ use crate::{
         capture::budget_control,
         links::{Navigate, Target, link, site_link},
     },
+    settings::FrameBudget,
     state::Lens,
     theme::{MONO_FONT, Theme, UI_FONT},
     widgets::{
@@ -394,8 +395,7 @@ impl FramesLens {
                     .child(div().flex_1())
                     .child(budget_control(
                         "loupe-frames-budget",
-                        shown.budget,
-                        &self.state,
+                        FrameBudget::nearest(shown.budget),
                     )),
             )
             .into_any_element()

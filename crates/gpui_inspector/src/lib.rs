@@ -1,16 +1,34 @@
 //! Loupe: an inspector and profiler for gpui applications.
 //!
-//! Call [`init`] once at startup, then press `cmd-alt-i` (macOS) or
-//! `ctrl-shift-i` (elsewhere) in any window to open Loupe docked inside it.
+//! Loupe docks inside the window it inspects and answers *why*: why an
+//! element has its size, why a frame was drawn and why it was slow, where a
+//! click went, what a key will do, which entities keep notifying. Register it
+//! once at startup:
+//!
+//! ```ignore
+//! gpui_platform::application().run(|cx: &mut gpui::App| {
+//!     gpui_inspector::init(cx);
+//!     // Open windows as usual.
+//! });
+//! ```
+//!
+//! Then press `cmd-alt-i` (macOS) or `ctrl-shift-i` (elsewhere) in any
+//! window. `?` inside Loupe lists every other key. To choose Loupe's
+//! defaults (theme, density, editor, frame budget, capture level), register
+//! it with [`init_with`] and a [`LoupeSettings`].
+//!
 //! Everything Loupe shows comes from the window's
-//! [`gpui::inspector::InspectorCapture`], which records frames, element trees
-//! and input only while Loupe is open. See `DESIGN.md` for the architecture.
+//! [`gpui::inspector::InspectorCapture`], which exists and records frames,
+//! element trees and input only while Loupe is open. Closed, every engine
+//! hook costs one `Option` check. The README covers usage; `DESIGN.md` the
+//! architecture.
 
 pub mod analysis;
 mod commands;
 mod lenses;
 mod loupe;
 mod palette;
+pub mod settings;
 mod shell;
 mod state;
 pub mod theme;
@@ -26,13 +44,14 @@ use gpui::{
 };
 use std::borrow::Cow;
 
-pub use analysis::source::EditorUrl;
+pub use analysis::source::{Editor, EditorUrl};
 pub use commands::{Command, DockSide};
 pub use lenses::ExportDirectory;
 pub use loupe::{Loupe, REFRESH_INTERVAL};
 pub use palette::fuzzy;
+pub use settings::{FrameBudget, LoupeSettings};
 pub use state::{Filters, Lens, LensLayout, LoupeState};
-pub use theme::{LoupeSettings, MONO_FONT, UI_FONT};
+pub use theme::{MONO_FONT, UI_FONT};
 
 actions!(
     loupe,
@@ -41,7 +60,7 @@ actions!(
         ToggleInspector,
         /// Starts or stops picking an element in the app.
         TogglePick,
-        /// Holds the app still (or releases it) so it can be inspected as is.
+        /// Holds the app still, or releases it.
         ToggleHold,
     ]
 );
@@ -55,7 +74,8 @@ const FONTS: [&[u8]; 6] = [
     include_bytes!("../../../assets/fonts/lilex/Lilex-Italic.ttf"),
 ];
 
-/// Registers Loupe: its fonts, actions, key bindings and the window renderer.
+/// Registers Loupe: its fonts, actions, key bindings and the window
+/// renderer. Settings keep their defaults, or whatever the app already set.
 pub fn init(cx: &mut App) {
     if let Err(error) = cx
         .text_system()
@@ -64,12 +84,7 @@ pub fn init(cx: &mut App) {
         log::warn!("loupe: failed to load its fonts: {error}");
     }
 
-    cx.bind_keys([
-        KeyBinding::new(commands::keys::TOGGLE, ToggleInspector, None),
-        KeyBinding::new(commands::keys::PICK, TogglePick, None),
-        KeyBinding::new(commands::keys::HOLD, ToggleHold, None),
-    ]);
-    loupe::bind_keys(cx);
+    cx.bind_keys(key_bindings());
 
     on_active_window::<ToggleInspector>(cx, |window, cx| window.toggle_inspector(cx));
     on_active_window::<TogglePick>(cx, |window, cx| {
@@ -94,6 +109,37 @@ pub fn init(cx: &mut App) {
             .cached(StyleRefinement::default().size_full())
             .into_any_element()
     }));
+}
+
+/// Registers Loupe like [`init`], starting from the app's own `settings`.
+/// The user can still change them for the session, in the settings popover
+/// or the palette.
+///
+/// ```ignore
+/// gpui_inspector::init_with(
+///     cx,
+///     LoupeSettings {
+///         editor: Editor::VsCode.into(),
+///         budget: FrameBudget::Hz120,
+///         ..LoupeSettings::default()
+///     },
+/// );
+/// ```
+pub fn init_with(cx: &mut App, settings: LoupeSettings) {
+    cx.set_global(settings);
+    init(cx);
+}
+
+/// Every key binding Loupe registers: the global shortcuts, then the ones
+/// that apply inside Loupe (see `DESIGN.md`, "Keys").
+pub(crate) fn key_bindings() -> Vec<KeyBinding> {
+    let mut bindings = vec![
+        KeyBinding::new(commands::keys::TOGGLE, ToggleInspector, None),
+        KeyBinding::new(commands::keys::PICK, TogglePick, None),
+        KeyBinding::new(commands::keys::HOLD, ToggleHold, None),
+    ];
+    bindings.extend(loupe::key_bindings());
+    bindings
 }
 
 /// Handles a global action on the active window. Global shortcuts are
