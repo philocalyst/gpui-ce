@@ -3,11 +3,13 @@
 
 use super::*;
 use crate::{
-    self as gpui, AnyElement, App, AppContext as _, Bounds, Context, Entity, EntityId, Hsla,
-    InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Pixels, Point, Render,
-    ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
-    StyleRefinement, Styled as _, TestAppContext, TouchPhase, VisualTestContext, Window,
-    WindowControlArea, blue, deferred, div, point, px, red, size, uniform_list,
+    self as gpui, AnyElement, AnyView, App, AppContext as _, Bounds, Context, Entity, EntityId,
+    Hsla, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Pixels, Point,
+    Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, TestAppContext, TouchPhase,
+    VisualTestContext, Window, WindowControlArea, blue, deferred, div, point,
+    proptest::{collection::vec, prelude::*},
+    px, red, size, uniform_list,
 };
 use std::{cell::RefCell, panic::Location, rc::Rc, sync::Arc};
 
@@ -2080,4 +2082,399 @@ fn the_app_renders_when_the_capture_asks_for_more(cx: &mut TestAppContext) {
     dock.update(cx, |_, cx| cx.notify());
     assert!(app_replayed(cx));
     assert_eq!(renders(&view, cx).0, rendered.0 + 2);
+}
+
+/// A model the inspector's UI creates along with it.
+struct DockModel(usize);
+
+/// The inspector's UI as Loupe builds it: created on the inspector's first
+/// draw, with a model it reads and observes (a cached view only renders
+/// again when it is notified), and drawn cached.
+struct DockView {
+    model: Entity<DockModel>,
+    renders: usize,
+    _observation: gpui::Subscription,
+}
+
+impl Render for DockView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.renders += 1;
+        let value = self.model.read(cx).0;
+        div().size_full().child(format!("dock {value}"))
+    }
+}
+
+type CreatedDock = Rc<RefCell<Option<(Entity<DockView>, Entity<DockModel>)>>>;
+
+fn created_dock(cx: &mut VisualTestContext) -> CreatedDock {
+    let dock: CreatedDock = Rc::default();
+    let slot = dock.clone();
+    cx.update(|_, cx| {
+        cx.set_inspector_renderer(Box::new(move |inspector, _, cx| {
+            let (view, model) = inspector
+                .ui_state(|| {
+                    let model = cx.new(|_| DockModel(0));
+                    let view = cx.new(|cx| DockView {
+                        model: model.clone(),
+                        renders: 0,
+                        _observation: cx.observe(&model, |_, _, cx| cx.notify()),
+                    });
+                    (view, model)
+                })
+                .clone();
+            *slot.borrow_mut() = Some((view.clone(), model));
+            AnyView::from(view)
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element()
+        }))
+    });
+    dock
+}
+
+#[gpui::test]
+fn the_inspectors_ui_stays_invalidated_through_a_stream_of_app_frames(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| Nested::new());
+    let dock = created_dock(cx);
+    open(cx);
+    let (dock, model) = dock.borrow().clone().expect("the dock rendered");
+    let dock_renders = |cx: &mut VisualTestContext| dock.read_with(cx, |dock, _| dock.renders);
+    let rendered = dock_renders(cx);
+
+    // Frame after frame of the app: the dock's cached UI is reused.
+    for _ in 0..3 {
+        view.update(cx, |_, cx| cx.notify());
+        assert!(!latest_frame(cx).inspector_only);
+    }
+    assert_eq!(dock_renders(cx), rendered);
+
+    // What the dock reads changes: it renders on the next frame.
+    model.update(cx, |model, cx| {
+        model.0 = 1;
+        cx.notify();
+    });
+    assert_eq!(dock_renders(cx), rendered + 1);
+    assert!(painted(cx, "dock 1"));
+
+    // So does notifying the dock itself, after more of the app's frames.
+    for _ in 0..3 {
+        view.update(cx, |_, cx| cx.notify());
+    }
+    dock.update(cx, |_, cx| cx.notify());
+    assert_eq!(dock_renders(cx), rendered + 2);
+}
+
+/// A view of as many lines of text as it holds.
+struct Lines(usize);
+
+impl Render for Lines {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .children((0..self.0).map(|ix| format!("line {ix}")))
+    }
+}
+
+/// An app whose (uncached) root draws some text and a cached view of lines.
+struct Host {
+    lines: Entity<Lines>,
+}
+
+impl Render for Host {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child("host").child(
+            self.lines
+                .clone()
+                .cached(StyleRefinement::default().w(px(200.)).h(px(200.))),
+        )
+    }
+}
+
+/// Everything the latest frame painted, in paint order.
+fn painted_scene(cx: &mut VisualTestContext) -> (String, Vec<crate::PaintedText>) {
+    cx.update(|window, _| {
+        (
+            format!("{:?}", window.painted_quads()),
+            window.painted_text().to_vec(),
+        )
+    })
+}
+
+#[gpui::test]
+fn a_cached_view_is_reused_correctly_after_a_replayed_frame(cx: &mut TestAppContext) {
+    let (host, cx) = cx.add_window_view(|_, cx| Host {
+        lines: cx.new(|_| Lines(3)),
+    });
+    // The inspector's UI lays out as many lines as `dock_lines` says, so
+    // its share of the frame's line layouts changes from frame to frame.
+    let dock_lines = Rc::new(std::cell::Cell::new(20));
+    cx.update(|_, cx| {
+        let dock_lines = dock_lines.clone();
+        cx.set_inspector_renderer(Box::new(move |_, _, _| {
+            div()
+                .children((0..dock_lines.get()).map(|ix| format!("dock {ix}")))
+                .into_any_element()
+        }))
+    });
+    open(cx);
+    let inspector = cx.update(|window, _| window.inspector_entity().unwrap());
+    let lines = host.read_with(cx, |host, _| host.lines.clone());
+
+    // The cached view renders, painting after the inspector's 20 lines.
+    lines.update(cx, |_, cx| cx.notify());
+    // The inspector draws alone, with fewer lines: the app is replayed.
+    dock_lines.set(2);
+    inspector.update(cx, |_, cx| cx.notify());
+    assert!(app_replayed(cx));
+    // The app draws again and reuses the cached view from the replayed frame.
+    host.update(cx, |_, cx| cx.notify());
+    assert!(!app_replayed(cx));
+    let frame = latest_frame(cx);
+    assert_eq!(
+        view_outcomes(&frame),
+        [
+            ("Host", ViewOutcome::Rendered),
+            ("Lines", ViewOutcome::Cached)
+        ]
+    );
+    let reused = painted_scene(cx);
+    assert!(
+        reused.1.iter().any(|line| line.text == "line 2"),
+        "{:?}",
+        reused.1
+    );
+
+    // Exactly what a fresh render paints.
+    cx.update(|window, _| window.refresh_with_inspector());
+    assert_eq!(painted_scene(cx), reused);
+}
+
+/// Labeled lines of text.
+struct Labeled {
+    label: &'static str,
+    lines: usize,
+}
+
+impl Render for Labeled {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let label = self.label;
+        div()
+            .flex()
+            .flex_col()
+            .children((0..self.lines).map(move |ix| format!("{label} {ix}")))
+    }
+}
+
+/// A cached view with lines of its own above a nested cached view.
+struct Nest {
+    lines: usize,
+    inner: Entity<Labeled>,
+}
+
+impl Render for Nest {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(80.))
+                    .overflow_hidden()
+                    .children((0..self.lines).map(|ix| format!("nest {ix}"))),
+            )
+            .child(
+                self.inner
+                    .clone()
+                    .cached(StyleRefinement::default().w(px(200.)).h(px(80.))),
+            )
+    }
+}
+
+/// The app's (uncached) root: lines of its own, a [`Nest`] and a side view.
+struct Tree {
+    lines: usize,
+    nest: Entity<Nest>,
+    side: Entity<Labeled>,
+}
+
+impl Render for Tree {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(80.))
+                    .overflow_hidden()
+                    .children((0..self.lines).map(|ix| format!("root {ix}"))),
+            )
+            .child(
+                self.nest
+                    .clone()
+                    .cached(StyleRefinement::default().w(px(300.)).h(px(200.))),
+            )
+            .child(
+                self.side
+                    .clone()
+                    .cached(StyleRefinement::default().w(px(200.)).h(px(80.))),
+            )
+    }
+}
+
+/// One step of [`replays_keep_every_cached_view_in_step`].
+#[derive(Clone, Debug)]
+enum Step {
+    /// A view of the app changes its line count.
+    Root(usize),
+    Nest(usize),
+    Inner(usize),
+    Side(usize),
+    /// The inspector draws alone, with this many lines of its own.
+    Inspector(usize),
+    /// The app is held or released.
+    Hold(bool),
+}
+
+/// How many lines each view of the [`Tree`] draws.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LineCounts {
+    root: usize,
+    nest: usize,
+    inner: usize,
+    side: usize,
+}
+
+impl LineCounts {
+    /// The app's text, in paint order.
+    fn text(&self) -> Vec<String> {
+        [
+            ("root", self.root),
+            ("nest", self.nest),
+            ("inner", self.inner),
+            ("side", self.side),
+        ]
+        .into_iter()
+        .flat_map(|(label, lines)| (0..lines).map(move |ix| format!("{label} {ix}")))
+        .collect()
+    }
+}
+
+fn step_strategy() -> impl Strategy<Value = Step> {
+    let lines = || 0..5usize;
+    prop_oneof![
+        lines().prop_map(Step::Root),
+        lines().prop_map(Step::Nest),
+        lines().prop_map(Step::Inner),
+        lines().prop_map(Step::Side),
+        (0..30usize).prop_map(Step::Inspector),
+        any::<bool>().prop_map(Step::Hold),
+    ]
+}
+
+proptest! {
+    #![proptest_config(gpui::apply_seed_to_proptest_config(ProptestConfig::with_cases(64)))]
+
+    /// Whatever mix of app frames, frames the inspector draws alone (which
+    /// replay the app) and holds, every frame paints the app as it is (as it
+    /// was when held), and reusing cached views never reads out of range.
+    #[test]
+    fn replays_keep_every_cached_view_in_step(steps in vec(step_strategy(), 1..32)) {
+        gpui::run_test_once(0, Box::new(move |dispatcher| {
+            let mut cx = TestAppContext::build(dispatcher, None);
+            check_replays(&mut cx, steps);
+            cx.quit();
+        }));
+    }
+}
+
+fn check_replays(cx: &mut TestAppContext, steps: Vec<Step>) {
+    let (tree, cx) = cx.add_window_view(|_, cx| Tree {
+        lines: 1,
+        nest: cx.new(|cx| Nest {
+            lines: 1,
+            inner: cx.new(|_| Labeled {
+                label: "inner",
+                lines: 1,
+            }),
+        }),
+        side: cx.new(|_| Labeled {
+            label: "side",
+            lines: 1,
+        }),
+    });
+    let dock_lines = Rc::new(std::cell::Cell::new(3));
+    cx.update(|_, cx| {
+        let dock_lines = dock_lines.clone();
+        cx.set_inspector_renderer(Box::new(move |_, _, _| {
+            div()
+                .children((0..dock_lines.get()).map(|ix| format!("dock {ix}")))
+                .into_any_element()
+        }))
+    });
+    open(cx);
+    let inspector = cx.update(|window, _| window.inspector_entity().unwrap());
+    let (nest, side) = tree.read_with(cx, |tree, _| (tree.nest.clone(), tree.side.clone()));
+    let inner = nest.read_with(cx, |nest, _| nest.inner.clone());
+    let mut lines = LineCounts {
+        root: 1,
+        nest: 1,
+        inner: 1,
+        side: 1,
+    };
+    let mut shown = lines;
+    let mut held = false;
+    for step in steps {
+        match step {
+            Step::Root(count) => {
+                lines.root = count;
+                tree.update(cx, |tree, cx| {
+                    tree.lines = count;
+                    cx.notify();
+                });
+            }
+            Step::Nest(count) => {
+                lines.nest = count;
+                nest.update(cx, |nest, cx| {
+                    nest.lines = count;
+                    cx.notify();
+                });
+            }
+            Step::Inner(count) => {
+                lines.inner = count;
+                inner.update(cx, |inner, cx| {
+                    inner.lines = count;
+                    cx.notify();
+                });
+            }
+            Step::Side(count) => {
+                lines.side = count;
+                side.update(cx, |side, cx| {
+                    side.lines = count;
+                    cx.notify();
+                });
+            }
+            Step::Inspector(count) => {
+                dock_lines.set(count);
+                inspector.update(cx, |_, cx| cx.notify());
+            }
+            Step::Hold(hold) => {
+                held = hold;
+                cx.update(|window, cx| window.set_inspector_holding(hold, cx));
+            }
+        }
+        if !held {
+            shown = lines;
+        }
+        let painted: Vec<String> = cx.update(|window, _| {
+            window
+                .painted_text()
+                .iter()
+                .map(|line| line.text.to_string())
+                .filter(|text| !text.starts_with("dock"))
+                .collect()
+        });
+        assert_eq!(painted, shown.text(), "after {step:?}");
+    }
 }
