@@ -125,6 +125,7 @@ fn shell_renders_every_surface_in_both_themes() {
         cx.set_global(LoupeSettings {
             appearance: Appearance::Dark,
             density: Density::Comfortable,
+            ..LoupeSettings::default()
         })
     });
     harness.draw();

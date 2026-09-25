@@ -4,8 +4,8 @@
 //! [`gpui::inspector`]: no views, no window access. Lenses call these
 //! functions (memoized per capture generation, never per render) to turn raw
 //! records into answers: statistics, "why this size", flame layouts,
-//! bottom-up tables, insights, audit findings, trace exports and style
-//! patches.
+//! bottom-up tables, insights, audit findings, trace exports, style
+//! patches and source links.
 
 pub mod audit;
 pub mod bottom_up;
@@ -14,6 +14,7 @@ pub mod flame;
 pub mod format;
 pub mod insights;
 pub mod rust_patch;
+pub mod source;
 pub mod stats;
 pub mod style_grid;
 pub mod trace;
