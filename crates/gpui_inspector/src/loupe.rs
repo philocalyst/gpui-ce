@@ -802,6 +802,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new(keys::FREEZE, ToggleFreeze, Some("Loupe && !EditableText")),
     ]);
     widgets::bind_keys(LOUPE_CONTEXT, cx);
+    crate::lenses::bind_keys(cx);
 }
 
 pub(crate) fn toggle_pick(window: &mut Window) {
