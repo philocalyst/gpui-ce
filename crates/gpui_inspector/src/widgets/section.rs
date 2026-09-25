@@ -1,6 +1,9 @@
 //! Section headers: an uppercase, tracked label with an optional trailing action.
 
-use crate::theme::{Theme, UI_FONT};
+use crate::{
+    theme::{Theme, UI_FONT},
+    widgets::{Icon, IconName},
+};
 use gpui::{
     AnyElement, App, FontWeight, IntoElement, RenderOnce, SharedString, Styled, Window, div,
     prelude::*, px,
@@ -13,6 +16,7 @@ pub struct SectionHeader {
     detail: Option<SharedString>,
     actions: Vec<AnyElement>,
     rule: bool,
+    disclosure: Option<bool>,
 }
 
 impl SectionHeader {
@@ -23,6 +27,7 @@ impl SectionHeader {
             detail: None,
             actions: Vec::new(),
             rule: false,
+            disclosure: None,
         }
     }
 
@@ -43,6 +48,13 @@ impl SectionHeader {
         self.rule = true;
         self
     }
+
+    /// Shows a disclosure chevron before the label, for collapsible
+    /// sections (the owner handles the click).
+    pub fn disclosure(mut self, expanded: bool) -> Self {
+        self.disclosure = Some(expanded);
+        self
+    }
 }
 
 impl RenderOnce for SectionHeader {
@@ -59,6 +71,15 @@ impl RenderOnce for SectionHeader {
                 this.border_t_1().border_color(theme.colors.line)
             })
             .font_family(UI_FONT)
+            .children(self.disclosure.map(|expanded| {
+                Icon::new(if expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size(px(10.))
+                .color(theme.colors.text_faint)
+            }))
             .child(
                 div()
                     .flex_none()

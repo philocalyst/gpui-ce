@@ -80,11 +80,25 @@ pub enum IconName {
     Command,
     /// Small solid triangle pointing up: over budget.
     TriangleUp,
+    /// Mouse pointer: clickable.
+    Cursor,
+    /// Viewfinder corners: focusable.
+    Focus,
+    /// Vertical double arrow: scrolls.
+    Scroll,
+    /// Keyboard: key or action listeners.
+    Keyboard,
+    /// Counter-clockwise arrow: revert.
+    Revert,
+    /// Plus: add.
+    Plus,
+    /// Clock face: an earlier point in time.
+    Clock,
 }
 
 impl IconName {
     /// Every glyph, for galleries and pickers.
-    pub const ALL: [IconName; 28] = [
+    pub const ALL: [IconName; 35] = [
         IconName::Pick,
         IconName::Outline,
         IconName::Flash,
@@ -113,6 +127,13 @@ impl IconName {
         IconName::Entity,
         IconName::Command,
         IconName::TriangleUp,
+        IconName::Cursor,
+        IconName::Focus,
+        IconName::Scroll,
+        IconName::Keyboard,
+        IconName::Revert,
+        IconName::Plus,
+        IconName::Clock,
     ];
 
     /// A stable name, also the sprite atlas key.
@@ -146,6 +167,13 @@ impl IconName {
             IconName::Entity => "loupe/entity",
             IconName::Command => "loupe/command",
             IconName::TriangleUp => "loupe/triangle-up",
+            IconName::Cursor => "loupe/cursor",
+            IconName::Focus => "loupe/focus",
+            IconName::Scroll => "loupe/scroll",
+            IconName::Keyboard => "loupe/keyboard",
+            IconName::Revert => "loupe/revert",
+            IconName::Plus => "loupe/plus",
+            IconName::Clock => "loupe/clock",
         }
     }
 
@@ -212,6 +240,25 @@ impl IconName {
             ),
             IconName::Command => glyph!(r##"<path d="M3.4 4.4 7 8l-3.6 3.6M8.6 11.8h4"/>"##),
             IconName::TriangleUp => glyph!(r##"<path d="M8 3.6 13.2 12H2.8z" fill="#000"/>"##),
+            IconName::Cursor => glyph!(
+                r##"<path d="M3.6 2.2v10.4l2.9-2.7 2 4.2 1.9-.9-2-4.1h4z" fill="#000" fill-opacity=".2"/>"##
+            ),
+            IconName::Focus => glyph!(
+                r##"<path d="M2 5.4V3a1 1 0 0 1 1-1h2.4M10.6 2H13a1 1 0 0 1 1 1v2.4M14 10.6V13a1 1 0 0 1-1 1h-2.4M5.4 14H3a1 1 0 0 1-1-1v-2.4"/><circle cx="8" cy="8" r="1.7" fill="#000" stroke="none"/>"##
+            ),
+            IconName::Scroll => {
+                glyph!(r##"<path d="M8 2.2v11.6M5 5 8 2.2 11 5M5 11 8 13.8 11 11"/>"##)
+            }
+            IconName::Keyboard => glyph!(
+                r##"<rect x="1.6" y="3.8" width="12.8" height="8.4" rx="1.4"/><path d="M4.5 6.7h.01M7 6.7h.01M9.5 6.7h.01M11.8 6.7h.01M5.2 9.4h5.6"/>"##
+            ),
+            IconName::Revert => {
+                glyph!(r##"<path d="M3.2 7.2a5 5 0 1 1 1.4 4.3"/><path d="M2.6 3.4v3.9h3.9"/>"##)
+            }
+            IconName::Plus => glyph!(r##"<path d="M8 3v10M3 8h10"/>"##),
+            IconName::Clock => {
+                glyph!(r##"<circle cx="8" cy="8" r="6.1"/><path d="M8 4.6V8l2.4 1.6"/>"##)
+            }
         }
     }
 }

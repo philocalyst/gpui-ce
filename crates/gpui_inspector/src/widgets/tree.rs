@@ -18,7 +18,7 @@ use crate::{
 };
 use gpui::{
     Action, AnyElement, App, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, RenderOnce, ScrollStrategy, Styled, UniformListScrollHandle, Window, div,
+    IntoElement, Pixels, RenderOnce, ScrollStrategy, Styled, UniformListScrollHandle, Window, div,
     prelude::*, px, uniform_list,
 };
 use std::{
@@ -342,6 +342,14 @@ impl<K: Clone + Eq + Hash + 'static> TreeState<K> {
     /// The row under the pointer.
     pub fn hovered(&self) -> Option<&K> {
         self.hovered.as_ref()
+    }
+
+    /// How far the rows are scrolled down (zero at the top). Owners that
+    /// pin something over the list, like a breadcrumb of the first visible
+    /// row's ancestors, read it while rendering: scrolling re-renders the
+    /// view that contains the tree.
+    pub fn scroll_top(&self) -> Pixels {
+        (-self.scroll.0.borrow().base_handle.offset().y).max(Pixels::ZERO)
     }
 
     fn scroll_to_selection(&self) {
