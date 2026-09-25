@@ -5,7 +5,7 @@
 //! `320×24`, `issue_list.rs:52`.
 
 use gpui::{
-    Pixels, Point, Size,
+    Hsla, Pixels, Point, Size, hsla_to_rgba,
     inspector::{ElementKind, ElementRecord, short_type_name},
 };
 use std::{borrow::Cow, panic::Location, time::Duration};
@@ -160,6 +160,23 @@ pub fn size(size: Size<Pixels>) -> String {
 /// Formats a point as `(x, y)`: `(120, 44)`.
 pub fn point(point: Point<Pixels>) -> String {
     format!("({}, {})", pixels(point.x), pixels(point.y))
+}
+
+/// Formats a color as hex: `#3366ff`, or `#3366ff80` when translucent.
+pub fn color(color: Hsla) -> String {
+    let rgba = hsla_to_rgba(color);
+    let byte = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let (red, green, blue, alpha) = (
+        byte(rgba.color.red),
+        byte(rgba.color.green),
+        byte(rgba.color.blue),
+        byte(rgba.alpha),
+    );
+    if alpha == u8::MAX {
+        format!("#{red:02x}{green:02x}{blue:02x}")
+    } else {
+        format!("#{red:02x}{green:02x}{blue:02x}{alpha:02x}")
+    }
 }
 
 /// Formats how long ago `then` happened, seen from `now` (both offsets from
@@ -484,6 +501,15 @@ mod tests {
         assert_eq!(size(gpui_size(px(0.), px(10.5))), "0×10.5");
         assert_eq!(point(gpui_point(px(120.), px(44.))), "(120, 44)");
         assert_eq!(pixels(px(7.25)), "7.3");
+    }
+
+    #[test]
+    fn colors_print_as_hex() {
+        use gpui::{hsla, rgb, rgb_to_hsla, rgba};
+        assert_eq!(color(rgb_to_hsla(rgb(0x3366ff))), "#3366ff");
+        assert_eq!(color(rgb_to_hsla(rgba(0x3366ff80))), "#3366ff80");
+        assert_eq!(color(hsla(0., 0., 0., 0.)), "#00000000");
+        assert_eq!(color(gpui::white()), "#ffffff");
     }
 
     #[test]
