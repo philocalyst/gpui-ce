@@ -11,7 +11,8 @@ use crate::{
     AnyView, AnyWindowHandle, App, AppCell, AppContext, AssetRegistry, AssetSource,
     BackgroundExecutor, Bounds, Context, Entity, EntityId, EventEmitter, ForegroundExecutor,
     Global, Pixels, PlatformHeadlessRenderer, PlatformTextSystem, Render, Reservation, Size, Task,
-    TestDispatcher, TestPlatform, TextSystem, Window, WindowBounds, WindowHandle, WindowOptions,
+    TestDispatcher, TestPlatform, TestWindow, TextSystem, Window, WindowAppearance, WindowBounds,
+    WindowHandle, WindowOptions,
     app::{GpuiBorrow, GpuiMode},
 };
 use anyhow::Result;
@@ -171,6 +172,47 @@ impl HeadlessAppContext {
     pub fn capture_screenshot(&mut self, window: AnyWindowHandle) -> Result<RgbaImage> {
         let mut app = self.app.borrow_mut();
         app.update_window(window, |_, window, _| window.render_to_image())?
+    }
+
+    /// Changes the display scale factor of a window (2.0 by default), as
+    /// moving it to another display would. Screenshots follow the new scale.
+    pub fn simulate_scale_factor_change(
+        &mut self,
+        window: AnyWindowHandle,
+        scale_factor: f32,
+    ) -> Result<()> {
+        self.test_window(window)?
+            .simulate_scale_factor_change(scale_factor);
+        Ok(())
+    }
+
+    /// Changes the system appearance (light or dark) reported to a window.
+    /// Appearance observers run once pending tasks do, e.g. on
+    /// [`run_until_parked`](Self::run_until_parked).
+    pub fn simulate_appearance_change(
+        &mut self,
+        window: AnyWindowHandle,
+        appearance: WindowAppearance,
+    ) -> Result<()> {
+        self.test_window(window)?
+            .simulate_appearance_change(appearance);
+        Ok(())
+    }
+
+    /// The `TestWindow` behind a window. Cloned out so that its simulated
+    /// platform callbacks can borrow the app.
+    fn test_window(&self, window: AnyWindowHandle) -> Result<TestWindow> {
+        let mut app = self.app.borrow_mut();
+        let window = app
+            .windows
+            .get_mut(window.id)
+            .and_then(|window| window.as_deref_mut())
+            .ok_or_else(|| anyhow::anyhow!("window not found"))?;
+        window
+            .platform_window
+            .as_test()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("not a test window"))
     }
 
     /// Returns the text system.
