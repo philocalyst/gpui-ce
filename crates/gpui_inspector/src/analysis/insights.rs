@@ -164,6 +164,11 @@ pub struct ViewActivity {
     pub slowest: Duration,
     /// The frame of its longest render.
     pub slowest_frame: u64,
+    /// Its longest render without the views nested in it
+    /// ([`bottom_up::self_times`]): what the view itself cost.
+    pub heaviest_self: Duration,
+    /// The frame of that render.
+    pub heaviest_self_frame: u64,
 }
 
 /// Per-entity view activity over `frames` (app frames only), most rendered first.
@@ -173,7 +178,8 @@ pub fn view_activity<'a>(frames: impl IntoIterator<Item = &'a FrameRecord>) -> V
     for frame in frames.into_iter().filter(|frame| !frame.inspector_only) {
         let scene_unchanged = previous_scene == Some(frame.scene);
         previous_scene = Some(frame.scene);
-        for view in &frame.views {
+        let self_times = bottom_up::self_times(&frame.views);
+        for (view, self_time) in frame.views.iter().zip(self_times) {
             let entry = activity.entry(view.entity).or_insert_with(|| ViewActivity {
                 entity: view.entity,
                 type_name: view.type_name,
@@ -184,6 +190,8 @@ pub fn view_activity<'a>(frames: impl IntoIterator<Item = &'a FrameRecord>) -> V
                 element: None,
                 slowest: Duration::ZERO,
                 slowest_frame: frame.id,
+                heaviest_self: Duration::ZERO,
+                heaviest_self_frame: frame.id,
             });
             entry.latest_frame = frame.id;
             let element = frame
@@ -200,6 +208,10 @@ pub fn view_activity<'a>(frames: impl IntoIterator<Item = &'a FrameRecord>) -> V
                     if view.duration > entry.slowest {
                         entry.slowest = view.duration;
                         entry.slowest_frame = frame.id;
+                    }
+                    if self_time > entry.heaviest_self {
+                        entry.heaviest_self = self_time;
+                        entry.heaviest_self_frame = frame.id;
                     }
                 }
             }

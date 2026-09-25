@@ -27,7 +27,10 @@ pub(crate) struct TestPlatform {
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
 
-    pub(crate) active_window: RefCell<Option<TestWindow>>,
+    /// Weak, so a closed window is dropped (with its input handler and the
+    /// entities that holds) even while it is still the active one.
+    pub(crate) active_window:
+        RefCell<Option<std::rc::Weak<Mutex<crate::platform::test::TestWindowState>>>>,
     active_display: Rc<dyn PlatformDisplay>,
     active_cursor: Mutex<CursorStyle>,
     current_clipboard_item: Mutex<Option<ClipboardItem>>,
@@ -294,8 +297,13 @@ impl TestPlatform {
 
     pub(crate) fn set_active_window(&self, window: Option<TestWindow>) {
         let executor = self.foreground_executor();
-        let previous_window = self.active_window.borrow_mut().take();
-        self.active_window.borrow_mut().clone_from(&window);
+        let previous_window = self
+            .active_window
+            .borrow_mut()
+            .take()
+            .and_then(|window| window.upgrade())
+            .map(TestWindow);
+        *self.active_window.borrow_mut() = window.as_ref().map(|window| Rc::downgrade(&window.0));
 
         executor
             .spawn(async move {
@@ -446,7 +454,8 @@ impl Platform for TestPlatform {
         self.active_window
             .borrow()
             .as_ref()
-            .map(|window| window.0.lock().handle)
+            .and_then(|window| window.upgrade())
+            .map(|window| window.lock().handle)
     }
 
     fn open_window(

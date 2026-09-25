@@ -32,5 +32,10 @@ smallvec.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["inspector", "test-support"] }
+gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 gpui_inspector = { path = ".", package = "gpui_ce_inspector", features = ["test-support"] }
 gpui_wgpu = { workspace = true, features = ["test-support"] }
+
+[[example]]
+name = "loupe_demo"
+path = "examples/loupe_demo/main.rs"

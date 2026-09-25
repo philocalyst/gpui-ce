@@ -298,6 +298,14 @@ impl<K: Clone + Eq + Hash + 'static> TableState<K> {
         cx.notify();
     }
 
+    /// Clears the selection, without emitting an event.
+    pub fn deselect(&mut self, cx: &mut Context<Self>) {
+        if self.model.selected().is_some() {
+            self.model.select(None);
+            cx.notify();
+        }
+    }
+
     fn scroll_to_selection(&self) {
         if let Some(row) = self.model.selected_row() {
             self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);

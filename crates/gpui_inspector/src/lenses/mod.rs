@@ -15,18 +15,24 @@
 //!   right docks, side by side otherwise).
 
 mod audit;
+mod capture;
 mod elements;
 mod entities;
 mod events;
 mod frames;
+mod highlights;
+mod links;
+mod memo;
 
 pub(crate) use audit::AuditLens;
 pub(crate) use elements::ElementsLens;
 pub(crate) use entities::{EntitiesLens, entity_label, entity_names};
 pub(crate) use events::EventsLens;
+pub use frames::ExportDirectory;
 pub(crate) use frames::FramesLens;
 
 use crate::{
+    analysis::Severity,
     state::{Lens, LensLayout, LoupeState},
     theme::{MONO_FONT, Theme, UI_FONT},
     widgets::{EmptyState, IconName, SectionHeader, Tone},
@@ -35,6 +41,22 @@ use gpui::{
     AnyView, App, AppContext as _, Context, Entity, FontWeight, IntoElement, Render, RenderOnce,
     SharedString, Styled, Window, div, prelude::*, px,
 };
+
+/// Binds the lenses' own keys (each within its lens' key context).
+pub(crate) fn bind_keys(cx: &mut App) {
+    frames::bind_keys(cx);
+    audit::bind_keys(cx);
+}
+
+/// The glyph and tone of a finding's severity: circled `i`, triangle,
+/// octagon, so severity reads without color too.
+pub(crate) fn severity_glyph(severity: Severity) -> (IconName, Tone) {
+    match severity {
+        Severity::Info => (IconName::Info, Tone::Accent),
+        Severity::Warning => (IconName::Warning, Tone::Warn),
+        Severity::Critical => (IconName::Critical, Tone::Crit),
+    }
+}
 
 /// Re-renders the calling view whenever the shared state changes. Cached
 /// views are not invalidated by merely reading an entity, so every lens
@@ -146,12 +168,6 @@ impl Fact {
             value: value.into(),
             tone: Tone::Neutral,
         }
-    }
-
-    /// Tints the value.
-    pub fn tone(mut self, tone: Tone) -> Self {
-        self.tone = tone;
-        self
     }
 }
 

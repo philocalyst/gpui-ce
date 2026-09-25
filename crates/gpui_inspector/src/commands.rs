@@ -21,7 +21,7 @@ impl DockSide {
     /// The side of `dock`.
     pub fn of(dock: InspectorDock) -> Self {
         match dock {
-            InspectorDock::Right { .. } => DockSide::Right,
+            InspectorDock::Right { .. } | InspectorDock::Hidden => DockSide::Right,
             InspectorDock::Bottom { .. } => DockSide::Bottom,
         }
     }
@@ -36,6 +36,10 @@ pub enum Command {
     ToggleOverlay(OverlayModes),
     /// Freeze or resume recording.
     ToggleFreeze,
+    /// Hold the app still, or release it.
+    ToggleHold,
+    /// Hold the app after a short delay, so a hover menu can be opened first.
+    HoldSoon,
     /// Dock on a side.
     Dock(DockSide),
     /// Switch between the right and bottom docks.
@@ -86,6 +90,12 @@ pub(crate) mod keys {
     };
     /// Freezes recording.
     pub const FREEZE: &str = "space";
+    /// Holds the app; global, since the pointer is usually over the app.
+    pub const HOLD: &str = if cfg!(target_os = "macos") {
+        "cmd-shift-h"
+    } else {
+        "ctrl-shift-h"
+    };
     /// Shows a lens, by rail position.
     pub const LENSES: [&str; 5] = ["alt-1", "alt-2", "alt-3", "alt-4", "alt-5"];
 }
@@ -93,7 +103,12 @@ pub(crate) mod keys {
 impl Command {
     /// Every command the palette offers, in a sensible browsing order.
     pub fn all() -> Vec<Command> {
-        let mut commands = vec![Command::TogglePick, Command::ToggleFreeze];
+        let mut commands = vec![
+            Command::TogglePick,
+            Command::ToggleFreeze,
+            Command::ToggleHold,
+            Command::HoldSoon,
+        ];
         commands.extend(Lens::ALL.map(Command::ShowLens));
         commands.extend(OVERLAYS.map(Command::ToggleOverlay));
         commands.extend([
@@ -116,6 +131,8 @@ impl Command {
             Command::TogglePick => "Pick an element",
             Command::ToggleOverlay(mode) => overlay_label(mode),
             Command::ToggleFreeze => "Freeze recording",
+            Command::ToggleHold => "Hold the app",
+            Command::HoldSoon => "Hold the app in 3 seconds",
             Command::Dock(DockSide::Right) => "Dock right",
             Command::Dock(DockSide::Bottom) => "Dock bottom",
             Command::ToggleDock => "Move dock",
@@ -140,6 +157,7 @@ impl Command {
         match self {
             Command::TogglePick => Some(keys::PICK),
             Command::ToggleFreeze => Some(keys::FREEZE),
+            Command::ToggleHold => Some(keys::HOLD),
             Command::ShowLens(lens) => Some(keys::LENSES[lens.index()]),
             Command::OpenPalette => Some(keys::PALETTE),
             Command::Close => Some(keys::TOGGLE),
@@ -158,11 +176,13 @@ impl Command {
             Command::TogglePick => Some(capture.pick().active),
             Command::ToggleOverlay(mode) => Some(capture.overlay().modes.contains(mode)),
             Command::ToggleFreeze => Some(capture.is_frozen()),
+            Command::ToggleHold => Some(capture.is_holding()),
             Command::Dock(side) => Some(DockSide::of(capture.dock()) == side),
             Command::ShowLens(lens) => Some(state.lens() == lens),
             Command::SetAppearance(appearance) => Some(settings.appearance == appearance),
             Command::SetDensity(density) => Some(settings.density == density),
             Command::ToggleDock
+            | Command::HoldSoon
             | Command::ClearRecording
             | Command::OpenPalette
             | Command::Close => None,

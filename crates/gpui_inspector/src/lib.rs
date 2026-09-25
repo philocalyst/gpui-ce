@@ -27,6 +27,7 @@ use gpui::{
 use std::borrow::Cow;
 
 pub use commands::{Command, DockSide};
+pub use lenses::ExportDirectory;
 pub use loupe::{Loupe, REFRESH_INTERVAL};
 pub use palette::fuzzy;
 pub use state::{Filters, Lens, LensLayout, LoupeState};
@@ -39,6 +40,8 @@ actions!(
         ToggleInspector,
         /// Starts or stops picking an element in the app.
         TogglePick,
+        /// Holds the app still (or releases it) so it can be inspected as is.
+        ToggleHold,
     ]
 );
 
@@ -63,27 +66,22 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new(commands::keys::TOGGLE, ToggleInspector, None),
         KeyBinding::new(commands::keys::PICK, TogglePick, None),
+        KeyBinding::new(commands::keys::HOLD, ToggleHold, None),
     ]);
     loupe::bind_keys(cx);
 
-    cx.on_action(|_: &ToggleInspector, cx| {
-        if let Some(window) = cx.active_window() {
-            window
-                .update(cx, |_, window, cx| window.toggle_inspector(cx))
-                .ok();
+    on_active_window::<ToggleInspector>(cx, |window, cx| window.toggle_inspector(cx));
+    on_active_window::<TogglePick>(cx, |window, cx| {
+        if !window.is_inspector_open() {
+            window.toggle_inspector(cx);
         }
+        loupe::toggle_pick(window);
     });
-    cx.on_action(|_: &TogglePick, cx| {
-        if let Some(window) = cx.active_window() {
-            window
-                .update(cx, |_, window, cx| {
-                    if !window.is_inspector_open() {
-                        window.toggle_inspector(cx);
-                    }
-                    loupe::toggle_pick(window);
-                })
-                .ok();
+    on_active_window::<ToggleHold>(cx, |window, cx| {
+        if !window.is_inspector_open() {
+            window.toggle_inspector(cx);
         }
+        loupe::toggle_hold(window, cx);
     });
 
     cx.set_inspector_renderer(Box::new(|inspector, window, cx| {
@@ -95,4 +93,23 @@ pub fn init(cx: &mut App) {
             .cached(StyleRefinement::default().size_full())
             .into_any_element()
     }));
+}
+
+/// Handles a global action on the active window. Global shortcuts are
+/// dispatched while that window is being updated, so the handler runs once
+/// the dispatch is over.
+fn on_active_window<A: gpui::Action>(
+    cx: &mut App,
+    handler: impl Fn(&mut gpui::Window, &mut App) + Copy + 'static,
+) {
+    cx.on_action(move |_: &A, cx| {
+        let Some(window) = cx.active_window() else {
+            return;
+        };
+        cx.defer(move |cx| {
+            if let Err(error) = window.update(cx, |_, window, cx| handler(window, cx)) {
+                log::warn!("loupe: {}: {error}", A::name_for_type());
+            }
+        });
+    });
 }
