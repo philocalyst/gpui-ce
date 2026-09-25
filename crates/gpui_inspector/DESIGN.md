@@ -83,7 +83,7 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
 | Trees | `ElementTree::{children, get, find, ancestors, owning_view, hit_test, rebuild_children}` |
 | Picking | `start_inspector_pick` / `stop_inspector_pick`; `InspectorEvent::{PickHovered, Picked, PickCancelled}` emitted on the `Inspector` entity |
 | Elements | `Window::inspect_current_element(f)` (Div, text, Img/Svg, lists report `ElementDetails`) |
-| Keys | `Window::inspector_resolve_keystrokes(&[Keystroke], cx) -> KeyResolution` (pure; verdicts `Wins`, `Shadowed`, `ContextMismatch`, `Disabled`, `Pending`, `Unhandled`) |
+| Keys | `Window::inspector_resolve_keystrokes(&[Keystroke], cx) -> KeyResolution` (pure; verdicts `Wins`, `Shadowed`, `ContextMismatch`, `Disabled`, `Pending`, `Unhandled`); `inspector_resolve_keystrokes_for(&[Keystroke], Option<&FocusHandle>, cx)` resolves as if another element (or nothing) had the focus |
 | Entities | `Window::inspector_entities(cx)` (use this from Loupe: it also sees the window being drawn) |
 | User spans | `gpui::inspector::span(name) -> SpanGuard`, `gpui::inspector_span!(name[, expr])` |
 | UI state | `Inspector::ui_state(init)` holds the per-window `Loupe` entity |
@@ -168,8 +168,10 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
 3. **Events** — *Where did my click go? What will this key do here?* Coalesced
    input log with filter chips and pause; selected event's hit path (click to
    select element), context stack, actions and whether handled; **Key tester**:
-   a capture box that resolves keystrokes via `inspector_resolve_keystrokes`
-   without dispatching, showing the winner and why each other binding loses.
+   a capture box that stops keys with a keystroke interceptor (before any
+   binding) and resolves them against the app's focus via
+   `inspector_resolve_keystrokes_for`, showing the winner and why each other
+   binding loses.
 4. **Entities** — *What's alive, who's watching it, who keeps poking it?*
    Sortable table (id, type, kind, refs, observers, notifies/s sparkline, last
    notify site); detail with 60 s sparkline, *Reveal in Elements*, *Notify*.

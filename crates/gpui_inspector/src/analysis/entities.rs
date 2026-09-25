@@ -311,10 +311,13 @@ pub fn columns_for_width(width: f32) -> Vec<EntityColumn> {
 pub fn compare(column: EntityColumn, a: &EntityRow, b: &EntityRow) -> Ordering {
     match column {
         EntityColumn::Id => a.id.as_u64().cmp(&b.id.as_u64()),
+        // Case-insensitive without allocating: sorting 2,000 rows compares
+        // tens of thousands of pairs.
         EntityColumn::Type => a
             .name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
+            .chars()
+            .flat_map(char::to_lowercase)
+            .cmp(b.name.chars().flat_map(char::to_lowercase))
             .then_with(|| a.type_name.cmp(b.type_name)),
         EntityColumn::Kind => a.is_view.cmp(&b.is_view),
         EntityColumn::Refs => a.strong_count.cmp(&b.strong_count),

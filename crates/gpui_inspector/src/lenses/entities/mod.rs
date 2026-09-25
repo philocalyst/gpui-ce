@@ -344,10 +344,12 @@ impl EntitiesLens {
         } else {
             self.rows.iter().filter(|row| row.loupe).count()
         };
+        // Loupe's own types are recognized by their crate; the editor state
+        // behind its text fields is a shared widget type and stays listed.
         let loupe_tooltip = match hidden {
-            0 => "List the views and state Loupe itself keeps alive".to_string(),
+            0 => "List Loupe's own views and state".to_string(),
             hidden => format!(
-                "List the {} entities Loupe itself keeps alive",
+                "List Loupe's own views and state ({} entities)",
                 format::count(hidden as u64)
             ),
         };
