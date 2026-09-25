@@ -13,6 +13,7 @@ pub mod contrast;
 pub mod flame;
 pub mod format;
 pub mod insights;
+pub mod rust_patch;
 pub mod stats;
 pub mod style_grid;
 pub mod trace;
