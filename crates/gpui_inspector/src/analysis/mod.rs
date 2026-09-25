@@ -9,6 +9,7 @@
 
 pub mod format;
 pub mod stats;
+pub mod why_size;
 
 #[cfg(test)]
 mod fixtures;
