@@ -7,10 +7,23 @@
 //! bottom-up tables, insights, audit findings, trace exports and style
 //! patches.
 
+pub mod bottom_up;
 pub mod flame;
 pub mod format;
+pub mod insights;
 pub mod stats;
 pub mod why_size;
 
 #[cfg(test)]
 mod fixtures;
+
+/// How much a finding matters, least severe first (so `max` is the worst).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Severity {
+    /// Worth knowing; not necessarily a problem.
+    Info,
+    /// Likely a problem users notice.
+    Warning,
+    /// A problem users certainly notice.
+    Critical,
+}
