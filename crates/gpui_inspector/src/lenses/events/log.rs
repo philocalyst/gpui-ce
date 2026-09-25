@@ -31,6 +31,9 @@ const TOOK_WIDTH: Pixels = px(50.);
 const REDRAW_WIDTH: Pixels = px(8.);
 const HANDLED_WIDTH: Pixels = px(12.);
 const COLUMN_GAP: Pixels = px(6.);
+/// Logs narrower than this drop the duration column (it stays in the
+/// event's tooltip and the detail).
+const COMPACT_BELOW: Pixels = px(420.);
 
 /// Whether the log keeps the newest record in view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +117,8 @@ pub(super) struct EventLog {
     /// Loupe's own records hidden by the toggle.
     hidden_loupe: usize,
     follow: Follow,
+    /// Whether the log is too narrow for the duration column.
+    compact: bool,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
 }
@@ -128,6 +133,7 @@ impl EventLog {
             listed: 0,
             hidden_loupe: 0,
             follow: Follow::Following,
+            compact: false,
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
         }
@@ -179,6 +185,11 @@ impl EventLog {
     /// Focuses the list, for keyboard navigation.
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         window.focus(&self.focus, cx);
+    }
+
+    /// Fits the columns to a log `width` wide.
+    pub fn set_width(&mut self, width: Pixels) {
+        self.compact = width < COMPACT_BELOW;
     }
 
     /// The newest listed record.
@@ -302,7 +313,7 @@ impl EventsLens {
             .size_full()
             .flex()
             .flex_col()
-            .child(log_header(theme))
+            .child(log_header(self.log.compact, theme))
             .child(
                 div()
                     .id("events-log-body")
@@ -339,6 +350,13 @@ impl EventsLens {
             EmptyState::new("No events match")
                 .icon(IconName::Filter)
                 .description("Try another kind, or remove terms from the filter.")
+        } else if self.log.hidden_loupe > 0 {
+            EmptyState::new("No app input yet")
+                .icon(IconName::Keyboard)
+                .description(
+                    "Click, scroll or type in the app: every event lands here with where it \
+                     went. Loupe's own input is hidden.",
+                )
         } else {
             EmptyState::new("No input recorded yet")
                 .icon(IconName::Keyboard)
@@ -364,7 +382,7 @@ impl EventsLens {
             .filter_map(|&seq| record_at(capture.input(), seq))
             .map(|record| {
                 let seq = record.seq;
-                log_row(record, selected == Some(seq), theme)
+                log_row(record, selected == Some(seq), self.log.compact, theme)
                     .on_click(
                         cx.listener(move |this, _: &ClickEvent, _, cx| this.select_input(seq, cx)),
                     )
@@ -461,7 +479,7 @@ pub(super) fn kind_icon(kind: InputKind) -> IconName {
     }
 }
 
-fn log_header(theme: &Theme) -> impl IntoElement + use<> {
+fn log_header(compact: bool, theme: &Theme) -> impl IntoElement + use<> {
     let colors = &theme.colors;
     let title = |title: &'static str| div().truncate().child(title);
     div()
@@ -488,14 +506,16 @@ fn log_header(theme: &Theme) -> impl IntoElement + use<> {
         .child(div().flex_none().w(KIND_WIDTH))
         .child(event_cell().child(title("Event")))
         .child(actions_cell().child(title("Actions")))
-        .child(
-            div()
-                .flex_none()
-                .w(TOOK_WIDTH)
-                .flex()
-                .justify_end()
-                .child(title("Took")),
-        )
+        .when(!compact, |this| {
+            this.child(
+                div()
+                    .flex_none()
+                    .w(TOOK_WIDTH)
+                    .flex()
+                    .justify_end()
+                    .child(title("Took")),
+            )
+        })
         .child(
             div()
                 .flex_none()
@@ -526,6 +546,7 @@ fn actions_cell() -> gpui::Div {
 fn log_row(
     record: &InputRecord,
     selected: bool,
+    compact: bool,
     theme: &'static Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let colors = &theme.colors;
@@ -601,17 +622,19 @@ fn log_row(
                 })
                 .child(actions),
         )
-        .child(
-            div()
-                .flex_none()
-                .w(TOOK_WIDTH)
-                .flex()
-                .justify_end()
-                .font_family(MONO_FONT)
-                .text_size(theme.metrics.mono)
-                .text_color(took_color)
-                .child(format::duration(record.duration)),
-        )
+        .when(!compact, |this| {
+            this.child(
+                div()
+                    .flex_none()
+                    .w(TOOK_WIDTH)
+                    .flex()
+                    .justify_end()
+                    .font_family(MONO_FONT)
+                    .text_size(theme.metrics.mono)
+                    .text_color(took_color)
+                    .child(format::duration(record.duration)),
+            )
+        })
         .child(
             div()
                 .flex_none()
@@ -651,7 +674,11 @@ fn event_summary(record: &InputRecord, theme: &'static Theme) -> impl IntoElemen
         .id(("events-row-event", record.seq))
         .tooltip(Tooltip::with_meta(
             record.detail.clone(),
-            kind_label(record.kind),
+            format!(
+                "{} · took {}",
+                kind_label(record.kind),
+                format::duration(record.duration)
+            ),
         ));
     if let Some((keys, note)) = record_keys(record) {
         return cell.child(Kbd::new(keys)).children(note.map(|note| {
@@ -674,6 +701,16 @@ fn event_summary(record: &InputRecord, theme: &'static Theme) -> impl IntoElemen
             })
             .child(record.detail.clone()),
     )
+    // Presses and releases read alike; mark releases like key-ups.
+    .when(record.kind == InputKind::MouseUp, |this| {
+        this.child(
+            div()
+                .flex_none()
+                .text_size(theme.metrics.text_small)
+                .text_color(colors.text_faint)
+                .child("up"),
+        )
+    })
     .when(record.coalesced > 1, |this| {
         this.child(Pill::new(format!(
             "×{}",

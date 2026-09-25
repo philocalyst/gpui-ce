@@ -22,7 +22,7 @@ use gpui::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, EntityId, FontWeight, IntoElement,
     Pixels, SharedString, Window, div, prelude::*, px,
 };
-use std::{panic::Location, time::Duration};
+use std::{collections::VecDeque, panic::Location, time::Duration};
 
 const HISTORY_HEIGHT: Pixels = px(56.);
 
@@ -79,67 +79,6 @@ impl EntitiesLens {
             .tooltip(Tooltip::text(row.type_name))
             .child(format!("{} {}", row.type_name, entity_label(row.id)));
 
-        let history_section = {
-            let rate = format!("{}/s now", format_rate(row.rate));
-            let peak_label = match peak(&buckets) {
-                Some(peak) if peak.ago < Duration::from_millis(1000) => {
-                    format!("peak {}/s · now", format_rate(peak.rate))
-                }
-                Some(peak) => format!(
-                    "peak {}/s · {} s ago",
-                    format_rate(peak.rate),
-                    peak.ago.as_secs()
-                ),
-                None => "no notifies in the last minute".to_string(),
-            };
-            div()
-                .flex()
-                .flex_col()
-                .child(SectionHeader::new("Notifies").detail(rate).rule())
-                .child(
-                    div()
-                        .px(theme.metrics.gutter)
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .h(HISTORY_HEIGHT)
-                                .rounded(theme.metrics.radius)
-                                .bg(colors.surface)
-                                .border_1()
-                                .border_color(colors.line)
-                                .overflow_hidden()
-                                .flex()
-                                .items_end()
-                                .child(
-                                    Sparkline::new(history(&buckets))
-                                        .max(peak(&buckets).map_or(1., |peak| peak.rate))
-                                        .size(history_width - px(2.), HISTORY_HEIGHT - px(6.))
-                                        .color(colors.accent),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_size(theme.metrics.text_small)
-                                .text_color(colors.text_faint)
-                                .child("60 s ago")
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .flex()
-                                        .justify_center()
-                                        .text_color(colors.text_muted)
-                                        .child(peak_label),
-                                )
-                                .child("now"),
-                        ),
-                )
-        };
-
         div()
             .id("entities-detail")
             .size_full()
@@ -160,7 +99,7 @@ impl EntitiesLens {
                     .child(div().pt_1().child(Prose::new(summary(&row)))),
             )
             .child(counts(&row, theme))
-            .child(history_section)
+            .child(history_section(&row, &buckets, history_width, theme))
             .child(self.render_site(&row, theme, cx))
             .child(
                 div()
@@ -273,6 +212,72 @@ impl EntitiesLens {
                 ),
         )
     }
+}
+
+/// The 60 s notify history: the rate now and the peak in the header, then
+/// the sparkline between "60 s ago" and "now".
+fn history_section(
+    row: &EntityRow,
+    buckets: &VecDeque<u32>,
+    width: Pixels,
+    theme: &Theme,
+) -> impl IntoElement + use<> {
+    let colors = &theme.colors;
+    let peak = peak(buckets);
+    let mut summary = format!("{}/s now", format_rate(row.rate));
+    if let Some(peak) = peak {
+        let when = if peak.ago < Duration::from_secs(1) {
+            "now".to_string()
+        } else {
+            format!("{} s ago", peak.ago.as_secs())
+        };
+        summary.push_str(&format!(" · peak {}/s {when}", format_rate(peak.rate)));
+    }
+    let chart = div()
+        .h(HISTORY_HEIGHT)
+        .rounded(theme.metrics.radius)
+        .bg(colors.surface)
+        .border_1()
+        .border_color(colors.line)
+        .overflow_hidden()
+        .flex()
+        .justify_center()
+        .items_end();
+    let chart = match peak {
+        Some(peak) => chart.child(
+            Sparkline::new(history(buckets))
+                .max(peak.rate)
+                .size(width - px(2.), HISTORY_HEIGHT - px(6.))
+                .color(colors.accent),
+        ),
+        None => chart.items_center().child(
+            div()
+                .text_size(theme.metrics.text_small)
+                .text_color(colors.text_faint)
+                .child("No notifies in the last minute"),
+        ),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .child(SectionHeader::new("Notifies").detail(summary).rule())
+        .child(
+            div()
+                .px(theme.metrics.gutter)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(chart)
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .text_size(theme.metrics.text_small)
+                        .text_color(colors.text_faint)
+                        .child("60 s ago")
+                        .child("now"),
+                ),
+        )
 }
 
 /// `path/to/file.rs:88`, as copied to the clipboard.

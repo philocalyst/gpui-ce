@@ -157,8 +157,8 @@ impl EventsLens {
         cx.notify();
     }
 
-    /// The log pane's size: what the user dragged it to, or about half the
-    /// lens, measured from the dock.
+    /// The log pane's size: what the user dragged it to, or 45% of the lens
+    /// stacked (60% side by side), measured from the dock.
     fn split_size(&self, layout: LensLayout, theme: &Theme, window: &Window) -> Pixels {
         if let Some(split) = self.split {
             return split;
@@ -167,7 +167,7 @@ impl EventsLens {
         let metrics = &theme.metrics;
         let chrome = metrics.toolbar + metrics.pulse + metrics.rail + metrics.status;
         match (layout, dock) {
-            (LensLayout::Stacked, Some(size)) => ((size.height - chrome) * 0.5).max(px(160.)),
+            (LensLayout::Stacked, Some(size)) => ((size.height - chrome) * 0.45).max(px(160.)),
             (LensLayout::SideBySide, Some(size)) => (size.width * 0.6).max(px(280.)),
             (_, None) => px(320.),
         }
@@ -217,13 +217,21 @@ impl Render for EventsLens {
         if let Some(capture) = window.inspector_capture() {
             self.log.refresh(capture, &self.filter);
         }
+        let split_size = self.split_size(layout, theme, window);
+        let log_width = match layout {
+            LensLayout::SideBySide => split_size,
+            LensLayout::Stacked => window
+                .inspector_bounds()
+                .map_or(split_size, |bounds| bounds.size.width),
+        };
+        self.log.set_width(log_width);
         let log = self.render_log(theme, window, cx);
         let pane = self.render_pane(theme, window, cx);
         let axis = match layout {
             LensLayout::Stacked => Axis::Vertical,
             LensLayout::SideBySide => Axis::Horizontal,
         };
-        let split = Split::new("events-split", axis, self.split_size(layout, theme, window))
+        let split = Split::new("events-split", axis, split_size)
             .min_sizes(px(96.), px(120.))
             .first(log)
             .second(pane)

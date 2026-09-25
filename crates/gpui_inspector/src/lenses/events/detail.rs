@@ -241,10 +241,11 @@ impl EventsLens {
                     .size(theme.metrics.icon_small)
                     .color(hit.color),
             )
+            // The name keeps at least 96 px; the source gives way first.
             .child(
                 div()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(px(96.))
                     .truncate()
                     .font_family(MONO_FONT)
                     .text_size(theme.metrics.mono)
@@ -262,7 +263,8 @@ impl EventsLens {
             }))
             .children(hit.source.map(|(short, _)| {
                 div()
-                    .flex_none()
+                    .flex_shrink(1.)
+                    .min_w_0()
                     .max_w(px(160.))
                     .truncate()
                     .font_family(MONO_FONT)
@@ -354,7 +356,7 @@ impl EventsLens {
 fn event_meta(record: &InputRecord, theme: &Theme) -> impl IntoElement + use<> {
     let colors = &theme.colors;
     let when = SharedString::from(format!(
-        "{} · {} s · #{}",
+        "{} · {} s · input #{}",
         kind_label(record.kind),
         crate::analysis::events::clock(record.at),
         record.seq

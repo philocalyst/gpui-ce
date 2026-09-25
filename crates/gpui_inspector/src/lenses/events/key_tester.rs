@@ -2,23 +2,24 @@
 //! without dispatching anything.
 //!
 //! While its capture box has the focus, a keystroke interceptor (which runs
-//! before GPUI matches any binding) stops every key: nothing reaches the
-//! app's bindings, Loupe's own bindings or any key listener's handling. The
-//! keys are resolved with `Window::inspector_resolve_keystrokes_for`
-//! against the app's focus: the element focused before Loupe took the focus.
+//! before GPUI matches any binding) stops every key: no binding runs, the
+//! app's or Loupe's, and the app's elements, which are not on the box's focus
+//! path, never see the key. The keys are resolved with
+//! `Window::inspector_resolve_keystrokes_for` against the app's focus: the
+//! element that had the focus before Loupe took it.
 
 use crate::{
     analysis::{
         events::context_label,
-        key_tester::{KeySequence, Outcome, Press, Verdict, explain, waiting_note},
+        key_tester::{KeySequence, Outcome, OutcomeKind, Press, Verdict, explain, waiting_note},
     },
     loupe::LOUPE_CONTEXT,
     theme::{MONO_FONT, Theme},
-    widgets::{Button, ButtonSize, Icon, IconName, Kbd, Pill, Prose, SectionHeader, Tone},
+    widgets::{Button, ButtonSize, Icon, IconName, Kbd, Pill, Prose, SectionHeader, Tone, Tooltip},
 };
 use gpui::{
-    Context, EventEmitter, FocusHandle, IntoElement, KeystrokeEvent, MouseButton, Render,
-    Subscription, WeakFocusHandle, Window, div,
+    Context, EventEmitter, FocusHandle, FontWeight, IntoElement, KeystrokeEvent, MouseButton,
+    Render, Subscription, WeakFocusHandle, Window, div,
     inspector::{BindingVerdict, KeyResolution},
     prelude::*,
     px,
@@ -135,6 +136,7 @@ impl KeyTester {
             .debug_selector(|| "events-key-tester".into())
             .track_focus(&self.focus)
             .flex_none()
+            .mx(theme.metrics.gutter)
             .min_h(px(40.))
             .px(px(10.))
             .py(px(6.))
@@ -190,7 +192,7 @@ impl KeyTester {
                 this.child(div().text_color(colors.text_faint).child("…"))
             })
             .child(div().flex_1())
-            .when(listening, |this| {
+            .when(listening && strokes.is_empty(), |this| {
                 this.child(
                     div()
                         .flex_none()
@@ -199,21 +201,33 @@ impl KeyTester {
                         .child("Esc Esc clears"),
                 )
             })
+            .when(!strokes.is_empty(), |this| {
+                this.child(
+                    Button::new("events-key-reset")
+                        .icon(IconName::Close)
+                        .size(ButtonSize::Small)
+                        .tooltip_keys("Clear the keys", "escape escape")
+                        .on_click(cx.listener(|this, _, window, cx| this.reset(window, cx))),
+                )
+            })
     }
 
     fn render_resolution(
         &self,
         resolution: &KeyResolution,
         theme: &Theme,
-        cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let colors = &theme.colors;
-        let (bar, sentence) = match Outcome::of(resolution) {
-            Outcome::Runs(sentence) => (colors.ok, sentence),
-            Outcome::Waiting(sentence) => (colors.accent, sentence),
-            Outcome::Nothing(sentence) => (colors.text_faint, sentence),
+        let outcome = Outcome::of(resolution);
+        let bar = match outcome.kind {
+            OutcomeKind::Runs => colors.ok,
+            OutcomeKind::Waiting => colors.accent,
+            OutcomeKind::Nothing => colors.text_faint,
         };
         let card = div()
+            .id("events-key-outcome")
+            .debug_selector(|| "events-key-outcome".into())
+            .mx(theme.metrics.gutter)
             .flex()
             .rounded(theme.metrics.radius)
             .overflow_hidden()
@@ -230,7 +244,12 @@ impl KeyTester {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(Prose::new(sentence))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(Prose::new(outcome.title).size(px(13.))),
+                    )
+                    .child(Prose::new(outcome.detail).color(colors.text_muted))
                     .children(waiting_note(resolution).map(|note| {
                         Prose::new(note)
                             .color(colors.text_muted)
@@ -267,17 +286,7 @@ impl KeyTester {
                 div()
                     .flex()
                     .flex_col()
-                    .child(
-                        SectionHeader::new("Resolved in").action(
-                            Button::new("events-key-reset")
-                                .label("Reset")
-                                .size(ButtonSize::Small)
-                                .tooltip_keys("Clear the keys", "escape escape")
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.reset(window, cx)),
-                                ),
-                        ),
-                    )
+                    .child(SectionHeader::new("Resolved in").detail("the app's focus"))
                     .child(contexts),
             )
             .when(loser_count > 0, |this| {
@@ -353,7 +362,7 @@ fn candidate_row(resolution: &KeyResolution, ix: usize, theme: &Theme) -> impl I
         .py(px(5.))
         .flex()
         .flex_col()
-        .gap(px(3.))
+        .gap(px(4.))
         .border_b_1()
         .border_color(colors.line)
         .child(
@@ -364,12 +373,20 @@ fn candidate_row(resolution: &KeyResolution, ix: usize, theme: &Theme) -> impl I
                 .child(Kbd::new(candidate.keystrokes.clone()))
                 .child(
                     div()
+                        .id(("events-key-candidate", ix))
                         .flex_1()
                         .min_w_0()
                         .truncate()
                         .font_family(MONO_FONT)
                         .text_size(theme.metrics.mono)
                         .text_color(colors.text)
+                        .tooltip(Tooltip::with_meta(
+                            candidate.action.clone(),
+                            candidate
+                                .predicate
+                                .clone()
+                                .unwrap_or_else(|| "no context".into()),
+                        ))
                         .child(candidate.action.clone()),
                 )
                 .child(Pill::new(verdict.label()).tone(verdict_tone(verdict))),
@@ -387,11 +404,9 @@ impl Render for KeyTester {
         let colors = &theme.colors;
         let listening = self.focus.is_focused(window);
         let body = match self.sequence.resolution() {
-            Some(resolution) => self
-                .render_resolution(resolution, theme, cx)
-                .into_any_element(),
+            Some(resolution) => self.render_resolution(resolution, theme).into_any_element(),
             None => div()
-                .px(px(2.))
+                .px(theme.metrics.gutter)
                 .text_size(theme.metrics.text_small)
                 .text_color(colors.text_faint)
                 .child(
@@ -405,7 +420,7 @@ impl Render for KeyTester {
             .id("events-key-tester-pane")
             .size_full()
             .overflow_y_scroll()
-            .p(theme.metrics.gutter)
+            .py(theme.metrics.gutter)
             .flex()
             .flex_col()
             .gap_2()

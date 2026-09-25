@@ -12,7 +12,10 @@ use gpui::{
     inspector::{BindingCandidate, BindingVerdict, KeyResolution},
 };
 use smallvec::{SmallVec, smallvec};
-use std::time::{Duration, Instant};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 /// How long GPUI waits for the next key of a longer binding.
 pub const STROKE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -168,28 +171,39 @@ impl Verdict {
     }
 }
 
-/// The overall answer for a resolution.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Outcome {
-    /// A binding runs: "Runs `editor::Save` · bound in `Editor` · …".
-    Runs(Sentence),
+/// What happens overall.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutcomeKind {
+    /// A binding's action runs.
+    Runs,
     /// GPUI waits for more keys before anything runs.
-    Waiting(Sentence),
-    /// Nothing runs, and why.
-    Nothing(Sentence),
+    Waiting,
+    /// Nothing runs.
+    Nothing,
+}
+
+/// The overall answer for a resolution: a short title ("Runs
+/// `editor::Save`") and the detail that explains it ("bound in `Editor` ·
+/// matched 2 levels up").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outcome {
+    /// What happens.
+    pub kind: OutcomeKind,
+    /// The answer in a few words.
+    pub title: Sentence,
+    /// Where the winner is bound, or why nothing runs.
+    pub detail: Sentence,
 }
 
 impl Outcome {
     /// The answer for `resolution`.
     pub fn of(resolution: &KeyResolution) -> Self {
         if let Some(winner) = resolution.winner() {
-            return Outcome::Runs(
-                Sentence::new()
-                    .text("Runs ")
-                    .code(winner.action.clone())
-                    .text(" · ")
-                    .append(binding_place(winner)),
-            );
+            return Outcome {
+                kind: OutcomeKind::Runs,
+                title: Sentence::new().text("Runs ").code(winner.action.clone()),
+                detail: binding_place(winner),
+            };
         }
         let keys = typed_keys(resolution);
         let find = |verdict: BindingVerdict| {
@@ -199,34 +213,46 @@ impl Outcome {
                 .find(move |candidate| candidate.verdict == verdict)
         };
         if let Some(pending) = find(BindingVerdict::Pending) {
-            return Outcome::Waiting(
-                Sentence::new()
-                    .text("Waiting for more keys: ")
+            return Outcome {
+                kind: OutcomeKind::Waiting,
+                title: Sentence::new().text("Waiting for more keys"),
+                detail: Sentence::new()
                     .code(remaining_keys(resolution, pending))
                     .text(" runs ")
                     .code(pending.action.clone()),
-            );
+            };
         }
-        let nothing = Sentence::new().text("Nothing runs: ");
-        Outcome::Nothing(if let Some(disabler) = find(BindingVerdict::Disabled) {
-            nothing
+        let detail = if let Some(disabler) = find(BindingVerdict::Disabled) {
+            Sentence::new()
                 .code(disabler.action.clone())
                 .text(" turns ")
                 .code(keys)
                 .text(" off here")
         } else if let Some(unhandled) = find(BindingVerdict::Unhandled) {
-            nothing
-                .text("nothing on the focus path handles ")
+            Sentence::new()
+                .text("Nothing on the focus path handles ")
                 .code(unhandled.action.clone())
         } else if !resolution.candidates.is_empty() {
-            nothing
+            Sentence::new()
                 .code(keys)
                 .text(" is bound, but not in this context")
         } else {
-            nothing
+            Sentence::new()
                 .code(keys)
                 .text(" is not bound; key listeners and text input get it")
-        })
+        };
+        Outcome {
+            kind: OutcomeKind::Nothing,
+            title: Sentence::new().text("Nothing runs"),
+            detail,
+        }
+    }
+}
+
+impl fmt::Display for Outcome {
+    /// `title: detail`, code in backticks.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.title, self.detail)
     }
 }
 
@@ -554,16 +580,11 @@ mod tests {
     #[test]
     fn the_winner_says_what_runs_and_where_it_is_bound() {
         let save = save();
+        let outcome = Outcome::of(&save);
+        assert_eq!(outcome.kind, OutcomeKind::Runs);
         assert_eq!(
-            Outcome::of(&save),
-            Outcome::Runs(
-                Sentence::new()
-                    .text("Runs ")
-                    .code("mail::Save")
-                    .text(" · bound in ")
-                    .code("Editor")
-                    .text(" · matched the innermost context")
-            )
+            outcome.to_string(),
+            "Runs `mail::Save`: bound in `Editor` · matched the innermost context"
         );
         let explained: Vec<String> = (0..save.candidates.len())
             .map(|ix| explain(&save, ix).to_string())
@@ -645,31 +666,22 @@ mod tests {
             explain(&delete, 1).to_string(),
             "Turned off by `zed::NoAction` in `Editor`"
         );
+        let outcome = Outcome::of(&delete);
+        assert_eq!(outcome.kind, OutcomeKind::Nothing);
         assert_eq!(
-            Outcome::of(&delete),
-            Outcome::Nothing(
-                Sentence::new()
-                    .text("Nothing runs: ")
-                    .code("zed::NoAction")
-                    .text(" turns ")
-                    .code("ctrl-d")
-                    .text(" off here")
-            )
+            outcome.to_string(),
+            "Nothing runs: `zed::NoAction` turns `ctrl-d` off here"
         );
     }
 
     #[test]
     fn pending_unhandled_and_unbound_keys_say_what_happens_instead() {
         let waiting = trim_keymap(&keys("ctrl-k"));
+        let outcome = Outcome::of(&waiting);
+        assert_eq!(outcome.kind, OutcomeKind::Waiting);
         assert_eq!(
-            Outcome::of(&waiting),
-            Outcome::Waiting(
-                Sentence::new()
-                    .text("Waiting for more keys: ")
-                    .code("ctrl-t")
-                    .text(" runs ")
-                    .code("e::Trim")
-            )
+            outcome.to_string(),
+            "Waiting for more keys: `ctrl-t` runs `e::Trim`"
         );
         assert_eq!(
             explain(&waiting, 0).to_string(),
@@ -688,8 +700,8 @@ mod tests {
         );
         assert_eq!(Verdict::of(&unhandled, 0), Verdict::Unhandled);
         assert_eq!(
-            Outcome::of(&unhandled).to_string_for_test(),
-            "Nothing runs: nothing on the focus path handles `mail::Orphan`"
+            Outcome::of(&unhandled).to_string(),
+            "Nothing runs: Nothing on the focus path handles `mail::Orphan`"
         );
         assert_eq!(
             explain(&unhandled, 0).to_string(),
@@ -707,11 +719,11 @@ mod tests {
             )],
         );
         assert_eq!(
-            Outcome::of(&mismatch).to_string_for_test(),
+            Outcome::of(&mismatch).to_string(),
             "Nothing runs: `ctrl-w` is bound, but not in this context"
         );
         assert_eq!(
-            Outcome::of(&resolution("ctrl-q", Vec::new())).to_string_for_test(),
+            Outcome::of(&resolution("ctrl-q", Vec::new())).to_string(),
             "Nothing runs: `ctrl-q` is not bound; key listeners and text input get it"
         );
     }
@@ -735,15 +747,5 @@ mod tests {
             waiting_note(&resolution).unwrap().to_string(),
             "GPUI first waits up to 1 s for `ctrl-t` (`e::Trim`)"
         );
-    }
-
-    impl Outcome {
-        fn to_string_for_test(&self) -> String {
-            match self {
-                Outcome::Runs(sentence)
-                | Outcome::Waiting(sentence)
-                | Outcome::Nothing(sentence) => sentence.to_string(),
-            }
-        }
     }
 }

@@ -255,6 +255,7 @@ fn the_detail_tells_where_a_fixture_click_went() {
     harness.assert_text_visible(" on div#row-3 → inbox::OpenIssue · handled in ");
     harness.assert_text_visible("HIT PATH");
     harness.screenshot("events-detail-click");
+    assert_nothing_overflows(&mut harness);
 
     // Hovering a hit-path row highlights it in the app; clicking selects it.
     let hit = harness.bounds_of("events-hit-0");
@@ -636,6 +637,7 @@ fn live_clicks_and_keys_land_in_the_log_with_where_they_went() {
         harness.assert_text_visible(context);
     }
     harness.screenshot("events-live-key");
+    assert_nothing_overflows(harness);
 
     // The unhandled binding fell through to the workspace's.
     harness.click_selector(&format!("events-row-{}", archive.seq));
@@ -688,34 +690,26 @@ fn the_key_tester_explains_keys_without_dispatching_anything() {
     let cases: [(&str, &str, Option<&str>); 6] = [
         (
             "ctrl-s",
-            "Runs mail::Save · bound in Editor · matched the innermost context",
+            "bound in Editor · matched the innermost context",
             Some("mail::Save"),
         ),
         (
             "ctrl-w",
-            "Runs mail::Kill · bound in Pane · matched 1 level up",
+            "bound in Pane · matched 1 level up",
             Some("mail::Kill"),
         ),
-        (
-            "ctrl-d",
-            "Nothing runs: zed::NoAction turns ctrl-d off here",
-            None,
-        ),
+        ("ctrl-d", "zed::NoAction turns ctrl-d off here", None),
         (
             "ctrl-u",
-            "Runs mail::Archive · bound in Workspace · matched 2 levels up",
+            "bound in Workspace · matched 2 levels up",
             Some("mail::Archive"),
         ),
         (
             toggle,
-            "Runs loupe::ToggleInspector · bound globally (no context)",
+            "bound globally (no context)",
             Some("loupe::ToggleInspector"),
         ),
-        (
-            "space",
-            "Nothing runs: space is bound, but not in this context",
-            None,
-        ),
+        ("space", "space is bound, but not in this context", None),
     ];
     let shots = [
         "key-tester-save",
@@ -728,6 +722,10 @@ fn the_key_tester_explains_keys_without_dispatching_anything() {
     for ((input, shown, winner), shot) in cases.iter().zip(shots) {
         let harness = &mut mail.harness;
         harness.type_keys(input);
+        match winner {
+            Some(winner) => harness.assert_text_visible(&format!("Runs {winner}")),
+            None => harness.assert_text_visible("Nothing runs"),
+        }
         harness.assert_text_visible(shown);
         assert_eq!(
             engine_winner(harness, input, &editor_focus).as_deref(),
@@ -735,6 +733,7 @@ fn the_key_tester_explains_keys_without_dispatching_anything() {
             "{input}"
         );
         harness.screenshot(shot);
+        assert_nothing_overflows(harness);
     }
     let harness = &mut mail.harness;
     // Every loser is explained.
@@ -753,10 +752,12 @@ fn the_key_tester_explains_keys_without_dispatching_anything() {
 
     // A multi-key binding: the first key waits, the second completes it.
     harness.type_keys("ctrl-k");
-    harness.assert_text_visible("Waiting for more keys: ctrl-t runs mail::Trim");
+    harness.assert_text_visible("Waiting for more keys");
+    harness.assert_text_visible("ctrl-t runs mail::Trim");
     harness.screenshot("key-tester-pending");
+    assert_nothing_overflows(harness);
     harness.type_keys("ctrl-t");
-    harness.assert_text_visible("Runs mail::Trim · bound in Editor");
+    harness.assert_text_visible("Runs mail::Trim");
     assert_eq!(
         engine_winner(harness, "ctrl-k ctrl-t", &editor_focus).as_deref(),
         Some("mail::Trim")
@@ -869,9 +870,10 @@ fn the_entities_table_sorts_filters_and_explains_the_inbox() {
     assert_eq!(harness.state(|state| state.selected_entity()), Some(store));
     harness.assert_text_visible("IssueStore is notifying");
     harness.assert_text_visible("3 observers run on each notify, 2 subscribers listen");
-    harness.assert_text_visible("peak ");
+    harness.assert_text_visible(" · peak ");
     harness.assert_text_visible("fixtures.rs:");
     harness.screenshot("entities-store");
+    assert_nothing_overflows(&mut harness);
     harness.click_selector("entities-site");
     harness.assert_text_visible("Copied");
     let copied = harness.app(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
@@ -881,6 +883,7 @@ fn the_entities_table_sorts_filters_and_explains_the_inbox() {
     harness.click_selector("entities-row-3");
     harness.assert_text_visible("It is drawn as a view, so each notify re-renders it");
     harness.screenshot("entities-view");
+    assert_nothing_overflows(&mut harness);
     harness.click_text("Reveal in Elements");
     assert_eq!(harness.state(|state| state.lens()), Lens::Elements);
     assert_eq!(
@@ -923,6 +926,7 @@ fn live_entities_match_the_app_and_notify_forces_a_render() {
     );
     harness.assert_text_visible("Store hasn't notified since recording started");
     harness.screenshot("entities-live-store");
+    assert_nothing_overflows(harness);
 
     // Notify the editor: the next frame is caused by it, and it re-renders.
     let editor_label = format!("entities-row-{}", editor.as_u64() & 0xffff_ffff);
