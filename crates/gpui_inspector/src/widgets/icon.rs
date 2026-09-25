@@ -80,11 +80,19 @@ pub enum IconName {
     Command,
     /// Small solid triangle pointing up: over budget.
     TriangleUp,
+    /// A keyboard: key input.
+    Keyboard,
+    /// A mouse: clicks and other button input.
+    Mouse,
+    /// A pointer arrow: pointer moves.
+    Pointer,
+    /// A double-headed vertical arrow: scrolling.
+    Scroll,
 }
 
 impl IconName {
     /// Every glyph, for galleries and pickers.
-    pub const ALL: [IconName; 28] = [
+    pub const ALL: [IconName; 32] = [
         IconName::Pick,
         IconName::Outline,
         IconName::Flash,
@@ -113,6 +121,10 @@ impl IconName {
         IconName::Entity,
         IconName::Command,
         IconName::TriangleUp,
+        IconName::Keyboard,
+        IconName::Mouse,
+        IconName::Pointer,
+        IconName::Scroll,
     ];
 
     /// A stable name, also the sprite atlas key.
@@ -146,6 +158,10 @@ impl IconName {
             IconName::Entity => "loupe/entity",
             IconName::Command => "loupe/command",
             IconName::TriangleUp => "loupe/triangle-up",
+            IconName::Keyboard => "loupe/keyboard",
+            IconName::Mouse => "loupe/mouse",
+            IconName::Pointer => "loupe/pointer",
+            IconName::Scroll => "loupe/scroll",
         }
     }
 
@@ -212,6 +228,18 @@ impl IconName {
             ),
             IconName::Command => glyph!(r##"<path d="M3.4 4.4 7 8l-3.6 3.6M8.6 11.8h4"/>"##),
             IconName::TriangleUp => glyph!(r##"<path d="M8 3.6 13.2 12H2.8z" fill="#000"/>"##),
+            IconName::Keyboard => glyph!(
+                r##"<rect x="1.4" y="3.8" width="13.2" height="8.4" rx="1.4"/><path d="M4.3 6.6h.01M6.8 6.6h.01M9.2 6.6h.01M11.7 6.6h.01M5.2 9.4h5.6"/>"##
+            ),
+            IconName::Mouse => glyph!(
+                r##"<rect x="4.1" y="1.8" width="7.8" height="12.4" rx="3.9"/><path d="M8 4.3v2.3"/>"##
+            ),
+            IconName::Pointer => {
+                glyph!(r##"<path d="M3.6 2.4 12.8 7.5 8.6 8.7 6.7 12.8z" fill="#000"/>"##)
+            }
+            IconName::Scroll => {
+                glyph!(r##"<path d="M8 2.2v11.6M5 5.2 8 2.2l3 3M5 10.8l3 3 3-3"/>"##)
+            }
         }
     }
 }
