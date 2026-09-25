@@ -75,6 +75,8 @@ mod inspector_input;
 mod inspector_overlay;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod inspector_pick;
+#[cfg(any(feature = "inspector", debug_assertions))]
+mod inspector_replay;
 mod prompts;
 
 pub use a11y::A11ySubtreeBuilder;
@@ -1075,9 +1077,27 @@ impl TooltipId {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct TooltipBounds {
     id: TooltipId,
-    bounds: Bounds<Pixels>,
+    pub(crate) bounds: Bounds<Pixels>,
+}
+
+/// Where a frame drew the app's layers: its root, and the prompt, dragged
+/// element or tooltip over it. While the inspector is open, a frame it draws
+/// for itself replays these from the previous frame instead of rendering the
+/// app (see `window/inspector_replay.rs`).
+#[derive(Clone)]
+pub(crate) struct AppLayers {
+    root_prepaint: Range<PrepaintStateIndex>,
+    overlay_prepaint: Range<PrepaintStateIndex>,
+    root_paint: Range<PaintIndex>,
+    overlay_paint: Range<PaintIndex>,
+    tooltip_bounds: Option<TooltipBounds>,
+    /// `debug_selector` bounds painted by the root, which paint replay does
+    /// not carry.
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds: FxHashMap<String, Bounds<Pixels>>,
 }
 
 #[derive(Clone)]
@@ -1175,6 +1195,7 @@ pub(crate) struct PaintIndex {
     cursor_styles_index: usize,
     accessed_element_states_index: usize,
     tab_handle_index: usize,
+    window_control_hitboxes_index: usize,
     line_layout_index: LineLayoutIndex,
     #[cfg(any(test, feature = "test-support"))]
     painted_text_index: usize,
@@ -1398,6 +1419,9 @@ pub struct Window {
     /// `refresh()` calls re-render the app alone.
     #[cfg(any(feature = "inspector", debug_assertions))]
     refresh_reaches_inspector: bool,
+    /// Where the app was last drawn, to replay it on the inspector's own frames.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    app_replay: inspector_replay::AppReplay,
     #[cfg(feature = "profiler")]
     debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay,
     pub(crate) a11y: A11y,
@@ -2104,6 +2128,8 @@ impl Window {
             inspector_input: None,
             #[cfg(any(feature = "inspector", debug_assertions))]
             refresh_reaches_inspector: false,
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            app_replay: Default::default(),
             #[cfg(feature = "profiler")]
             debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay::new(),
             a11y: A11y::new(
@@ -3390,50 +3416,37 @@ impl Window {
         }
 
         let root_size = self.app_bounds().size;
-
-        // Layout all root elements. Like the root element on the web, which
-        // stretches to fill the viewport unless explicitly sized, window roots
-        // fill the window when their size is `auto`.
-        let scale_factor = self.scale_factor();
-        let mut root_element = self.root.as_ref().unwrap().clone().into_any_element();
-        #[cfg(any(feature = "inspector", debug_assertions))]
-        self.inspector_set_phase(crate::inspector::recorder::Phase::Render);
-        let root_layout_id = root_element.request_layout(self, cx);
+        // On frames the inspector draws for itself, the app's layers are
+        // replayed from the previous frame instead of rendered again.
+        let replay = self.app_replay(cx);
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.inspector_set_phase(crate::inspector::recorder::Phase::Prepaint);
-        self.layout_engine
-            .as_mut()
-            .unwrap()
-            .stretch_auto_size_to_fill(root_layout_id, root_size, scale_factor);
-        root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
+
+        let root_prepaint_start = self.prepaint_index();
+        let mut root_element = match &replay {
+            Some(previous) => {
+                self.reuse_prepaint(previous.root_prepaint.clone());
+                None
+            }
+            None => Some(self.prepaint_app_root(root_size, cx)),
+        };
+        let root_prepaint = root_prepaint_start..self.prepaint_index();
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         let inspector_element = self.prepaint_inspector(cx);
 
         self.prepaint_deferred_draws(cx);
 
-        let mut prompt_element = None;
-        let mut active_drag_element = None;
-        let mut tooltip_element = None;
-        if let Some(prompt) = self.prompt.take() {
-            let mut element = prompt.view.any_view().into_any_element();
-            let prompt_layout_id = element.request_layout(self, cx);
-            self.layout_engine
-                .as_mut()
-                .unwrap()
-                .stretch_auto_size_to_fill(prompt_layout_id, root_size, scale_factor);
-            element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
-            prompt_element = Some(element);
-            self.prompt = Some(prompt);
-        } else if let Some(active_drag) = cx.active_drag.take() {
-            let mut element = active_drag.view.clone().into_any_element();
-            let offset = self.mouse_position() - active_drag.cursor_offset;
-            element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
-            active_drag_element = Some(element);
-            cx.active_drag = Some(active_drag);
-        } else {
-            tooltip_element = self.prepaint_tooltip(cx);
-        }
+        let overlay_prepaint_start = self.prepaint_index();
+        let mut overlay_element = match &replay {
+            Some(previous) => {
+                self.reuse_prepaint(previous.overlay_prepaint.clone());
+                self.tooltip_bounds = previous.tooltip_bounds.clone();
+                None
+            }
+            None => self.prepaint_app_overlay(root_size, cx),
+        };
+        let overlay_prepaint = overlay_prepaint_start..self.prepaint_index();
 
         self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
 
@@ -3441,20 +3454,46 @@ impl Window {
         self.invalidator.set_phase(DrawPhase::Paint);
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.inspector_set_phase(crate::inspector::recorder::Phase::Paint);
-        root_element.paint(self, cx);
+        let root_paint_start = self.paint_index();
+        if let Some(root_element) = root_element.as_mut() {
+            root_element.paint(self, cx);
+        } else if let Some(previous) = &replay {
+            self.reuse_app_root_paint(previous);
+        }
+        let root_paint = root_paint_start..self.paint_index();
+        #[cfg(any(test, feature = "test-support"))]
+        let debug_bounds = if self.keeps_app_layers() {
+            self.next_frame.debug_bounds.clone()
+        } else {
+            FxHashMap::default()
+        };
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.paint_inspector(inspector_element, cx);
 
         self.paint_deferred_draws(cx);
 
-        if let Some(mut prompt_element) = prompt_element {
-            prompt_element.paint(self, cx);
-        } else if let Some(mut drag_element) = active_drag_element {
-            drag_element.paint(self, cx);
-        } else if let Some(mut tooltip_element) = tooltip_element {
-            tooltip_element.paint(self, cx);
+        let overlay_paint_start = self.paint_index();
+        if let Some(overlay_element) = overlay_element.as_mut() {
+            overlay_element.paint(self, cx);
+        } else if let Some(previous) = &replay {
+            self.reuse_paint(previous.overlay_paint.clone());
         }
+        let overlay_paint = overlay_paint_start..self.paint_index();
+
+        let replayed = replay.is_some();
+        self.note_app_layers(
+            AppLayers {
+                root_prepaint,
+                overlay_prepaint,
+                root_paint,
+                overlay_paint,
+                tooltip_bounds: self.tooltip_bounds.clone(),
+                #[cfg(any(test, feature = "test-support"))]
+                debug_bounds,
+            },
+            replayed,
+        );
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         {
@@ -3489,6 +3528,101 @@ impl Window {
                 self.platform_window.a11y_tree_update(tree_update);
             }
         }
+    }
+
+    /// Renders, lays out and prepaints the app's root view.
+    fn prepaint_app_root(&mut self, root_size: Size<Pixels>, cx: &mut App) -> AnyElement {
+        // Layout all root elements. Like the root element on the web, which
+        // stretches to fill the viewport unless explicitly sized, window roots
+        // fill the window when their size is `auto`.
+        let scale_factor = self.scale_factor();
+        let mut root_element = self.root.as_ref().unwrap().clone().into_any_element();
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.inspector_set_phase(crate::inspector::recorder::Phase::Render);
+        let root_layout_id = root_element.request_layout(self, cx);
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.inspector_set_phase(crate::inspector::recorder::Phase::Prepaint);
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .stretch_auto_size_to_fill(root_layout_id, root_size, scale_factor);
+        root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
+        root_element
+    }
+
+    /// Prepaints what the app draws over its root: a prompt, the dragged
+    /// element, or a tooltip.
+    fn prepaint_app_overlay(
+        &mut self,
+        root_size: Size<Pixels>,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        if let Some(prompt) = self.prompt.take() {
+            let scale_factor = self.scale_factor();
+            let mut element = prompt.view.any_view().into_any_element();
+            let prompt_layout_id = element.request_layout(self, cx);
+            self.layout_engine
+                .as_mut()
+                .unwrap()
+                .stretch_auto_size_to_fill(prompt_layout_id, root_size, scale_factor);
+            element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
+            self.prompt = Some(prompt);
+            Some(element)
+        } else if let Some(active_drag) = cx.active_drag.take() {
+            let mut element = active_drag.view.clone().into_any_element();
+            let offset = self.mouse_position() - active_drag.cursor_offset;
+            element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
+            cx.active_drag = Some(active_drag);
+            Some(element)
+        } else {
+            self.prepaint_tooltip(cx)
+        }
+    }
+
+    /// Replays the paint of the app's root from the previous frame.
+    fn reuse_app_root_paint(&mut self, previous: &AppLayers) {
+        self.reuse_paint(previous.root_paint.clone());
+        #[cfg(any(test, feature = "test-support"))]
+        self.next_frame
+            .debug_bounds
+            .extend(previous.debug_bounds.clone());
+    }
+
+    /// The app's layers from the previous frame when this frame should replay
+    /// them rather than render the app: see `window/inspector_replay.rs`.
+    fn app_replay(&mut self, cx: &mut App) -> Option<AppLayers> {
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        {
+            self.take_app_replay(cx)
+        }
+        #[cfg(not(any(feature = "inspector", debug_assertions)))]
+        {
+            let _ = cx;
+            None
+        }
+    }
+
+    /// Whether the window keeps the app's layers to replay them (while the
+    /// inspector is open).
+    #[cfg(any(test, feature = "test-support"))]
+    fn keeps_app_layers(&self) -> bool {
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        {
+            self.inspector_capture.is_some()
+        }
+        #[cfg(not(any(feature = "inspector", debug_assertions)))]
+        {
+            false
+        }
+    }
+
+    /// Remembers where this frame drew the app's layers, so the next one can
+    /// replay them.
+    fn note_app_layers(&mut self, layers: AppLayers, replayed: bool) {
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.store_app_layers(layers, replayed);
+        #[cfg(not(any(feature = "inspector", debug_assertions)))]
+        let _ = (layers, replayed);
     }
 
     fn prepaint_tooltip(&mut self, cx: &mut App) -> Option<AnyElement> {
@@ -3762,6 +3896,7 @@ impl Window {
             cursor_styles_index: self.next_frame.cursor_styles.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
+            window_control_hitboxes_index: self.next_frame.window_control_hitboxes.len(),
             line_layout_index: self.text_system.layout_index(),
             #[cfg(any(test, feature = "test-support"))]
             painted_text_index: self.next_frame.painted_text.len(),
@@ -3796,6 +3931,12 @@ impl Window {
         self.next_frame.tab_stops.replay(
             &self.rendered_frame.tab_stops.insertion_history
                 [range.start.tab_handle_index..range.end.tab_handle_index],
+        );
+        self.next_frame.window_control_hitboxes.extend(
+            self.rendered_frame.window_control_hitboxes[range.start.window_control_hitboxes_index
+                ..range.end.window_control_hitboxes_index]
+                .iter()
+                .cloned(),
         );
 
         #[cfg(any(test, feature = "test-support"))]

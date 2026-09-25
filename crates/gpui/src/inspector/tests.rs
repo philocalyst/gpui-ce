@@ -6,8 +6,8 @@ use crate::{
     self as gpui, AnyElement, App, AppContext as _, Bounds, Context, Entity, EntityId, Hsla,
     InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Pixels, Point, Render,
     ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
-    StyleRefinement, Styled as _, TestAppContext, TouchPhase, VisualTestContext, Window, blue,
-    deferred, div, point, px, red, size, uniform_list,
+    StyleRefinement, Styled as _, TestAppContext, TouchPhase, VisualTestContext, Window,
+    WindowControlArea, blue, deferred, div, point, px, red, size, uniform_list,
 };
 use std::{cell::RefCell, panic::Location, rc::Rc, sync::Arc};
 
@@ -1581,4 +1581,491 @@ fn capture_overhead(cx: &mut TestAppContext) {
             overhead * 100.
         );
     }
+
+    // Frames the inspector draws for itself replay the app instead.
+    let replayed = cx.update(|window, cx| {
+        let mut samples = (0..60)
+            .map(|_| {
+                window
+                    .invalidator
+                    .note_cause(CauseKind::Refresh, None, true);
+                let start = scheduler::Instant::now();
+                window.draw(cx).clear(cx);
+                start.elapsed()
+            })
+            .collect::<Vec<_>>();
+        samples.sort();
+        samples[samples.len() / 2]
+    });
+    assert!(read(cx, |capture| capture.recorder.app_replayed()));
+    println!("replayed    {replayed:>10.2?}");
+}
+
+// Replaying the app.
+
+/// A model the app reads while rendering, without observing it.
+struct Label(usize);
+
+/// A child view drawn cached, counting its renders.
+struct Counted {
+    renders: usize,
+}
+
+impl Render for Counted {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.renders += 1;
+        div().id("counted").size_full().bg(red())
+    }
+}
+
+struct Tip;
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().id("tip").w(px(60.)).h(px(20.)).bg(blue())
+    }
+}
+
+/// An app that counts its renders, reads a model, listens for clicks and
+/// draws a deferred popover, a tooltip, a window control area and a cached
+/// child: everything a replayed frame must keep.
+struct Replayed {
+    renders: usize,
+    clicks: usize,
+    label: Entity<Label>,
+    child: Entity<Counted>,
+}
+
+impl Render for Replayed {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.renders += 1;
+        let label = self.label.read(cx).0;
+        div()
+            .id("root")
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("button")
+                    .w(px(40.))
+                    .h(px(40.))
+                    .bg(red())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.clicks += 1;
+                        cx.notify();
+                    }))
+                    .child(deferred(
+                        div()
+                            .id("popover")
+                            .absolute()
+                            .top(px(300.))
+                            .w(px(80.))
+                            .h(px(30.))
+                            .bg(blue())
+                            .on_click(|_, _, _| {}),
+                    )),
+            )
+            .child(
+                div()
+                    .id("trigger")
+                    .w(px(40.))
+                    .h(px(40.))
+                    .bg(blue())
+                    .tooltip(|_, cx| cx.new(|_| Tip).into()),
+            )
+            .child(
+                div()
+                    .id("drag")
+                    .w(px(20.))
+                    .h(px(20.))
+                    .window_control_area(WindowControlArea::Drag),
+            )
+            .child(
+                self.child
+                    .clone()
+                    .cached(StyleRefinement::default().w(px(50.)).h(px(50.))),
+            )
+            .child(format!("label {label}"))
+    }
+}
+
+fn replayed(cx: &mut TestAppContext) -> (Entity<Replayed>, &mut VisualTestContext) {
+    cx.add_window_view(|_, cx| Replayed {
+        renders: 0,
+        clicks: 0,
+        label: cx.new(|_| Label(0)),
+        child: cx.new(|_| Counted { renders: 0 }),
+    })
+}
+
+/// How often the app and its cached child rendered.
+fn renders(view: &Entity<Replayed>, cx: &mut VisualTestContext) -> (usize, usize) {
+    cx.update(|_, cx| {
+        let view = view.read(cx);
+        (view.renders, view.child.read(cx).renders)
+    })
+}
+
+/// Everything the latest frame drew, down to what input hits.
+#[derive(Debug, PartialEq)]
+struct Drawn {
+    quads: String,
+    text: Vec<crate::PaintedText>,
+    hitboxes: Vec<(crate::HitboxId, Bounds<Pixels>, bool)>,
+    window_controls: Vec<(WindowControlArea, crate::HitboxId)>,
+    deferred_draws: usize,
+    tooltip: Option<Bounds<Pixels>>,
+}
+
+fn drawn(cx: &mut VisualTestContext) -> Drawn {
+    cx.update(|window, _| {
+        let frame = &window.rendered_frame;
+        Drawn {
+            quads: format!("{:?}", window.painted_quads()),
+            text: window.painted_text().to_vec(),
+            hitboxes: frame
+                .hitboxes
+                .iter()
+                .map(|hitbox| (hitbox.id, hitbox.bounds, hitbox.is_hovered(window)))
+                .collect(),
+            window_controls: frame
+                .window_control_hitboxes
+                .iter()
+                .map(|(area, hitbox)| (*area, hitbox.id))
+                .collect(),
+            deferred_draws: frame.deferred_draws.len(),
+            tooltip: window.tooltip_bounds.as_ref().map(|tooltip| tooltip.bounds),
+        }
+    })
+}
+
+fn app_replayed(cx: &mut VisualTestContext) -> bool {
+    read(cx, |capture| capture.recorder.app_replayed())
+}
+
+/// The views a frame reports, and how each was drawn.
+fn view_outcomes(frame: &FrameRecord) -> Vec<(&'static str, ViewOutcome)> {
+    frame
+        .views
+        .iter()
+        .map(|view| {
+            let name = view.type_name.rsplit("::").next().unwrap();
+            (name, view.outcome)
+        })
+        .collect()
+}
+
+fn painted(cx: &mut VisualTestContext, text: &str) -> bool {
+    cx.update(|window, _| window.painted_text().iter().any(|line| line.text == text))
+}
+
+#[gpui::test]
+fn inspector_only_frames_replay_the_app(cx: &mut TestAppContext) {
+    let (view, cx) = replayed(cx);
+    let dock = dock_renderer(cx);
+    open(cx);
+    let dock = dock.borrow().clone().expect("the dock rendered");
+    cx.simulate_mouse_move(point(px(10.), px(310.)), None, Modifiers::none());
+    let app_frame = latest_frame(cx);
+    let tree = latest_tree(cx);
+    let generation = read(cx, |capture| capture.generation());
+    let before = drawn(cx);
+    let rendered = renders(&view, cx);
+    assert_eq!(before.window_controls.len(), 1);
+    assert_eq!(before.deferred_draws, 1);
+    let popover = record(&tree, "popover").bounds;
+    assert!(
+        before
+            .hitboxes
+            .iter()
+            .any(|&(_, bounds, hovered)| bounds == popover && hovered),
+        "the mouse is over the popover"
+    );
+
+    dock.update(cx, |_, cx| cx.notify());
+    let frame = latest_frame(cx);
+    assert!(frame.id > app_frame.id);
+    assert!(frame.inspector_only);
+    assert!(app_replayed(cx));
+    assert_eq!(renders(&view, cx), rendered, "no app view rendered");
+    assert_eq!(drawn(cx), before, "the app is drawn exactly as before");
+    assert_eq!(frame.scene, app_frame.scene);
+    assert_eq!(frame.element_count, app_frame.element_count);
+    assert!(frame.timings.render.is_zero());
+
+    // The capture tells the truth: every app view is served from cache, and
+    // the frame has no tree of its own; the last live tree still applies.
+    assert!(frame.tree.is_none());
+    assert!(Arc::ptr_eq(&latest_tree(cx), &tree));
+    assert_eq!(read(cx, |capture| capture.generation()), generation);
+    let entities = |frame: &FrameRecord| {
+        frame
+            .views
+            .iter()
+            .map(|view| (view.entity, view.depth))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(entities(&frame), entities(&app_frame));
+    assert!(
+        frame
+            .views
+            .iter()
+            .all(|view| view.outcome == ViewOutcome::Cached && view.element.is_none())
+    );
+
+    // Picking walks the last live tree over the replayed app.
+    cx.update(|window, _| window.start_inspector_pick());
+    cx.simulate_mouse_move(point(px(12.), px(12.)), None, Modifiers::none());
+    assert!(app_replayed(cx));
+    assert_eq!(
+        read(cx, |capture| capture.overlay().hovered),
+        Some(key_of(&tree, "button"))
+    );
+    cx.update(|window, _| window.stop_inspector_pick());
+    assert_eq!(renders(&view, cx), rendered);
+
+    // The replayed listeners still handle input, and the app renders again
+    // (on press and on release, which refresh the window).
+    cx.simulate_click(point(px(10.), px(10.)), Modifiers::none());
+    assert_eq!(cx.update(|_, cx| view.read(cx).clicks), 1);
+    let clicked = renders(&view, cx);
+    assert!(clicked.0 > rendered.0);
+    let frame = latest_frame(cx);
+    assert!(!frame.inspector_only);
+    assert!(frame.tree.is_some());
+    assert_eq!(
+        view_outcomes(&frame),
+        [
+            ("Replayed", ViewOutcome::Rendered),
+            ("Counted", ViewOutcome::Rendered)
+        ]
+    );
+
+    // The window still observes what the app read before the replays.
+    dock.update(cx, |_, cx| cx.notify());
+    dock.update(cx, |_, cx| cx.notify());
+    assert!(app_replayed(cx));
+    let label = cx.update(|_, cx| view.read(cx).label.clone());
+    label.update(cx, |label, cx| {
+        label.0 = 7;
+        cx.notify();
+    });
+    assert!(!app_replayed(cx));
+    assert_eq!(renders(&view, cx).0, clicked.0 + 1);
+    assert!(painted(cx, "label 7"));
+}
+
+#[gpui::test]
+fn replay_keeps_deferred_draws_and_tooltips(cx: &mut TestAppContext) {
+    let (view, cx) = replayed(cx);
+    let dock = dock_renderer(cx);
+    open(cx);
+    let dock = dock.borrow().clone().expect("the dock rendered");
+    let trigger = record(&latest_tree(cx), "trigger").bounds;
+    cx.simulate_mouse_move(trigger.center(), None, Modifiers::none());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.run_until_parked();
+    let before = drawn(cx);
+    let tooltip = before.tooltip.expect("the tooltip shows");
+    assert_eq!(before.deferred_draws, 1);
+    let rendered = renders(&view, cx);
+
+    dock.update(cx, |_, cx| cx.notify());
+    assert!(app_replayed(cx));
+    assert_eq!(renders(&view, cx), rendered);
+    assert_eq!(drawn(cx), before, "the tooltip and the popover are kept");
+    let tip_quads = cx.update(|window, _| {
+        let scale_factor = window.scale_factor();
+        window
+            .painted_quads()
+            .iter()
+            .filter(|quad| quad.bounds == tooltip.scale(scale_factor))
+            .count()
+    });
+    assert_eq!(tip_quads, 1, "the tooltip is painted");
+
+    // The tooltip's listeners were replayed too: leaving the trigger hides it.
+    cx.simulate_mouse_move(point(px(300.), px(300.)), None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(drawn(cx).tooltip, None);
+}
+
+#[gpui::test]
+fn app_notified_during_a_replayed_frame_renders_on_the_next(cx: &mut TestAppContext) {
+    let (view, cx) = replayed(cx);
+    let poke: Rc<RefCell<Option<Entity<Replayed>>>> = Rc::default();
+    cx.update(|_, cx| {
+        let poke = poke.clone();
+        cx.set_inspector_renderer(Box::new(move |_, _, cx| {
+            if let Some(view) = poke.borrow_mut().take() {
+                view.update(cx, |_, cx| cx.notify());
+            }
+            div().id("dock").size_full().into_any_element()
+        }))
+    });
+    open(cx);
+    let inspector = cx.update(|window, _| window.inspector_entity().unwrap());
+    let rendered = renders(&view, cx);
+
+    // The inspector's own frame replays the app, which is notified while
+    // the inspector draws.
+    *poke.borrow_mut() = Some(view.clone());
+    inspector.update(cx, |_, cx| cx.notify());
+    assert!(poke.borrow().is_none(), "the inspector drew");
+    assert!(app_replayed(cx));
+    assert!(latest_frame(cx).inspector_only);
+    assert_eq!(renders(&view, cx), rendered);
+
+    // The next frame renders the app, even though the inspector asked for it.
+    inspector.update(cx, |_, cx| cx.notify());
+    assert!(!app_replayed(cx));
+    assert_eq!(renders(&view, cx).0, rendered.0 + 1);
+    let frame = latest_frame(cx);
+    assert!(!frame.inspector_only);
+    assert!(frame.causes.iter().any(|cause| matches!(
+        cause.kind,
+        CauseKind::Notify { entity, .. } if entity == view.entity_id()
+    )));
+    assert_eq!(
+        view_outcomes(&frame)[0],
+        ("Replayed", ViewOutcome::Rendered)
+    );
+}
+
+#[gpui::test]
+fn holding_replays_the_app_until_release(cx: &mut TestAppContext) {
+    let (view, cx) = replayed(cx);
+    let dock = dock_renderer(cx);
+    open(cx);
+    let dock = dock.borrow().clone().expect("the dock rendered");
+    write(cx, |capture| capture.set_holding(true));
+    assert!(read(cx, |capture| capture.is_holding()));
+    let before = drawn(cx);
+    let rendered = renders(&view, cx);
+    let generation = read(cx, |capture| capture.generation());
+    let (label, child) = cx.update(|_, cx| {
+        let view = view.read(cx);
+        (view.label.clone(), view.child.clone())
+    });
+
+    // The app changes while held, but frames replay it as it was.
+    label.update(cx, |label, cx| {
+        label.0 = 5;
+        cx.notify();
+    });
+    child.update(cx, |_, cx| cx.notify());
+    view.update(cx, |_, cx| cx.notify());
+    cx.update(|window, _| window.refresh());
+    let frame = latest_frame(cx);
+    assert!(app_replayed(cx));
+    assert!(!frame.inspector_only, "the app asked for these frames");
+    assert!(frame.tree.is_none());
+    assert!(
+        frame
+            .views
+            .iter()
+            .all(|view| view.outcome == ViewOutcome::Cached)
+    );
+    assert_eq!(renders(&view, cx), rendered);
+    assert_eq!(drawn(cx), before);
+
+    // Input still reaches the held app; what it invalidates waits too.
+    cx.simulate_click(point(px(10.), px(10.)), Modifiers::none());
+    assert_eq!(cx.update(|_, cx| view.read(cx).clicks), 1);
+    assert_eq!(renders(&view, cx), rendered);
+    assert!(painted(cx, "label 0"));
+
+    // Releasing renders the app once, with everything that was held.
+    write(cx, |capture| capture.set_holding(false));
+    assert!(!read(cx, |capture| capture.is_holding()));
+    dock.update(cx, |_, cx| cx.notify());
+    assert!(!app_replayed(cx));
+    let released = renders(&view, cx);
+    assert_eq!(released.0, rendered.0 + 1);
+    assert_eq!(released.1, rendered.1 + 1, "the held child re-renders");
+    assert!(painted(cx, "label 5"));
+    let frame = latest_frame(cx);
+    assert!(frame.tree.is_some());
+    assert_eq!(
+        view_outcomes(&frame),
+        [
+            ("Replayed", ViewOutcome::Rendered),
+            ("Counted", ViewOutcome::Rendered)
+        ]
+    );
+    assert!(read(cx, |capture| capture.generation()) > generation);
+
+    // Released, the app replays only on the inspector's own frames again.
+    dock.update(cx, |_, cx| cx.notify());
+    assert!(app_replayed(cx));
+    view.update(cx, |_, cx| cx.notify());
+    assert!(!app_replayed(cx));
+    assert_eq!(renders(&view, cx).0, released.0 + 1);
+}
+
+#[gpui::test]
+fn resizing_renders_a_held_app(cx: &mut TestAppContext) {
+    let (view, cx) = replayed(cx);
+    open(cx);
+    write(cx, |capture| capture.set_holding(true));
+    let rendered = renders(&view, cx);
+    let child = cx.update(|_, cx| view.read(cx).child.clone());
+    child.update(cx, |_, cx| cx.notify());
+    assert!(app_replayed(cx));
+    assert_eq!(renders(&view, cx), rendered);
+
+    cx.simulate_resize(size(px(900.), px(700.)));
+    assert!(!app_replayed(cx));
+    assert!(read(cx, |capture| capture.is_holding()));
+    assert_eq!(renders(&view, cx).0, rendered.0 + 1);
+    assert_eq!(
+        renders(&view, cx).1,
+        rendered.1 + 1,
+        "the child notified while held renders with the app"
+    );
+    let tree = latest_tree(cx);
+    assert_eq!(tree.get(tree.roots[0]).unwrap().bounds, app_bounds(cx));
+
+    // Still held: the app replays again at its new size.
+    view.update(cx, |_, cx| cx.notify());
+    assert!(app_replayed(cx));
+    assert_eq!(renders(&view, cx).0, rendered.0 + 1);
+}
+
+#[gpui::test]
+fn the_app_renders_when_the_capture_asks_for_more(cx: &mut TestAppContext) {
+    let (view, cx) = replayed(cx);
+    let dock = dock_renderer(cx);
+    open(cx);
+    let dock = dock.borrow().clone().expect("the dock rendered");
+    write(cx, |capture| {
+        capture.config_mut().level = CaptureLevel::Frames
+    });
+    view.update(cx, |_, cx| cx.notify());
+    assert!(latest_frame(cx).tree.is_none());
+    let rendered = renders(&view, cx);
+
+    // An overlay needs a tree the last render did not record.
+    write(cx, |capture| {
+        capture.overlay_mut().modes = OverlayModes::OUTLINES
+    });
+    dock.update(cx, |_, cx| cx.notify());
+    assert!(!app_replayed(cx));
+    assert_eq!(renders(&view, cx).0, rendered.0 + 1);
+    assert!(read(cx, |capture| capture.recorder.live_tree.is_some()));
+    dock.update(cx, |_, cx| cx.notify());
+    assert!(app_replayed(cx));
+
+    // Details need a render too.
+    write(cx, |capture| {
+        capture.config_mut().level = CaptureLevel::Full
+    });
+    dock.update(cx, |_, cx| cx.notify());
+    assert!(!app_replayed(cx));
+    assert!(record(&latest_tree(cx), "button").details.is_some());
+    dock.update(cx, |_, cx| cx.notify());
+    assert!(app_replayed(cx));
+    assert_eq!(renders(&view, cx).0, rendered.0 + 2);
 }
