@@ -157,6 +157,13 @@ impl<K: Clone + Eq + Hash> TableModel<K> {
         self.sort
     }
 
+    /// Sorts by a column in a direction (never flipping, unlike
+    /// [`Self::sort_by`]), or restores data order for `None`.
+    pub fn set_sort(&mut self, sort: Option<(usize, SortDirection)>) {
+        self.sort = sort;
+        self.resort();
+    }
+
     /// Number of rows.
     pub fn len(&self) -> usize {
         self.keys.len()
@@ -274,6 +281,14 @@ impl<K: Clone + Eq + Hash + 'static> TableState<K> {
     ) {
         self.model.set_rows(keys, compare);
         cx.notify();
+    }
+
+    /// Sets the sort; see [`TableModel::set_sort`].
+    pub fn set_sort(&mut self, sort: Option<(usize, SortDirection)>, cx: &mut Context<Self>) {
+        if self.model.sort() != sort {
+            self.model.set_sort(sort);
+            cx.notify();
+        }
     }
 
     /// Selects `key` and scrolls it into view, without emitting an event.
@@ -564,6 +579,16 @@ mod tests {
         assert_eq!(visible(&model), ["alpha", "delta", "charlie", "bravo"]);
         model.sort_by(1, SortDirection::Descending);
         assert_eq!(visible(&model), ["bravo", "delta", "charlie", "alpha"]);
+    }
+
+    #[test]
+    fn setting_a_sort_never_flips_it() {
+        let mut model = model();
+        model.set_sort(Some((0, SortDirection::Descending)));
+        model.set_sort(Some((0, SortDirection::Descending)));
+        assert_eq!(visible(&model), ["delta", "charlie", "bravo", "alpha"]);
+        model.set_sort(None);
+        assert_eq!(visible(&model), NAMES);
     }
 
     #[test]

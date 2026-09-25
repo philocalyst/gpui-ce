@@ -102,11 +102,15 @@ pub enum IconName {
     Info,
     /// Octagon with an exclamation mark: a critical problem.
     Critical,
+    /// A mouse: clicks and other button input.
+    Mouse,
+    /// A pointer arrow: pointer moves.
+    Pointer,
 }
 
 impl IconName {
     /// Every glyph, for galleries and pickers.
-    pub const ALL: [IconName; 39] = [
+    pub const ALL: [IconName; 41] = [
         IconName::Pick,
         IconName::Outline,
         IconName::Flash,
@@ -146,6 +150,8 @@ impl IconName {
         IconName::ChevronLeft,
         IconName::Info,
         IconName::Critical,
+        IconName::Mouse,
+        IconName::Pointer,
     ];
 
     /// A stable name, also the sprite atlas key.
@@ -190,6 +196,8 @@ impl IconName {
             IconName::ChevronLeft => "loupe/chevron-left",
             IconName::Info => "loupe/info",
             IconName::Critical => "loupe/critical",
+            IconName::Mouse => "loupe/mouse",
+            IconName::Pointer => "loupe/pointer",
         }
     }
 
@@ -285,6 +293,12 @@ impl IconName {
             IconName::Critical => glyph!(
                 r##"<path d="M5.5 1.9h5l3.6 3.6v5l-3.6 3.6h-5l-3.6-3.6v-5z"/><path d="M8 4.8v3.6"/><circle cx="8" cy="10.9" r=".8" fill="#000" stroke="none"/>"##
             ),
+            IconName::Mouse => glyph!(
+                r##"<rect x="4.1" y="1.8" width="7.8" height="12.4" rx="3.9"/><path d="M8 4.3v2.3"/>"##
+            ),
+            IconName::Pointer => {
+                glyph!(r##"<path d="M3.6 2.4 12.8 7.5 8.6 8.7 6.7 12.8z" fill="#000"/>"##)
+            }
         }
     }
 }

@@ -10,10 +10,15 @@
 pub mod audit;
 pub mod bottom_up;
 pub mod contrast;
+pub mod entities;
+pub mod events;
+pub mod filter;
 pub mod flame;
 pub mod format;
 pub mod insights;
+pub mod key_tester;
 pub mod rust_patch;
+pub mod sentence;
 pub mod source;
 pub mod stats;
 pub mod style_grid;
