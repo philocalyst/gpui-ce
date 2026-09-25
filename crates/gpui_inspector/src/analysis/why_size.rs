@@ -318,12 +318,18 @@ impl<'a> Element<'a> {
     }
 
     fn reason(&self, axis: Axis, size: Pixels) -> SizeReason {
-        let Some(facts) = self.facts else {
-            return if self.is_window_root() {
-                SizeReason::ViewportRoot
-            } else {
-                SizeReason::NotCaptured
-            };
+        // Text leaves have no style of their own, so they report no facts;
+        // they lay out as unstyled items (stretched on the cross axis, else
+        // sized by their text). Other elements without facts stay unexplained.
+        let unstyled;
+        let facts = match self.facts {
+            Some(facts) => facts,
+            None if self.is_window_root() => return SizeReason::ViewportRoot,
+            None if self.has_text() => {
+                unstyled = LayoutFacts::default();
+                &unstyled
+            }
+            None => return SizeReason::NotCaptured,
         };
         let parent = self
             .parent
@@ -475,15 +481,17 @@ impl<'a> Element<'a> {
                 ContentSource::Children { extent, insets },
             ));
         }
-        let has_text = self
-            .record
-            .details
-            .as_ref()
-            .is_some_and(|details| details.text.as_ref().is_some_and(|text| !text.is_empty()));
-        if has_text {
+        if self.has_text() {
             return Some(SizeReason::Content(ContentSource::Text));
         }
         close(insets, size).then_some(SizeReason::Content(ContentSource::Empty))
+    }
+
+    fn has_text(&self) -> bool {
+        self.record
+            .details
+            .as_ref()
+            .is_some_and(|details| details.text.as_ref().is_some_and(|text| !text.is_empty()))
     }
 
     /// Children that take part in layout (not absolutely positioned).
@@ -875,6 +883,28 @@ mod tests {
         assert_eq!(
             width_reason(&tree, spacer),
             SizeReason::Content(ContentSource::Empty)
+        );
+    }
+
+    #[test]
+    fn text_leaves_without_facts_are_unstyled_items() {
+        let mut builder = TreeBuilder::new();
+        let root = builder.root(bounds(0., 0., 300., 600.));
+        let column = builder.child(root, bounds(0., 0., 300., 600.));
+        builder.layout(column).flex_direction = Some("column".into());
+        let text = builder.child(column, bounds(0., 0., 300., 18.));
+        builder.details(text).text = Some("Hello".into());
+        let tree = builder.build();
+
+        assert_eq!(
+            width_reason(&tree, text),
+            SizeReason::Stretched {
+                container: px(300.)
+            }
+        );
+        assert_eq!(
+            height_reason(&tree, text),
+            SizeReason::Content(ContentSource::Text)
         );
     }
 
