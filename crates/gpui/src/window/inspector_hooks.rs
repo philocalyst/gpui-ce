@@ -99,6 +99,7 @@ impl Window {
         };
         let now = Instant::now();
         let mode = RecordMode::for_level(capture.config.level, capture.overlays_need_tree());
+        let recording = capture.is_recording();
         let recorder = &mut capture.recorder;
         recorder.begin_frame(mode, now);
 
@@ -130,7 +131,7 @@ impl Window {
         );
         recorder.inspector_only =
             !recorder.causes.is_empty() && recorder.causes.iter().all(|cause| cause.from_inspector);
-        if capture.frozen {
+        if !recording {
             recorder.pending_notifies.clear();
         } else {
             causes::fold_notify_stats(
@@ -285,7 +286,7 @@ impl Window {
         };
         recorder.mode = RecordMode::Off;
         let restyled = recorder.restyling && frame.inspector_only;
-        if !capture.frozen {
+        if capture.is_recording() {
             let id = capture.record_frame(frame);
             capture.recorder.unpresented = Some(id);
             if restyled {
@@ -312,62 +313,9 @@ impl Window {
             RefreshReason::Code(site) => (CauseKind::Refresh, Some(site)),
             RefreshReason::Resize => (CauseKind::Resize, None),
             RefreshReason::WindowState => (CauseKind::WindowState, None),
-            RefreshReason::InspectorToggled => return,
+            RefreshReason::Inspector => return,
         };
         self.invalidator.note_cause(kind, site, false);
-    }
-
-    /// Records the input just dispatched as a render cause if it invalidated
-    /// the window. Input consumed by picking or aimed at the dock is the
-    /// inspector's own.
-    pub(super) fn note_inspector_input(
-        &mut self,
-        event: &PlatformInput,
-        caused_invalidation: bool,
-    ) {
-        if self.inspector_capture.is_none() {
-            return;
-        }
-        let from_inspector = self.is_inspector_input(event);
-        if let Some(capture) = self.inspector_capture.as_deref_mut() {
-            capture.recorder.input_consumed = false;
-        }
-        if caused_invalidation {
-            self.invalidator.note_cause(
-                CauseKind::Input {
-                    event: event.kind_name(),
-                },
-                None,
-                from_inspector,
-            );
-        }
-    }
-
-    /// Whether `event` belongs to the inspector: consumed by picking, a
-    /// pointer event over the dock, or a key event while the dock has focus.
-    pub(crate) fn is_inspector_input(&self, event: &PlatformInput) -> bool {
-        let Some(capture) = self.inspector_capture.as_deref() else {
-            return false;
-        };
-        if capture.recorder.input_consumed {
-            return true;
-        }
-        if event.mouse_event().is_some() {
-            return self
-                .inspector_bounds()
-                .is_some_and(|bounds| bounds.contains(&self.mouse_position));
-        }
-        event.keyboard_event().is_some() && self.inspector_has_focus()
-    }
-
-    fn inspector_has_focus(&self) -> bool {
-        let (Some(focus), Some(inspector)) = (self.focus, self.inspector.as_ref()) else {
-            return false;
-        };
-        let dispatch_tree = &self.rendered_frame.dispatch_tree;
-        dispatch_tree
-            .focusable_node_id(focus)
-            .is_some_and(|node| dispatch_tree.view_contains(inspector.entity_id(), node))
     }
 
     /// Schedules a frame for the inspector's overlays without invalidating

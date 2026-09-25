@@ -60,7 +60,7 @@ impl EntitiesLens {
 impl Render for EntitiesLens {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.state.read(cx).selected_entity();
-        let live = cx.inspector_entities();
+        let live = window.inspector_entities(cx);
         let mut overview = LensOverview::new(Lens::Entities, LensLayout::of(window))
             .when_empty(IconName::Entity, "No entity activity recorded yet");
         let Some(capture) = window.inspector_capture() else {
@@ -128,7 +128,7 @@ impl LensView for EntitiesLens {
     fn rail_badge(&self, window: &Window, cx: &App) -> Option<RailBadge> {
         // Live entities when the registry reports them, otherwise the
         // entities seen notifying while recording.
-        let live = cx.inspector_entities().len();
+        let live = window.inspector_entities(cx).len();
         let count = if live > 0 {
             live
         } else {

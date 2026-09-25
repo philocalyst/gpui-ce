@@ -16,9 +16,9 @@ use gpui::{
     Styled as _,
     inspector::{
         ActionRecord, BoxModel, CauseKind, ElementDetails, ElementFlags, ElementIndex, ElementKey,
-        ElementKind, ElementRecord, ElementTree, ForegroundKind, ForegroundSlice, FrameRecord,
-        InputKind, InputRecord, InspectorCapture, NotifyStats, PhaseTimings, RenderCause,
-        SceneStats, UserSpan, ViewOutcome, ViewSpan,
+        ElementKind, ElementRecord, ElementTree, EntityInfo, ForegroundKind, ForegroundSlice,
+        FrameRecord, InputKind, InputRecord, InspectorCapture, NotifyStats, PhaseTimings,
+        RenderCause, SceneStats, UserSpan, ViewOutcome, ViewSpan,
     },
     point, px, rgb, rgb_to_hsla, size,
 };
@@ -1202,7 +1202,39 @@ pub fn inbox() -> (InspectorCapture, InboxElements) {
             },
         );
     }
+    capture.set_entities_for_test(inbox_entities(&capture));
     (capture, elements)
+}
+
+/// The Inbox app's live entities, consistent with its tree and notify stats.
+fn inbox_entities(capture: &InspectorCapture) -> Vec<EntityInfo> {
+    [
+        (entities::APP, "inbox::InboxApp", true, 1, 0, 0),
+        (entities::SIDEBAR, "inbox::Sidebar", true, 1, 1, 0),
+        (entities::ISSUE_LIST, "inbox::IssueList", true, 2, 1, 1),
+        (entities::SEARCH, "inbox::SearchField", true, 1, 0, 1),
+        (entities::DETAIL, "inbox::IssueDetail", true, 1, 1, 0),
+        (entities::STORE, "inbox::IssueStore", false, 4, 3, 2),
+        (entities::SYNC, "inbox::SyncClient", false, 2, 1, 1),
+    ]
+    .into_iter()
+    .map(
+        |(id, type_name, is_view, strong_count, observers, subscribers)| {
+            let id = EntityId::from(id);
+            let stats = capture.notify_stats().get(&id);
+            EntityInfo {
+                id,
+                type_name,
+                strong_count,
+                is_view,
+                observers,
+                subscribers,
+                notifies: stats.map_or(0, |stats| stats.total),
+                last_notify_site: stats.and_then(|stats| stats.last_site),
+            }
+        },
+    )
+    .collect()
 }
 
 /// A capture with `count` app frames of `app_ms` each (16 ms apart) and no tree.

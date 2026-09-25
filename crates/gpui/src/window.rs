@@ -66,7 +66,11 @@ use uuid::Uuid;
 
 pub(crate) mod a11y;
 #[cfg(any(feature = "inspector", debug_assertions))]
+mod inspector;
+#[cfg(any(feature = "inspector", debug_assertions))]
 mod inspector_hooks;
+#[cfg(any(feature = "inspector", debug_assertions))]
+mod inspector_input;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod inspector_overlay;
 #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1287,8 +1291,9 @@ pub(crate) enum RefreshReason {
     Resize,
     /// Activation, hover or position changed.
     WindowState,
-    /// The inspector opened (its first frame is explained as initial) or closed.
-    InspectorToggled,
+    /// The inspector opened (its first frame is explained as initial), closed,
+    /// or had its capture replaced: it must redraw along with the app.
+    Inspector,
 }
 
 /// Holds the state for a specific window.
@@ -1388,6 +1393,11 @@ pub struct Window {
     /// and the inspector is capturing.
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector_input: Option<Box<crate::inspector::InputInFlight>>,
+    /// Whether this frame's refresh also re-renders the inspector: only
+    /// resizes, window state changes and toggling do; the app's own
+    /// `refresh()` calls re-render the app alone.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    refresh_reaches_inspector: bool,
     #[cfg(feature = "profiler")]
     debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay,
     pub(crate) a11y: A11y,
@@ -2092,6 +2102,8 @@ impl Window {
             inspector_dock: Default::default(),
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector_input: None,
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            refresh_reaches_inspector: false,
             #[cfg(feature = "profiler")]
             debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay::new(),
             a11y: A11y::new(
@@ -2230,7 +2242,10 @@ impl Window {
     pub(crate) fn refresh_for(&mut self, reason: RefreshReason) {
         if self.invalidator.not_drawing() {
             #[cfg(any(feature = "inspector", debug_assertions))]
-            self.note_refresh_reason(reason);
+            {
+                self.note_refresh_reason(reason);
+                self.refresh_reaches_inspector |= !matches!(reason, RefreshReason::Code(_));
+            }
             #[cfg(not(any(feature = "inspector", debug_assertions)))]
             let _ = reason;
             self.refreshing = true;
@@ -3238,6 +3253,10 @@ impl Window {
         self.record_entities_accessed(cx);
         self.reset_cursor_style(cx);
         self.refreshing = false;
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        {
+            self.refresh_reaches_inspector = false;
+        }
         self.invalidator.set_phase(DrawPhase::None);
         // Focus listeners may move focus (e.g. a dock forwarding focus to its active
         // panel). `Window::focus` suppresses `refresh` while a draw is in progress, so
@@ -5757,8 +5776,6 @@ impl Window {
         if caused_invalidation {
             self.input_rate_tracker.borrow_mut().record_input();
         }
-        #[cfg(any(feature = "inspector", debug_assertions))]
-        self.note_inspector_input(&event, caused_invalidation);
         #[cfg(feature = "profiler")]
         self.window_profiler.end_input(caused_invalidation);
 
@@ -5767,7 +5784,12 @@ impl Window {
             default_prevented: self.default_prevented,
         };
         #[cfg(any(feature = "inspector", debug_assertions))]
-        self.finish_input_capture(input_capture, !result.propagate || result.default_prevented);
+        self.finish_event_capture(
+            input_capture,
+            &event,
+            caused_invalidation,
+            !result.propagate || result.default_prevented,
+        );
         result
     }
 
@@ -6998,18 +7020,6 @@ impl Window {
         }
     }
 
-    /// Toggles the inspector mode on this window.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub fn toggle_inspector(&mut self, cx: &mut App) {
-        if self.inspector.take().is_some() {
-            self.close_inspector_capture();
-        } else {
-            self.inspector = Some(cx.new(|_| Inspector::new()));
-            self.open_inspector_capture(cx);
-        }
-        self.refresh_for(RefreshReason::InspectorToggled);
-    }
-
     /// Whether the inspector is open in this window.
     pub fn is_inspector_open(&self) -> bool {
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -7022,37 +7032,6 @@ impl Window {
         }
     }
 
-    /// The inspector's recording of this window, while the inspector is open.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub fn inspector_capture(&self) -> Option<&crate::inspector::InspectorCapture> {
-        self.inspector_capture.as_deref()
-    }
-
-    /// Mutable access to the inspector's recording: overlays, picking, dock,
-    /// overrides, freezing and configuration. Changes show on the next frame.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub fn inspector_capture_mut(&mut self) -> Option<&mut crate::inspector::InspectorCapture> {
-        self.inspector_capture.as_deref_mut()
-    }
-
-    /// Replaces the open inspector's recording with a fabricated one (keeping
-    /// the current dock), so inspector UI can be rendered against fixtures.
-    /// Does nothing while the inspector is closed.
-    #[cfg(all(
-        any(feature = "inspector", debug_assertions),
-        any(test, feature = "test-support")
-    ))]
-    pub fn replace_inspector_capture_for_test(
-        &mut self,
-        mut capture: crate::inspector::InspectorCapture,
-    ) {
-        if let Some(current) = self.inspector_capture.as_deref_mut() {
-            capture.set_dock(current.dock());
-            *current = capture;
-            self.refresh();
-        }
-    }
-
     /// The part of the window the app draws into: the whole viewport, minus
     /// the inspector's dock while it is open.
     pub fn app_bounds(&self) -> Bounds<Pixels> {
@@ -7061,178 +7040,6 @@ impl Window {
             return capture.dock().split(self.viewport_size).0;
         }
         Bounds::new(Point::default(), self.viewport_size)
-    }
-
-    /// Resolves keystrokes against the keymap and the focused context stack
-    /// without dispatching anything: which binding wins, and why each other
-    /// candidate loses.
-    ///
-    /// `keystrokes` is the whole sequence, as if typed from scratch with the
-    /// current focus. The result matches what key dispatch does with the
-    /// latest rendered frame: the winner is the highest-precedence matching
-    /// binding whose action is handled on the focus path or by a global
-    /// listener (bindings above it resolve to
-    /// [`crate::inspector::BindingVerdict::Unhandled`]). It assumes action
-    /// handlers don't call `cx.propagate()`, keystroke interceptors
-    /// (`cx.intercept_keystrokes`) don't stop the keystroke, and the platform
-    /// didn't prefer character input for it (e.g. AltGr on some layouts).
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub fn inspector_resolve_keystrokes(
-        &self,
-        keystrokes: &[Keystroke],
-        cx: &App,
-    ) -> crate::inspector::KeyResolution {
-        let node_id = self.focus_node_id_in_rendered_frame(self.focus);
-        let dispatch_tree = &self.rendered_frame.dispatch_tree;
-        let keymap = cx.keymap.borrow();
-        crate::inspector::resolve_keystrokes(&keymap, keystrokes, self.context_stack(), |action| {
-            dispatch_tree.is_action_available(action, node_id)
-                || cx
-                    .global_action_listeners
-                    .get(&action.as_any().type_id())
-                    .is_some_and(|listeners| !listeners.is_empty())
-        })
-    }
-
-    /// Every live entity with its type, handle count, observers and notify
-    /// counts, sorted by id. Like [`App::inspector_entities`], but also sees
-    /// this window while it is being updated (for example during render).
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub fn inspector_entities(&self, cx: &App) -> Vec<crate::inspector::EntityInfo> {
-        let other_windows = cx
-            .windows
-            .values()
-            .filter_map(Option::as_deref)
-            .filter(|window| window.handle.window_id() != self.handle.window_id());
-        crate::inspector::live_entities(cx, std::iter::once(self).chain(other_windows))
-    }
-
-    /// Where the inspector UI is drawn, while it is open.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub fn inspector_bounds(&self) -> Option<Bounds<Pixels>> {
-        let capture = self.inspector_capture.as_ref()?;
-        Some(capture.dock().split(self.viewport_size).1)
-    }
-
-    /// Starts an input record for `event` while the inspector is capturing.
-    /// Pointer events inside the dock, or while picking, belong to the inspector.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    fn begin_input_capture(
-        &mut self,
-        event: &PlatformInput,
-    ) -> Option<crate::inspector::InputScope> {
-        let capture = self
-            .inspector_capture
-            .as_deref()
-            .filter(|capture| !capture.is_frozen())?;
-        let mut in_flight = crate::inspector::InputInFlight::for_event(
-            capture,
-            event,
-            self.invalidator.update_count(),
-        );
-        if let Some(position) = in_flight.record.position {
-            in_flight.record.inspector = capture.pick().active
-                || self
-                    .inspector_bounds()
-                    .is_some_and(|dock| dock.contains(&position));
-        }
-        Some(crate::inspector::InputScope {
-            outer: self.inspector_input.replace(Box::new(in_flight)),
-        })
-    }
-
-    /// Records the key context stack of the element a key event is dispatched
-    /// to, and whether that element is inside the inspector.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    fn note_input_target(&mut self, dispatch_path: &[DispatchNodeId]) {
-        if let Some(mut in_flight) = self.inspector_input.take() {
-            self.describe_input_target(dispatch_path, &mut in_flight.record);
-            self.inspector_input = Some(in_flight);
-        }
-    }
-
-    /// Starts an [`crate::inspector::InputKind::Action`] record for an action
-    /// dispatched outside of any event while the inspector is capturing.
-    /// Actions dispatched while handling an event join that event's record.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    fn begin_action_capture(
-        &mut self,
-        node_id: DispatchNodeId,
-        action: &dyn Action,
-    ) -> Option<crate::inspector::InputScope> {
-        if self.inspector_input.is_some() {
-            return None;
-        }
-        let capture = self
-            .inspector_capture
-            .as_deref()
-            .filter(|capture| !capture.is_frozen())?;
-        let mut in_flight = crate::inspector::InputInFlight::start(
-            capture,
-            crate::inspector::InputKind::Action,
-            action.name().into(),
-            self.invalidator.update_count(),
-        );
-        let dispatch_path = self.rendered_frame.dispatch_tree.dispatch_path(node_id);
-        self.describe_input_target(&dispatch_path, &mut in_flight.record);
-        self.inspector_input = Some(Box::new(in_flight));
-        Some(crate::inspector::InputScope { outer: None })
-    }
-
-    /// Adds a dispatched action to the record being built, and commits the
-    /// record if [`Self::begin_action_capture`] started it for this action.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    fn finish_action_capture(
-        &mut self,
-        scope: Option<crate::inspector::InputScope>,
-        action: &dyn Action,
-        binding: Option<&KeyBinding>,
-        handled: bool,
-    ) {
-        if let Some(in_flight) = self.inspector_input.as_deref_mut() {
-            in_flight.push_action(action, binding, handled);
-        }
-        self.finish_input_capture(scope, handled);
-    }
-
-    /// Commits the record started with `scope` and makes the enclosing
-    /// dispatch's record current again.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    fn finish_input_capture(&mut self, scope: Option<crate::inspector::InputScope>, handled: bool) {
-        let Some(scope) = scope else {
-            return;
-        };
-        let Some(in_flight) = mem::replace(&mut self.inspector_input, scope.outer) else {
-            return;
-        };
-        let record = in_flight.finish(
-            handled,
-            self.invalidator.update_count(),
-            self.pending_input_keystrokes(),
-        );
-        if let Some(capture) = self.inspector_capture.as_deref_mut() {
-            capture.commit_input(record);
-        }
-    }
-
-    /// Fills in the key context stack along `dispatch_path`, outermost first,
-    /// and flags the record when the path runs through the inspector's view.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    fn describe_input_target(
-        &self,
-        dispatch_path: &[DispatchNodeId],
-        record: &mut crate::inspector::InputRecord,
-    ) {
-        let dispatch_tree = &self.rendered_frame.dispatch_tree;
-        record.context_stack = dispatch_path
-            .iter()
-            .filter_map(|&node_id| dispatch_tree.node(node_id).context.clone())
-            .collect();
-        let inspector_node = self
-            .inspector
-            .as_ref()
-            .and_then(|inspector| dispatch_tree.view_node_id(inspector.entity_id()));
-        record.inspector |= inspector_node.is_some_and(|node_id| dispatch_path.contains(&node_id));
     }
 
     /// Whether a cached view may replay its previous paint. While the
@@ -7254,53 +7061,6 @@ impl Window {
             return capture.pick().active;
         }
         false
-    }
-
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub(crate) fn build_inspector_element_id(
-        &mut self,
-        path: crate::InspectorElementPath,
-    ) -> crate::InspectorElementId {
-        self.invalidator.debug_assert_paint_or_prepaint();
-        let path = Rc::new(path);
-        let next_instance_id = self
-            .next_frame
-            .next_inspector_instance_ids
-            .entry(path.clone())
-            .or_insert(0);
-        let instance_id = *next_instance_id;
-        *next_instance_id += 1;
-        crate::InspectorElementId { path, instance_id }
-    }
-
-    /// Lays out the inspector's own root in the dock. Nothing it draws is
-    /// recorded; its time goes to [`crate::inspector::PhaseTimings::inspector`].
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    fn prepaint_inspector(&mut self, cx: &mut App) -> Option<AnyElement> {
-        let bounds = self.inspector_bounds()?;
-        // Taken while drawing, so the inspector's own elements are never inspected.
-        let inspector = self.inspector.take()?;
-        let phase = self.inspector_suspend(cx);
-        let hitboxes_start = self.next_frame.hitboxes.len();
-        let mut inspector_element = AnyView::from(inspector.clone()).into_any_element();
-        inspector_element.prepaint_as_root(bounds.origin, bounds.size.into(), self, cx);
-        if let Some(capture) = self.inspector_capture.as_deref_mut() {
-            capture.recorder.inspector_hitboxes = hitboxes_start..self.next_frame.hitboxes.len();
-        }
-        self.inspector_resume(phase, cx);
-        self.inspector = Some(inspector);
-        Some(inspector_element)
-    }
-
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    fn paint_inspector(&mut self, inspector_element: Option<AnyElement>, cx: &mut App) {
-        if let Some(mut inspector_element) = inspector_element {
-            let inspector = self.inspector.take();
-            let phase = self.inspector_suspend(cx);
-            inspector_element.paint(self, cx);
-            self.inspector_resume(phase, cx);
-            self.inspector = inspector;
-        }
     }
 
     /// For testing: set the current modifier keys state.

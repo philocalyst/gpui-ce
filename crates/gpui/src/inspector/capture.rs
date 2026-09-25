@@ -212,6 +212,11 @@ pub struct InspectorCapture {
     pub(crate) path_infos: Vec<PathInfo>,
     pub(crate) notify_stats: FxHashMap<crate::EntityId, NotifyStats>,
     pub(crate) frozen: bool,
+    /// Set for captures installed by tests: their rings hold fixture data,
+    /// which live frames and input must not be mixed into.
+    pub(crate) replaying: bool,
+    /// The entities a replaying capture reports instead of the live registry.
+    pub(crate) replay_entities: Vec<EntityInfo>,
     pub(crate) generation: u64,
     pub(crate) overlay: OverlayState,
     pub(crate) pick: PickState,
@@ -235,6 +240,8 @@ impl InspectorCapture {
             path_infos: Vec::new(),
             notify_stats: FxHashMap::default(),
             frozen: false,
+            replaying: false,
+            replay_entities: Vec::new(),
             generation: 0,
             overlay: OverlayState::default(),
             pick: PickState::default(),
@@ -356,6 +363,14 @@ impl InspectorCapture {
         self.record_input(record)
     }
 
+    /// Sets the entities the window reports while this capture is installed
+    /// with `Window::replace_inspector_capture_for_test`, in place of the
+    /// live registry (whose ids would not match the fixture's).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_entities_for_test(&mut self, entities: Vec<EntityInfo>) {
+        self.replay_entities = entities;
+    }
+
     /// Interns a fabricated path for a construction site.
     #[cfg(any(test, feature = "test-support"))]
     #[track_caller]
@@ -443,6 +458,12 @@ impl InspectorCapture {
     /// While frozen the rings stop updating; the app keeps running.
     pub fn is_frozen(&self) -> bool {
         self.frozen
+    }
+
+    /// Whether live frames and input are being added to the rings: not
+    /// frozen, and not replaying fixture data installed by a test.
+    pub(crate) fn is_recording(&self) -> bool {
+        !self.frozen && !self.replaying
     }
 
     /// Freezes or resumes recording.

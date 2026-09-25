@@ -132,10 +132,11 @@ impl InputInFlight {
 }
 
 impl InspectorCapture {
-    /// Records finished input unless frozen. A pointer move directly following
-    /// another, with no frame drawn in between, is merged into it.
+    /// Records finished input unless frozen (or replaying fixtures). A pointer
+    /// move directly following another, with no frame drawn in between, is
+    /// merged into it.
     pub(crate) fn commit_input(&mut self, record: InputRecord) {
-        if self.frozen {
+        if !self.is_recording() {
             return;
         }
         match self.input.back_mut() {

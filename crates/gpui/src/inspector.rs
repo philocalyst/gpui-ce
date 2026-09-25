@@ -41,13 +41,13 @@ pub(crate) mod user_span;
 pub use capture::*;
 #[cfg(any(feature = "inspector", debug_assertions))]
 pub use model::*;
+pub use user_span::{SpanGuard, span};
 #[cfg(any(feature = "inspector", debug_assertions))]
 pub(crate) use {
     entities::live_entities,
     input::{InputInFlight, InputScope},
     keys::resolve_keystrokes,
 };
-pub use user_span::{SpanGuard, span};
 
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod conditional {

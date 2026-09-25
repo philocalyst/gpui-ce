@@ -417,7 +417,7 @@ impl Loupe {
                 })
             }));
         }
-        let live = cx.inspector_entities();
+        let live = window.inspector_entities(cx);
         let mut entities: Vec<(gpui::EntityId, &'static str)> =
             entity_names(capture, &live).into_iter().collect();
         for id in capture.notify_stats().keys() {

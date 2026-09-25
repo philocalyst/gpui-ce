@@ -95,17 +95,19 @@ impl LoupeHarness {
             .expect("window is open")
     }
 
-    /// Runs pending work and draws a frame if anything changed.
+    /// Runs pending work; like a platform frame loop, the window draws a
+    /// frame only if something invalidated it (test mode draws dirty windows
+    /// whenever effects flush).
     pub fn draw(&mut self) {
         self.cx.run_until_parked();
-        self.update(|window, cx| window.draw(cx).clear(cx));
+        self.update(|_, _| {});
     }
 
     /// Redraws every view, including cached ones (so debug bounds are fresh).
     pub fn redraw_all(&mut self) {
         self.cx.run_until_parked();
         self.update(|window, cx| {
-            window.refresh();
+            window.refresh_with_inspector();
             window.draw(cx).clear(cx);
         });
     }
