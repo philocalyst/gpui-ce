@@ -7,6 +7,8 @@
 //! and input only while Loupe is open. See `DESIGN.md` for the architecture.
 
 mod loupe;
+pub mod theme;
+pub mod widgets;
 
 use gpui::{
     App, AppContext as _, IntoElement as _, KeyBinding, StyleRefinement, Styled as _, actions,
@@ -14,6 +16,7 @@ use gpui::{
 use std::borrow::Cow;
 
 pub use loupe::Loupe;
+pub use theme::{MONO_FONT, UI_FONT};
 
 actions!(
     loupe,
@@ -24,11 +27,6 @@ actions!(
         TogglePick,
     ]
 );
-
-/// The UI font Loupe renders with. Embedded, so every platform looks the same.
-pub const UI_FONT: &str = "IBM Plex Sans";
-/// The font Loupe uses for values, paths and code.
-pub const MONO_FONT: &str = "Lilex";
 
 const FONTS: [&[u8]; 6] = [
     include_bytes!("../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"),
@@ -63,6 +61,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(pick, TogglePick, None),
     ]);
     loupe::bind_keys(cx);
+    widgets::bind_keys("Loupe", cx);
 
     cx.on_action(|_: &ToggleInspector, cx| {
         if let Some(window) = cx.active_window() {
