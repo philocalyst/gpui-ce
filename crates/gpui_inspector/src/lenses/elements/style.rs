@@ -543,7 +543,7 @@ impl ElementsLens {
                 group = Some(row.row.group);
                 body = body.child(
                     div()
-                        .h(px(18.))
+                        .h(px(20.))
                         .px(theme.metrics.gutter)
                         .flex()
                         .items_end()

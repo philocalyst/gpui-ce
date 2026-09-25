@@ -134,18 +134,18 @@ enum Fact {
 }
 
 /// The Details rows of an element, in reading order.
-fn detail_facts(details: &ElementDetails, bounds_text: String) -> Vec<(&'static str, Fact)> {
-    let mut facts = vec![("Bounds", Fact::Text(bounds_text))];
+fn detail_facts(details: &ElementDetails, bounds_text: String) -> Vec<(SharedString, Fact)> {
+    let mut facts = vec![("Bounds".into(), Fact::Text(bounds_text))];
     if let Some(text) = &details.text {
-        facts.push(("Text", Fact::Text(text.to_string())));
+        facts.push(("Text".into(), Fact::Text(text.to_string())));
     }
     match (&details.font_family, details.font_size) {
         (Some(family), Some(size)) => facts.push((
-            "Font",
+            "Font".into(),
             Fact::Text(format!("{family} · {}", format::pixels(size))),
         )),
-        (Some(family), None) => facts.push(("Font", Fact::Text(family.to_string()))),
-        (None, Some(size)) => facts.push(("Font size", Fact::Text(format::pixels(size)))),
+        (Some(family), None) => facts.push(("Font".into(), Fact::Text(family.to_string()))),
+        (None, Some(size)) => facts.push(("Font size".into(), Fact::Text(format::pixels(size)))),
         (None, None) => {}
     }
     for (label, color) in [
@@ -154,14 +154,14 @@ fn detail_facts(details: &ElementDetails, bounds_text: String) -> Vec<(&'static 
         ("Border color", details.border_color),
     ] {
         if let Some(color) = color {
-            facts.push((label, Fact::Value(PropertyValue::Color(color))));
+            facts.push((label.into(), Fact::Value(PropertyValue::Color(color))));
         }
     }
     if let Some(radius) = details.corner_radius {
-        facts.push(("Corner radius", Fact::Text(format::pixels(radius))));
+        facts.push(("Corner radius".into(), Fact::Text(format::pixels(radius))));
     }
     if let Some(opacity) = details.opacity {
-        facts.push(("Opacity", Fact::Text(format::number(opacity))));
+        facts.push(("Opacity".into(), Fact::Text(format::number(opacity))));
     }
     if let Some(layout) = &details.layout {
         let mut text = layout.display.to_string();
@@ -172,23 +172,23 @@ fn detail_facts(details: &ElementDetails, bounds_text: String) -> Vec<(&'static 
         if layout.absolute {
             text.push_str(" · absolute");
         }
-        facts.push(("Layout", Fact::Text(text)));
+        facts.push(("Layout".into(), Fact::Text(text)));
     }
     if let Some(role) = &details.a11y_role {
-        facts.push(("Role", Fact::Text(role.to_string())));
+        facts.push(("Role".into(), Fact::Text(role.to_string())));
     }
     if let Some(label) = &details.a11y_label {
-        facts.push(("A11y label", Fact::Text(label.to_string())));
+        facts.push(("A11y label".into(), Fact::Text(label.to_string())));
     }
     if let Some(context) = &details.key_context {
-        facts.push(("Key context", Fact::Text(context.to_string())));
+        facts.push(("Key context".into(), Fact::Text(context.to_string())));
     }
     if let Some(source) = &details.source {
-        facts.push(("Image", Fact::Text(source.to_string())));
+        facts.push(("Image".into(), Fact::Text(source.to_string())));
     }
     if let Some((count, visible)) = &details.list {
         facts.push((
-            "List",
+            "List".into(),
             Fact::Text(format!(
                 "{} items · showing {}–{}",
                 format::count(*count as u64),
@@ -202,10 +202,10 @@ fn detail_facts(details: &ElementDetails, bounds_text: String) -> Vec<(&'static 
         if let Some(content) = details.content_size {
             text.push_str(&format!(" · content {}", format::size(content)));
         }
-        facts.push(("Scroll", Fact::Text(text)));
+        facts.push(("Scroll".into(), Fact::Text(text)));
     }
     for (label, value) in &details.extra {
-        facts.push(("", Fact::Text(format!("{label}: {value}"))));
+        facts.push((label.clone(), Fact::Text(value.to_string())));
     }
     facts
 }
@@ -755,7 +755,7 @@ fn render_details(
         format::size(record.bounds.size),
         format::point(record.bounds.origin)
     );
-    let row = |label: &'static str, value: AnyElement| {
+    let row = |label: SharedString, value: AnyElement| {
         div()
             .h(theme.metrics.property_row)
             .px(theme.metrics.gutter)
@@ -795,7 +795,7 @@ fn render_details(
         };
         rows.push(
             row(
-                "Contrast",
+                "Contrast".into(),
                 div()
                     .flex()
                     .items_center()
@@ -938,7 +938,7 @@ mod tests {
             .find(|record| record.id.as_deref() == Some("rows"))
             .unwrap();
         let facts = detail_facts(rows_list.details.as_deref().unwrap(), "b".into());
-        let labels: Vec<&str> = facts.iter().map(|(label, _)| *label).collect();
+        let labels: Vec<&str> = facts.iter().map(|(label, _)| label.as_ref()).collect();
         assert_eq!(labels, ["Bounds", "List", "Scroll"]);
         let Fact::Text(list) = &facts[1].1 else {
             panic!("text")

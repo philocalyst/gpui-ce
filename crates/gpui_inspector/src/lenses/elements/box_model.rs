@@ -4,7 +4,7 @@
 
 use super::ElementsLens;
 use crate::{
-    analysis::{contrast::Srgb, format},
+    analysis::{contrast::Srgb, format, style_grid::PropertyValue},
     theme::{MONO_FONT, Theme, UI_FONT},
     widgets::{ScrubChanged, ScrubField},
 };
@@ -145,12 +145,7 @@ impl BoxFields {
                     &field,
                     window,
                     move |this, _, event: &ScrubChanged, window, cx| {
-                        this.edit(
-                            &pointer,
-                            crate::analysis::style_grid::PropertyValue::Pixels(event.0),
-                            window,
-                            cx,
-                        )
+                        this.edit(&pointer, PropertyValue::Pixels(event.0), window, cx)
                     },
                 ));
                 fields.insert((layer, side), field);
@@ -267,7 +262,7 @@ impl ElementsLens {
                         .items_center()
                         .child(
                             div()
-                                .w(px(30.))
+                                .w(px(32.))
                                 .flex()
                                 .justify_center()
                                 .child(value(layer, Side::Left)),
@@ -275,7 +270,7 @@ impl ElementsLens {
                         .child(div().flex_1().child(inner))
                         .child(
                             div()
-                                .w(px(30.))
+                                .w(px(32.))
                                 .flex()
                                 .justify_center()
                                 .child(value(layer, Side::Right)),
@@ -332,5 +327,22 @@ mod tests {
         assert_eq!(pointer(Layer::Padding, Side::Top), "/padding/top");
         assert_eq!(pointer(Layer::Border, Side::Left), "/border_widths/left");
         assert_eq!(pointer(Layer::Margin, Side::Bottom), "/margin/bottom");
+        // Every edge the diagram scrubs is a settable style property, and
+        // setting it in pixels sets exactly that edge.
+        for layer in Layer::ALL {
+            for side in Side::ALL {
+                let pointer = pointer(layer, side);
+                let style = crate::analysis::style_grid::set(
+                    &gpui::StyleRefinement::default(),
+                    &pointer,
+                    &PropertyValue::Pixels(3.),
+                )
+                .unwrap_or_else(|error| panic!("{pointer}: {error}"));
+                let rows = crate::analysis::style_grid::rows(&style);
+                assert_eq!(rows.len(), 1, "{pointer}: {rows:?}");
+                assert_eq!(rows[0].path, pointer);
+                assert_eq!(rows[0].value, PropertyValue::Pixels(3.));
+            }
+        }
     }
 }

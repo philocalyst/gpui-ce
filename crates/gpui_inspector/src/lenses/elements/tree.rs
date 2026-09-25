@@ -46,12 +46,16 @@ impl ElementsLens {
                 cx.entity().downgrade(),
             )
             .into_any_element(),
-            (Some(_), Some(_)) => EmptyState::new("No elements match")
+            (Some(_), Some(_)) if self.filtering() => EmptyState::new("No elements match")
                 .icon(IconName::Filter)
                 .description(format!(
                     "No label, text, file or type contains “{}”.",
                     self.query.trim()
                 ))
+                .into_any_element(),
+            (Some(_), Some(_)) => EmptyState::new("Nothing from your code")
+                .icon(IconName::Filter)
+                .description("Every element here was built by gpui or a library.")
                 .into_any_element(),
             // Without a tree the whole lens shows one empty state instead.
             _ => div().into_any_element(),
@@ -143,7 +147,7 @@ impl ElementsLens {
         let colors = &theme.colors;
         div()
             .flex_none()
-            .h(px(26.))
+            .h(px(28.))
             .pl(theme.metrics.gutter)
             .pr(px(4.))
             .flex()
