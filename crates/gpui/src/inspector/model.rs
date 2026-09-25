@@ -704,4 +704,7 @@ pub enum InspectorEvent {
     Picked(ElementKey),
     /// Picking ended without a selection (escape, or picking was toggled off).
     PickCancelled,
+    /// The app was held (`true`) or released (`false`); see
+    /// [`crate::Window::set_inspector_holding`].
+    HoldChanged(bool),
 }

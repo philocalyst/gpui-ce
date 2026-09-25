@@ -46,10 +46,14 @@ impl LoupeHarness {
                 *loupe.borrow_mut() = Some(cx.entity().downgrade());
             })
         });
-        let window = cx
+        let window: AnyWindowHandle = cx
             .open_window(size, build_root)
             .expect("headless window opens")
             .into();
+        // Active, like a window the user is looking at: global shortcuts
+        // (toggle Loupe, pick, hold) act on the active window.
+        cx.update_window(window, |_, window, _| window.activate_window())
+            .expect("window is open");
         let mut harness = Self {
             cx,
             window,

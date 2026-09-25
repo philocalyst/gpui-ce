@@ -80,11 +80,13 @@ pub enum IconName {
     Command,
     /// Small solid triangle pointing up: over budget.
     TriangleUp,
+    /// Push pin: hold the app still.
+    Hold,
 }
 
 impl IconName {
     /// Every glyph, for galleries and pickers.
-    pub const ALL: [IconName; 28] = [
+    pub const ALL: [IconName; 29] = [
         IconName::Pick,
         IconName::Outline,
         IconName::Flash,
@@ -113,6 +115,7 @@ impl IconName {
         IconName::Entity,
         IconName::Command,
         IconName::TriangleUp,
+        IconName::Hold,
     ];
 
     /// A stable name, also the sprite atlas key.
@@ -146,6 +149,7 @@ impl IconName {
             IconName::Entity => "loupe/entity",
             IconName::Command => "loupe/command",
             IconName::TriangleUp => "loupe/triangle-up",
+            IconName::Hold => "loupe/hold",
         }
     }
 
@@ -212,6 +216,9 @@ impl IconName {
             ),
             IconName::Command => glyph!(r##"<path d="M3.4 4.4 7 8l-3.6 3.6M8.6 11.8h4"/>"##),
             IconName::TriangleUp => glyph!(r##"<path d="M8 3.6 13.2 12H2.8z" fill="#000"/>"##),
+            IconName::Hold => glyph!(
+                r##"<path d="M9.6 1.9 14.1 6.4l-1.9.7-2.4 2.4.4 3-1.2 1.2-6.8-6.8L3.4 5.7l3 .4 2.4-2.4z"/><path d="M5.7 10.3 1.9 14.1"/>"##
+            ),
         }
     }
 }

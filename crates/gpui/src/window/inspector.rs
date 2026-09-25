@@ -44,10 +44,30 @@ impl Window {
         }
     }
 
+    /// Holds or releases the app (see
+    /// [`crate::inspector::InspectorCapture::set_holding`]): while held, the
+    /// app stays exactly as it is on screen, so a hover menu or a tooltip
+    /// can be inspected. Releasing draws a frame right away with everything
+    /// the app deferred. Emits [`crate::inspector::InspectorEvent::HoldChanged`].
+    pub fn set_inspector_holding(&mut self, holding: bool, cx: &mut App) {
+        let Some(capture) = self.inspector_capture.as_deref_mut() else {
+            return;
+        };
+        if capture.is_holding() == holding {
+            return;
+        }
+        capture.set_holding(holding);
+        if !holding {
+            self.request_inspector_frame(crate::inspector::CauseKind::Refresh);
+        }
+        self.emit_inspector_event(crate::inspector::InspectorEvent::HoldChanged(holding), cx);
+    }
+
     /// Where the inspector UI is drawn, while it is open.
     pub fn inspector_bounds(&self) -> Option<Bounds<Pixels>> {
         let capture = self.inspector_capture.as_ref()?;
-        Some(capture.dock().split(self.viewport_size).1)
+        let dock = capture.dock();
+        (dock != crate::inspector::InspectorDock::Hidden).then(|| dock.split(self.viewport_size).1)
     }
 
     /// Resolves keystrokes against the keymap and the focused context stack

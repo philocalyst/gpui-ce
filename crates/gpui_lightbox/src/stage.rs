@@ -446,7 +446,7 @@ impl Stage {
                 window.toggle_inspector(cx);
             }
             if let Some(capture) = window.inspector_capture_mut() {
-                capture.set_dock(InspectorDock::Right { width: px(0.) });
+                capture.set_dock(InspectorDock::Hidden);
             }
             window.refresh();
         });

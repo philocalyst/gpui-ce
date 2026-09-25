@@ -22,6 +22,9 @@ pub enum InspectorDock {
         /// Row height.
         height: Pixels,
     },
+    /// No dock: the capture records while the app keeps the whole window and
+    /// the inspector's own UI is not drawn (headless tools, traces in CI).
+    Hidden,
 }
 
 impl Default for InspectorDock {
@@ -65,6 +68,13 @@ impl InspectorDock {
                 );
                 (app, dock)
             }
+            InspectorDock::Hidden => (
+                Bounds::new(crate::point(px(0.), px(0.)), viewport),
+                Bounds::new(
+                    crate::point(viewport.width, px(0.)),
+                    crate::size(px(0.), viewport.height),
+                ),
+            ),
         }
     }
 

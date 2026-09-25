@@ -15,6 +15,8 @@ pub(crate) type Run = Rc<dyn Fn(Command, &mut Window, &mut App)>;
 
 /// Docks narrower than this drop the toolbar's text labels.
 const COMPACT_BELOW: gpui::Pixels = px(440.);
+/// The search field shows its shortcut chip from this toolbar width.
+const SEARCH_KEYS_FROM: gpui::Pixels = px(600.);
 
 /// The icon and a slug (for debug selectors) of an overlay toggle.
 fn overlay_meta(mode: OverlayModes) -> (IconName, &'static str) {
@@ -44,6 +46,7 @@ pub(crate) struct Toolbar {
     pub picking: bool,
     pub overlays: OverlayModes,
     pub frozen: bool,
+    pub holding: bool,
     pub dock: DockSide,
     pub width: gpui::Pixels,
     pub run: Run,
@@ -97,6 +100,20 @@ impl RenderOnce for Toolbar {
             )
             .on_click(command(Command::ToggleFreeze));
 
+        // Icon only: the pin reads as "hold", and the status bar says HELD.
+        let hold = Button::new("loupe-hold")
+            .icon(IconName::Hold)
+            .toggle_state(self.holding)
+            .tooltip_keys(
+                if self.holding {
+                    "Release the app"
+                } else {
+                    Command::ToggleHold.label()
+                },
+                keys::HOLD,
+            )
+            .on_click(command(Command::ToggleHold));
+
         let search = div()
             .id("loupe-search")
             .debug_selector(|| "loupe-search".into())
@@ -126,7 +143,11 @@ impl RenderOnce for Toolbar {
             } else {
                 "Find anything…"
             }))
-            .when(!compact, |this| this.child(Kbd::new(keys::PALETTE)))
+            // The shortcut chip needs room the placeholder deserves more;
+            // the tooltip always carries it.
+            .when(self.width >= SEARCH_KEYS_FROM, |this| {
+                this.child(Kbd::new(keys::PALETTE))
+            })
             .tooltip(Tooltip::with_keys(
                 "Commands, elements, entities",
                 keys::PALETTE,
@@ -165,6 +186,7 @@ impl RenderOnce for Toolbar {
             .children(overlays)
             .child(separator())
             .child(freeze)
+            .child(hold)
             .child(search.mx(px(4.)))
             // Takes whatever the capped search field leaves, keeping the
             // dock and close buttons at the trailing edge.
