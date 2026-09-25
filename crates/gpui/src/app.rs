@@ -1142,20 +1142,19 @@ impl App {
         })
     }
 
+    /// Runs `callback` and returns every entity it accessed, including those
+    /// something else accessed earlier in the frame (or created in it): a
+    /// cached view that is reused registers exactly these for invalidation,
+    /// whatever else the frame reads.
     pub(crate) fn detect_accessed_entities<R>(
         &mut self,
         callback: impl FnOnce(&mut App) -> R,
     ) -> (R, FxHashSet<EntityId>) {
-        let accessed_entities_start = self.entities.accessed_entities.get_mut().clone();
+        let outer = mem::take(self.entities.accessed_entities.get_mut());
         let result = callback(self);
-        let entities_accessed_in_callback = self
-            .entities
-            .accessed_entities
-            .get_mut()
-            .difference(&accessed_entities_start)
-            .copied()
-            .collect::<FxHashSet<EntityId>>();
-        (result, entities_accessed_in_callback)
+        let accessed = mem::replace(self.entities.accessed_entities.get_mut(), outer);
+        self.entities.extend_accessed(&accessed);
+        (result, accessed)
     }
 
     pub(crate) fn record_entities_accessed(

@@ -3,11 +3,12 @@
 
 use super::*;
 use crate::{
-    self as gpui, AnyElement, App, AppContext as _, Bounds, Context, Entity, EntityId, Hsla,
-    InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Pixels, Point, Render,
-    ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
-    StyleRefinement, Styled as _, TestAppContext, TouchPhase, VisualTestContext, Window,
-    WindowControlArea, blue, deferred, div, point, px, red, size, uniform_list,
+    self as gpui, AnyElement, AnyView, App, AppContext as _, Bounds, Context, Entity, EntityId,
+    Hsla, InteractiveElement as _, IntoElement, Modifiers, ParentElement as _, Pixels, Point,
+    Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, TestAppContext, TouchPhase,
+    VisualTestContext, Window, WindowControlArea, blue, deferred, div, point, px, red, size,
+    uniform_list,
 };
 use std::{cell::RefCell, panic::Location, rc::Rc, sync::Arc};
 
@@ -2080,4 +2081,83 @@ fn the_app_renders_when_the_capture_asks_for_more(cx: &mut TestAppContext) {
     dock.update(cx, |_, cx| cx.notify());
     assert!(app_replayed(cx));
     assert_eq!(renders(&view, cx).0, rendered.0 + 2);
+}
+
+/// A model the inspector's UI creates along with it.
+struct DockModel(usize);
+
+/// The inspector's UI as Loupe builds it: created on the inspector's first
+/// draw, with a model it reads and observes (a cached view only renders
+/// again when it is notified), and drawn cached.
+struct DockView {
+    model: Entity<DockModel>,
+    renders: usize,
+    _observation: gpui::Subscription,
+}
+
+impl Render for DockView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.renders += 1;
+        let value = self.model.read(cx).0;
+        div().size_full().child(format!("dock {value}"))
+    }
+}
+
+type CreatedDock = Rc<RefCell<Option<(Entity<DockView>, Entity<DockModel>)>>>;
+
+fn created_dock(cx: &mut VisualTestContext) -> CreatedDock {
+    let dock: CreatedDock = Rc::default();
+    let slot = dock.clone();
+    cx.update(|_, cx| {
+        cx.set_inspector_renderer(Box::new(move |inspector, _, cx| {
+            let (view, model) = inspector
+                .ui_state(|| {
+                    let model = cx.new(|_| DockModel(0));
+                    let view = cx.new(|cx| DockView {
+                        model: model.clone(),
+                        renders: 0,
+                        _observation: cx.observe(&model, |_, _, cx| cx.notify()),
+                    });
+                    (view, model)
+                })
+                .clone();
+            *slot.borrow_mut() = Some((view.clone(), model));
+            AnyView::from(view)
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element()
+        }))
+    });
+    dock
+}
+
+#[gpui::test]
+fn the_inspectors_ui_stays_invalidated_through_a_stream_of_app_frames(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| Nested::new());
+    let dock = created_dock(cx);
+    open(cx);
+    let (dock, model) = dock.borrow().clone().expect("the dock rendered");
+    let dock_renders = |cx: &mut VisualTestContext| dock.read_with(cx, |dock, _| dock.renders);
+    let rendered = dock_renders(cx);
+
+    // Frame after frame of the app: the dock's cached UI is reused.
+    for _ in 0..3 {
+        view.update(cx, |_, cx| cx.notify());
+        assert!(!latest_frame(cx).inspector_only);
+    }
+    assert_eq!(dock_renders(cx), rendered);
+
+    // What the dock reads changes: it renders on the next frame.
+    model.update(cx, |model, cx| {
+        model.0 = 1;
+        cx.notify();
+    });
+    assert_eq!(dock_renders(cx), rendered + 1);
+    assert!(painted(cx, "dock 1"));
+
+    // So does notifying the dock itself, after more of the app's frames.
+    for _ in 0..3 {
+        view.update(cx, |_, cx| cx.notify());
+    }
+    dock.update(cx, |_, cx| cx.notify());
+    assert_eq!(dock_renders(cx), rendered + 2);
 }
