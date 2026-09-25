@@ -205,6 +205,8 @@ pub(crate) struct Recorder {
     paint_counter: u32,
     element_count: u32,
     pub(crate) hitbox_owners: Vec<(HitboxId, ElementIndex)>,
+    /// The previous frame's hitbox owners, kept for frames that replay it.
+    previous_hitbox_owners: Vec<(HitboxId, ElementIndex)>,
     /// Scratch for finishing the tree, reused across frames.
     scratch: TreeScratch,
 
@@ -240,6 +242,18 @@ pub(crate) struct Recorder {
     pub(crate) restyling: bool,
     /// The recorded frame awaiting its present time.
     pub(crate) unpresented: Option<u64>,
+    /// This frame replays the app's layers instead of rendering them.
+    app_replayed: bool,
+    /// The views of the last frame that rendered the app.
+    app_views: Vec<ViewSpan>,
+    /// The element count of the last frame that rendered the app.
+    app_element_count: u32,
+    /// What the last frame that rendered the app recorded.
+    app_mode: RecordMode,
+    /// The app was released from a hold and renders on the next frame.
+    pub(crate) release_pending: bool,
+    /// This frame renders the app on its release from a hold.
+    pub(crate) app_released: bool,
     pub(crate) pending_events: Vec<InspectorEvent>,
     pub(crate) pending_causes: Vec<PendingCause>,
     pub(crate) pending_notifies: FxHashMap<EntityId, NotifyDelta>,
@@ -267,6 +281,7 @@ impl Default for Recorder {
             paint_counter: 0,
             element_count: 0,
             hitbox_owners: Vec::new(),
+            previous_hitbox_owners: Vec::new(),
             scratch: TreeScratch::default(),
             views: Vec::new(),
             open_views: Vec::new(),
@@ -292,6 +307,12 @@ impl Default for Recorder {
             style_inputs_changed: false,
             restyling: false,
             unpresented: None,
+            app_replayed: false,
+            app_views: Vec::new(),
+            app_element_count: 0,
+            app_mode: RecordMode::Off,
+            release_pending: false,
+            app_released: false,
             pending_events: Vec::new(),
             pending_causes: Vec::new(),
             pending_notifies: FxHashMap::default(),
@@ -324,6 +345,9 @@ impl Recorder {
         self.splices.clear();
         self.paint_counter = 0;
         self.element_count = 0;
+        self.app_replayed = false;
+        self.app_released = false;
+        mem::swap(&mut self.hitbox_owners, &mut self.previous_hitbox_owners);
         self.hitbox_owners.clear();
         self.views.clear();
         self.open_views.clear();
@@ -694,6 +718,11 @@ impl Recorder {
     /// that were never prepainted (measured and discarded), computes depths
     /// and overflow, and stores the records of cached views that rendered.
     pub(crate) fn finish_tree(&mut self, frame: u64) -> Option<Arc<ElementTree>> {
+        if self.app_replayed {
+            // Nothing of the app was drawn: the live tree, the stored cached
+            // views and last frame's hitbox owners all still describe it.
+            return None;
+        }
         if !self.mode.builds_tree() {
             self.cache.clear();
             self.live_tree = None;
@@ -852,8 +881,46 @@ impl Recorder {
             .filter_map(|view| view.element)
     }
 
+    /// Whether the last frame that rendered the app recorded all this frame
+    /// records, so the app can be replayed rather than rendered.
+    pub(crate) fn can_replay_app(&self) -> bool {
+        self.mode <= self.app_mode && (!self.mode.builds_tree() || self.live_tree.is_some())
+    }
+
+    /// Records that this frame replays the app's layers from the previous
+    /// frame: the app's views are reported as served from cache, and the
+    /// previous frame's tree and hitbox owners still apply.
+    pub(crate) fn replay_app(&mut self) {
+        self.app_replayed = true;
+        mem::swap(&mut self.hitbox_owners, &mut self.previous_hitbox_owners);
+        let start = Instant::now().saturating_duration_since(self.frame_start);
+        self.views = self
+            .app_views
+            .iter()
+            .map(|view| ViewSpan {
+                element: None,
+                start,
+                duration: Duration::ZERO,
+                outcome: ViewOutcome::Cached,
+                ..view.clone()
+            })
+            .collect();
+        self.element_count = self.app_element_count;
+    }
+
+    /// Whether the latest frame replayed the app instead of rendering it.
+    #[cfg(test)]
+    pub(crate) fn app_replayed(&self) -> bool {
+        self.app_replayed
+    }
+
     /// View spans recorded this frame.
     pub(crate) fn take_views(&mut self) -> Vec<ViewSpan> {
+        if !self.app_replayed {
+            self.app_views.clone_from(&self.views);
+            self.app_element_count = self.element_count;
+            self.app_mode = self.mode;
+        }
         mem::take(&mut self.views)
     }
 
