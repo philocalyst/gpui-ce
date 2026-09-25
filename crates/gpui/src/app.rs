@@ -2827,6 +2827,102 @@ impl App {
     }
 }
 
+/// Where an entity notification came from: explains the frames it causes to
+/// an open inspector. Zero-sized unless the inspector is compiled in.
+#[derive(Clone, Copy)]
+pub(crate) struct NotifyOrigin {
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub(crate) site: &'static std::panic::Location<'static>,
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub(crate) type_name: Option<&'static str>,
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub(crate) animation: bool,
+}
+
+impl NotifyOrigin {
+    /// A notification made at the caller's location.
+    #[track_caller]
+    #[inline]
+    pub(crate) fn caller() -> Self {
+        Self::at(std::panic::Location::caller())
+    }
+
+    /// A notification made at `site`.
+    #[inline]
+    pub(crate) fn at(site: &'static std::panic::Location<'static>) -> Self {
+        #[cfg(not(any(feature = "inspector", debug_assertions)))]
+        let _ = site;
+        NotifyOrigin {
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            site,
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            type_name: None,
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            animation: false,
+        }
+    }
+
+    /// The same notification, of an entity of type `T`.
+    #[inline]
+    pub(crate) fn of_type<T: 'static>(self) -> Self {
+        NotifyOrigin {
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            type_name: Some(std::any::type_name::<T>()),
+            ..self
+        }
+    }
+
+    /// The same notification, delivering a requested animation frame.
+    #[inline]
+    pub(crate) fn for_animation(self) -> Self {
+        NotifyOrigin {
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            animation: true,
+            ..self
+        }
+    }
+}
+
+impl App {
+    /// Notifies `entity_id`'s observers and invalidates the windows showing
+    /// it; `origin` explains the resulting frames to an open inspector.
+    pub(crate) fn notify_from(&mut self, entity_id: EntityId, origin: NotifyOrigin) {
+        let window_invalidators = mem::take(
+            self.window_invalidators_by_entity
+                .entry(entity_id)
+                .or_default(),
+        );
+
+        // `window_invalidators_by_entity` is monotonic, so an entry alone
+        // doesn't mean the window is currently rendering the entity. Filter
+        // through `tracked_entities` to keep invalidation tight to windows
+        // that actually display this entity right now.
+        let live_invalidators: SmallVec<[WindowInvalidator; 2]> = window_invalidators
+            .iter()
+            .filter(|(window_id, _)| {
+                self.tracked_entities
+                    .get(window_id)
+                    .is_some_and(|set| set.contains(&entity_id))
+            })
+            .map(|(_, invalidator)| invalidator.clone())
+            .collect();
+
+        if live_invalidators.is_empty() {
+            if self.pending_notifications.insert(entity_id) {
+                self.pending_effects
+                    .push_back(Effect::Notify { emitter: entity_id });
+            }
+        } else {
+            for invalidator in &live_invalidators {
+                invalidator.invalidate_view(entity_id, origin, self);
+            }
+        }
+
+        self.window_invalidators_by_entity
+            .insert(entity_id, window_invalidators);
+    }
+}
+
 impl AppContext for App {
     /// Builds an entity that is owned by the application.
     ///
@@ -2897,40 +2993,9 @@ impl AppContext for App {
         read(entity, self)
     }
 
+    #[track_caller]
     fn notify(&mut self, entity_id: EntityId) {
-        let window_invalidators = mem::take(
-            self.window_invalidators_by_entity
-                .entry(entity_id)
-                .or_default(),
-        );
-
-        // `window_invalidators_by_entity` is monotonic, so an entry alone
-        // doesn't mean the window is currently rendering the entity. Filter
-        // through `tracked_entities` to keep invalidation tight to windows
-        // that actually display this entity right now.
-        let live_invalidators: SmallVec<[WindowInvalidator; 2]> = window_invalidators
-            .iter()
-            .filter(|(window_id, _)| {
-                self.tracked_entities
-                    .get(window_id)
-                    .is_some_and(|set| set.contains(&entity_id))
-            })
-            .map(|(_, invalidator)| invalidator.clone())
-            .collect();
-
-        if live_invalidators.is_empty() {
-            if self.pending_notifications.insert(entity_id) {
-                self.pending_effects
-                    .push_back(Effect::Notify { emitter: entity_id });
-            }
-        } else {
-            for invalidator in &live_invalidators {
-                invalidator.invalidate_view(entity_id, self);
-            }
-        }
-
-        self.window_invalidators_by_entity
-            .insert(entity_id, window_invalidators);
+        self.notify_from(entity_id, NotifyOrigin::caller());
     }
 
     fn emit<EntityType, EventType>(&mut self, entity: &Entity<EntityType>, event: EventType)

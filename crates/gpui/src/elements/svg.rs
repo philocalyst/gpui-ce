@@ -88,6 +88,16 @@ impl Element for Svg {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        window.inspect_current_element(|details| {
+            details.source = self
+                .path
+                .as_ref()
+                .or(self.external_path.as_ref())
+                .or(self.data_path.as_ref())
+                .cloned()
+                .or_else(|| self.data.as_ref().map(|_| "svg data".into()));
+        });
         let layout_id = self.interactivity.request_layout(
             global_id,
             inspector_id,

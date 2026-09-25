@@ -2177,20 +2177,6 @@ pub struct DivFrameState {
     child_layout_ids: SmallVec<[LayoutId; 2]>,
 }
 
-/// Interactivity state displayed an manipulated in the inspector.
-#[derive(Clone)]
-pub struct DivInspectorState {
-    /// The inspected element's base style. This is used for both inspecting and modifying the
-    /// state. In the future it will make sense to separate the read and write, possibly tracking
-    /// the modifications.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub base_style: Box<StyleRefinement>,
-    /// Inspects the bounds of the element.
-    pub bounds: Bounds<Pixels>,
-    /// Size of the children of the element, or `bounds.size` if it has no children.
-    pub content_size: Size<Pixels>,
-}
-
 impl Styled for Div {
     fn style(&mut self) -> &mut StyleRefinement {
         &mut self.interactivity.base_style
@@ -2476,6 +2462,16 @@ pub(crate) struct AriaProperties {
     pub(crate) live_atomic: Option<bool>,
 }
 
+/// Interaction states treated as active while computing a style, whatever
+/// the pointer and focus say (forced by the inspector).
+#[derive(Clone, Copy, Default)]
+struct ForcedStyleStates {
+    hover: bool,
+    active: bool,
+    focus: bool,
+    focus_visible: bool,
+}
+
 /// The interactivity struct. Powers all of the general-purpose
 /// interactivity in the `Div` element.
 #[derive(Default)]
@@ -2546,6 +2542,9 @@ pub struct Interactivity {
 
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) source_location: Option<&'static core::panic::Location<'static>>,
+    /// Interaction states the inspector forces on this element, for styling.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub(crate) inspector_forced: crate::inspector::ForcedStates,
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_selector: Option<String>,
@@ -2591,21 +2590,9 @@ impl Interactivity {
         f: impl FnOnce(Style, &mut Window, &mut App) -> LayoutId,
     ) -> LayoutId {
         #[cfg(any(feature = "inspector", debug_assertions))]
-        window.with_inspector_state(
-            _inspector_id,
-            cx,
-            |inspector_state: &mut Option<DivInspectorState>, _window| {
-                if let Some(inspector_state) = inspector_state {
-                    self.base_style = inspector_state.base_style.clone();
-                } else {
-                    *inspector_state = Some(DivInspectorState {
-                        base_style: self.base_style.clone(),
-                        bounds: Default::default(),
-                        content_size: Default::default(),
-                    })
-                }
-            },
-        );
+        {
+            self.inspector_forced = window.inspector_style(_inspector_id, &mut self.base_style);
+        }
 
         window.with_optional_element_state::<InteractiveElementState, _>(
             global_id,
@@ -2699,16 +2686,7 @@ impl Interactivity {
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
-        window.with_inspector_state(
-            _inspector_id,
-            cx,
-            |inspector_state: &mut Option<DivInspectorState>, _window| {
-                if let Some(inspector_state) = inspector_state {
-                    inspector_state.bounds = bounds;
-                    inspector_state.content_size = content_size;
-                }
-            },
-        );
+        window.inspector_add_flags(|| self.inspector_flags());
 
         if let Some(focus_handle) = self.tracked_focus_handle.as_ref() {
             window.set_focus_handle(focus_handle, cx);
@@ -2750,6 +2728,8 @@ impl Interactivity {
                     window,
                     cx,
                 );
+                #[cfg(any(feature = "inspector", debug_assertions))]
+                self.inspect_details(&style, bounds, window);
 
                 if let Some(element_state) = element_state.as_mut() {
                     if let Some(clicked_state) = element_state.clicked_state.as_ref() {
@@ -2775,7 +2755,7 @@ impl Interactivity {
                     window.with_content_mask(
                         style.overflow_mask(bounds, window.rem_size()),
                         |window| {
-                            let hitbox = if self.should_insert_hitbox(&style, window, cx) {
+                            let hitbox = if self.should_insert_hitbox(&style) {
                                 let hitbox = window.insert_hitbox_mut(bounds, self.hitbox_behavior);
                                 // attach the group of the div to the hitbox's tags so it can be queried in hit-test related listeners
                                 if let Some(group) = &self.group {
@@ -2797,7 +2777,7 @@ impl Interactivity {
         )
     }
 
-    fn should_insert_hitbox(&self, style: &Style, window: &Window, cx: &App) -> bool {
+    fn should_insert_hitbox(&self, style: &Style) -> bool {
         self.hitbox_behavior != HitboxBehavior::Normal
             || self.window_control.is_some()
             || style.mouse_cursor.is_some()
@@ -2820,7 +2800,6 @@ impl Interactivity {
             || !self.drop_listeners.is_empty()
             || self.drag_over_style.is_some()
             || self.tooltip_builder.is_some()
-            || window.is_inspector_picking(cx)
     }
 
     fn clamp_scroll_position(
@@ -3013,17 +2992,10 @@ impl Interactivity {
 
                                         f(&style, window, cx);
 
-                                        if let Some(_hitbox) = hitbox {
-                                            #[cfg(any(feature = "inspector", debug_assertions))]
-                                            window.insert_inspector_hitbox(
-                                                _hitbox.id,
-                                                _inspector_id,
-                                                cx,
-                                            );
-
-                                            if let Some(group) = self.group.as_ref() {
-                                                GroupHitboxes::pop(group, cx);
-                                            }
+                                        if hitbox.is_some()
+                                            && let Some(group) = self.group.as_ref()
+                                        {
+                                            GroupHitboxes::pop(group, cx);
                                         }
                                     })
                                 },
@@ -3791,6 +3763,98 @@ impl Interactivity {
         }
     }
 
+    /// The interaction states the inspector forces on this element.
+    fn forced_states(&self) -> ForcedStyleStates {
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        {
+            use crate::inspector::ForcedStates;
+            let forced = self.inspector_forced;
+            ForcedStyleStates {
+                hover: forced.contains(ForcedStates::HOVER),
+                active: forced.contains(ForcedStates::ACTIVE),
+                focus: forced.contains(ForcedStates::FOCUS),
+                focus_visible: forced.contains(ForcedStates::FOCUS_VISIBLE),
+            }
+        }
+        #[cfg(not(any(feature = "inspector", debug_assertions)))]
+        ForcedStyleStates::default()
+    }
+
+    /// What this element's listeners and styles make it, for the inspector.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn inspector_flags(&self) -> crate::inspector::ElementFlags {
+        use crate::inspector::ElementFlags;
+        let mut flags = ElementFlags::empty();
+        flags.set(
+            ElementFlags::CLICKABLE,
+            !self.click_listeners.is_empty()
+                || !self.aux_click_listeners.is_empty()
+                || !self.mouse_down_listeners.is_empty()
+                || !self.mouse_up_listeners.is_empty(),
+        );
+        flags.set(
+            ElementFlags::FOCUSABLE,
+            self.focusable || self.tracked_focus_handle.is_some(),
+        );
+        flags.set(
+            ElementFlags::TAB_STOP,
+            self.tracked_focus_handle
+                .as_ref()
+                .is_some_and(|handle| handle.tab_stop),
+        );
+        flags.set(ElementFlags::SCROLLABLE, self.scroll_offset.is_some());
+        flags.set(
+            ElementFlags::STATEFUL_STYLE,
+            self.hover_style.is_some()
+                || self.group_hover_style.is_some()
+                || self.active_style.is_some()
+                || self.group_active_style.is_some()
+                || self.focus_style.is_some()
+                || self.in_focus_style.is_some()
+                || self.focus_visible_style.is_some(),
+        );
+        flags.set(ElementFlags::TOOLTIP, self.tooltip_builder.is_some());
+        flags.set(
+            ElementFlags::DRAG_DROP,
+            self.drag_listener.is_some() || !self.drop_listeners.is_empty(),
+        );
+        flags.set(
+            ElementFlags::KEYBOARD,
+            !self.key_down_listeners.is_empty()
+                || !self.key_up_listeners.is_empty()
+                || !self.modifiers_changed_listeners.is_empty()
+                || !self.action_listeners.is_empty(),
+        );
+        flags
+    }
+
+    /// Reports the element's resolved style to the inspector.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn inspect_details(&self, style: &Style, bounds: Bounds<Pixels>, window: &mut Window) {
+        if !window.inspector_wants_details() {
+            return;
+        }
+        let rem_size = window.rem_size();
+        let scroll_offset = self.scroll_offset.as_ref().map(|offset| *offset.borrow());
+        let key_context = self
+            .key_context
+            .as_ref()
+            .map(|context| SharedString::from(format!("{context:?}")));
+        let content_size = self.content_size;
+        window.inspect_current_element(|details| {
+            crate::inspector::describe::describe_style(details, style, bounds, rem_size);
+            if let Some(scroll_offset) = scroll_offset {
+                details.content_size = Some(content_size);
+                details.scroll_offset = Some(scroll_offset);
+            }
+            details.key_context = key_context;
+            if let Some(role) = self.override_role {
+                details.a11y_role = Some(format!("{role:?}").into());
+            }
+            details.a11y_label = self.aria.label.clone();
+        });
+    }
+
     /// Compute the visual style for this element, based on the current bounds and the element's state.
     pub fn compute_style(
         &self,
@@ -3824,29 +3888,37 @@ impl Interactivity {
     ) -> Style {
         let mut style = Style::default();
         style.refine(&self.base_style);
+        let forced = self.forced_states();
 
-        if let Some(focus_handle) = self.tracked_focus_handle.as_ref() {
-            if let Some(in_focus_style) = self.in_focus_style.as_ref()
-                && focus_handle.within_focused(window, cx)
-            {
-                style.refine(in_focus_style);
-            }
-
-            if let Some(focus_style) = self.focus_style.as_ref()
-                && focus_handle.is_focused(window)
-            {
-                style.refine(focus_style);
-            }
-
-            if let Some(focus_visible_style) = self.focus_visible_style.as_ref()
-                && focus_handle.is_focused(window)
-                && window.last_input_was_keyboard()
-            {
-                style.refine(focus_visible_style);
-            }
+        let focus_handle = self.tracked_focus_handle.as_ref();
+        let focused = focus_handle.is_some_and(|handle| handle.is_focused(window));
+        if let Some(in_focus_style) = self.in_focus_style.as_ref()
+            && (forced.focus
+                || focus_handle.is_some_and(|handle| handle.within_focused(window, cx)))
+        {
+            style.refine(in_focus_style);
         }
 
-        if !cx.has_active_drag() {
+        if let Some(focus_style) = self.focus_style.as_ref()
+            && (forced.focus || focused)
+        {
+            style.refine(focus_style);
+        }
+
+        if let Some(focus_visible_style) = self.focus_visible_style.as_ref()
+            && (forced.focus_visible || (focused && window.last_input_was_keyboard()))
+        {
+            style.refine(focus_visible_style);
+        }
+
+        if forced.hover {
+            if let Some(group_hover) = self.group_hover_style.as_ref() {
+                style.refine(&group_hover.style);
+            }
+            if let Some(hover_style) = self.hover_style.as_ref() {
+                style.refine(hover_style);
+            }
+        } else if !cx.has_active_drag() {
             if let Some(group_hover) = self.group_hover_style.as_ref() {
                 let is_group_hovered =
                     if let Some(group_hitbox_id) = GroupHitboxes::get(&group_hover.group, cx) {
@@ -3940,16 +4012,23 @@ impl Interactivity {
                 .clicked_state
                 .get_or_insert_with(Default::default)
                 .borrow();
-            if clicked_state.group
+            if (clicked_state.group || forced.active)
                 && let Some(group) = self.group_active_style.as_ref()
             {
                 style.refine(&group.style)
             }
 
             if let Some(active_style) = self.active_style.as_ref()
-                && clicked_state.element
+                && (clicked_state.element || forced.active)
             {
                 style.refine(active_style)
+            }
+        } else if forced.active {
+            if let Some(group) = self.group_active_style.as_ref() {
+                style.refine(&group.style);
+            }
+            if let Some(active_style) = self.active_style.as_ref() {
+                style.refine(active_style);
             }
         }
 

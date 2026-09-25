@@ -595,6 +595,13 @@ impl DispatchTree {
         .filter_map(|node| node.view_id)
     }
 
+    /// Whether `target` is drawn inside the view `view_id`.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn view_contains(&self, view_id: EntityId, target: DispatchNodeId) -> bool {
+        std::iter::successors(Some(target), |&node_id| self.node(node_id).parent)
+            .any(|node_id| self.node(node_id).view_id == Some(view_id))
+    }
+
     pub fn node(&self, node_id: DispatchNodeId) -> &DispatchNode {
         &self.nodes[node_id.0]
     }

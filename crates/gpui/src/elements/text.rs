@@ -906,6 +906,14 @@ impl TextLayout {
                 .to_pixels(font_size.into(), window.rem_size()),
         );
 
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        window.inspect_current_element(|details| {
+            details.text = Some(text.clone());
+            details.font_family = Some(text_style.font_family.clone());
+            details.font_size = Some(font_size);
+            details.text_color = Some(text_style.color);
+        });
+
         let runs = if let Some(runs) = runs {
             runs
         } else {

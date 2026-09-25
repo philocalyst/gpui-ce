@@ -478,6 +478,10 @@ impl Element for UniformList {
 
                     let visible_range = first_visible_element_ix
                         ..cmp::min(last_visible_element_ix, self.item_count);
+                    #[cfg(any(feature = "inspector", debug_assertions))]
+                    window.inspect_current_element(|details| {
+                        details.list = Some((self.item_count, visible_range.clone()));
+                    });
 
                     let items = if y_flipped {
                         let flipped_range = self.item_count.saturating_sub(visible_range.end)

@@ -65,6 +65,12 @@ use std::{
 use uuid::Uuid;
 
 pub(crate) mod a11y;
+#[cfg(any(feature = "inspector", debug_assertions))]
+mod inspector_hooks;
+#[cfg(any(feature = "inspector", debug_assertions))]
+mod inspector_overlay;
+#[cfg(any(feature = "inspector", debug_assertions))]
+mod inspector_pick;
 mod prompts;
 
 pub use a11y::A11ySubtreeBuilder;
@@ -129,6 +135,9 @@ struct WindowInvalidatorInner {
     #[cfg(feature = "profiler")]
     pub frame_dirty: FrameDirtyAccumulator,
     pub platform_waker: Option<Rc<dyn Fn()>>,
+    /// Render causes for the window's inspector, while it is open.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub inspector_causes: Option<Box<crate::inspector::causes::CauseLog>>,
 }
 
 /// Per-frame invalidation bookkeeping, drained at draw time and emitted to the
@@ -161,12 +170,33 @@ impl WindowInvalidator {
                 #[cfg(feature = "profiler")]
                 frame_dirty: FrameDirtyAccumulator::default(),
                 platform_waker: None,
+                #[cfg(any(feature = "inspector", debug_assertions))]
+                inspector_causes: None,
             })),
         }
     }
 
-    pub fn invalidate_view(&self, entity: EntityId, cx: &mut App) -> bool {
+    pub fn invalidate_view(
+        &self,
+        entity: EntityId,
+        origin: crate::NotifyOrigin,
+        cx: &mut App,
+    ) -> bool {
         let mut inner = self.inner.borrow_mut();
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        if let Some(log) = inner.inspector_causes.as_mut() {
+            let kind = if origin.animation {
+                crate::inspector::CauseKind::Animation
+            } else {
+                crate::inspector::CauseKind::Notify {
+                    entity,
+                    type_name: origin.type_name,
+                }
+            };
+            log.push_notify(entity, kind, origin.site);
+        }
+        #[cfg(not(any(feature = "inspector", debug_assertions)))]
+        let _ = origin;
         inner.update_count += 1;
         inner.dirty_views.insert(entity);
         if inner.draw_phase == DrawPhase::None {
@@ -1120,8 +1150,6 @@ pub(crate) struct Frame {
     pub(crate) painted_text: Vec<PaintedText>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub(crate) inspector_hitboxes: FxHashMap<HitboxId, crate::InspectorElementId>,
     pub(crate) tab_stops: TabStopMap,
 }
 
@@ -1172,9 +1200,6 @@ impl Frame {
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             next_inspector_instance_ids: FxHashMap::default(),
-
-            #[cfg(any(feature = "inspector", debug_assertions))]
-            inspector_hitboxes: FxHashMap::default(),
             tab_stops: TabStopMap::default(),
         }
     }
@@ -1201,10 +1226,7 @@ impl Frame {
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
-        {
-            self.next_inspector_instance_ids.clear();
-            self.inspector_hitboxes.clear();
-        }
+        self.next_inspector_instance_ids.clear();
     }
 
     pub(crate) fn cursor_style(&self, window: &Window) -> Option<CursorStyle> {
@@ -1250,6 +1272,23 @@ enum InputModality {
     Mouse,
     Keyboard,
     Touch,
+}
+
+/// Why a window refreshes; recorded as a render cause while its inspector is open.
+#[derive(Clone, Copy)]
+#[cfg_attr(
+    not(any(feature = "inspector", debug_assertions)),
+    expect(dead_code, reason = "only the inspector reads refresh reasons")
+)]
+pub(crate) enum RefreshReason {
+    /// `Window::refresh` called from code.
+    Code(&'static std::panic::Location<'static>),
+    /// The viewport or scale factor changed.
+    Resize,
+    /// Activation, hover or position changed.
+    WindowState,
+    /// The inspector opened (its first frame is explained as initial) or closed.
+    InspectorToggled,
 }
 
 /// Holds the state for a specific window.
@@ -1866,7 +1905,7 @@ impl Window {
                             .retain(&(), |callback| callback(window, cx));
 
                         window.bounds_changed(cx);
-                        window.refresh();
+                        window.refresh_for(RefreshReason::WindowState);
 
                         SystemWindowTabController::update_last_active(cx, window.handle.id);
                     })
@@ -1879,7 +1918,7 @@ impl Window {
                 handle
                     .update(&mut cx, |_, window, _| {
                         window.hovered.set(active);
-                        window.refresh();
+                        window.refresh_for(RefreshReason::WindowState);
                     })
                     .log_err();
             }
@@ -2175,8 +2214,19 @@ impl Window {
     }
 
     /// Mark the window as dirty, scheduling it to be redrawn on the next frame.
+    #[track_caller]
     pub fn refresh(&mut self) {
+        self.refresh_for(RefreshReason::Code(std::panic::Location::caller()));
+    }
+
+    /// Marks the window dirty, re-rendering every view, and tells an open
+    /// inspector why.
+    pub(crate) fn refresh_for(&mut self, reason: RefreshReason) {
         if self.invalidator.not_drawing() {
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            self.note_refresh_reason(reason);
+            #[cfg(not(any(feature = "inspector", debug_assertions)))]
+            let _ = reason;
             self.refreshing = true;
             self.invalidator.set_dirty(true);
         }
@@ -2205,6 +2255,7 @@ impl Window {
     }
 
     /// Move focus to the element associated with the given [`FocusHandle`].
+    #[track_caller]
     pub fn focus(&mut self, handle: &FocusHandle, cx: &mut App) {
         if !self.focus_enabled || self.focus == Some(handle.id) {
             return;
@@ -2218,6 +2269,7 @@ impl Window {
     }
 
     /// Remove focus from all elements within this context's window.
+    #[track_caller]
     pub fn blur(&mut self, cx: &mut App) {
         self.clear_pending_keystrokes(cx);
 
@@ -2521,9 +2573,11 @@ impl Window {
     /// which automatically respects [`App::reduce_motion`]. When using this
     /// method directly for decorative motion, check [`App::reduce_motion`]
     /// and skip the frame request when it is set.
+    #[track_caller]
     pub fn request_animation_frame(&self) {
         let entity = self.current_view();
-        self.on_next_frame(move |_, cx| cx.notify(entity));
+        let origin = crate::NotifyOrigin::caller().for_animation();
+        self.on_next_frame(move |_, cx| cx.notify_from(entity, origin));
     }
 
     /// Runs all callbacks scheduled via [`Self::on_next_frame`], returning how many ran.
@@ -2583,12 +2637,17 @@ impl Window {
     /// the platform window, then notifies observers. Normally called automatically
     /// by the platform's resize callback, but exposed publicly for test infrastructure.
     pub fn bounds_changed(&mut self, cx: &mut App) {
+        let previous = (self.scale_factor, self.viewport_size);
         self.scale_factor = self.platform_window.scale_factor();
         self.viewport_size = self.platform_window.content_size();
         self.display_id = self.platform_window.display().map(|display| display.id());
         self.mouse_position = self.platform_window.mouse_position();
 
-        self.refresh();
+        self.refresh_for(if previous == (self.scale_factor, self.viewport_size) {
+            RefreshReason::WindowState
+        } else {
+            RefreshReason::Resize
+        });
 
         self.bounds_observers
             .clone()
@@ -2799,7 +2858,7 @@ impl Window {
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_scale_factor(&mut self, scale_factor: f32) {
         self.scale_factor = scale_factor;
-        self.refresh();
+        self.refresh_for(RefreshReason::Resize);
     }
 
     /// The size of an em for the base font of the application. Adjusting this value allows the
@@ -3038,6 +3097,8 @@ impl Window {
         let frame_dirty = self.invalidator.take_frame_dirty();
         #[cfg(feature = "profiler")]
         self.window_profiler.begin_draw();
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.inspector_begin_frame(cx);
 
         // Set up the per-App arena for element allocation during this draw.
         // This ensures that multiple test Apps have isolated arenas.
@@ -3158,6 +3219,8 @@ impl Window {
         }
 
         debug_assert!(self.rendered_entity_stack.is_empty());
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.inspector_merge_accessed(cx);
         self.record_entities_accessed(cx);
         self.reset_cursor_style(cx);
         self.refreshing = false;
@@ -3178,6 +3241,8 @@ impl Window {
                 .end_draw(frame_dirty.dirty_at, frame_dirty.invalidations);
             self.debug_frame_overlay.record_frame(draw_duration);
         }
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.inspector_end_frame();
 
         // Exit the scope to obtain the arena-clear token this draw owes; the
         // scope's teardown itself happens in `ElementArenaScope::drop`.
@@ -3212,7 +3277,13 @@ impl Window {
         let _foreground_turn = profiler::journal::foreground_turn();
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        let inspector_present_start = self.inspector_capture.is_some().then(Instant::now);
         self.platform_window.draw(&self.rendered_frame.scene);
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        if let Some(start) = inspector_present_start {
+            self.inspector_note_present(start.elapsed());
+        }
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
             present_start,
@@ -3292,7 +3363,11 @@ impl Window {
         // fill the window when their size is `auto`.
         let scale_factor = self.scale_factor();
         let mut root_element = self.root.as_ref().unwrap().clone().into_any_element();
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.inspector_set_phase(crate::inspector::recorder::Phase::Render);
         let root_layout_id = root_element.request_layout(self, cx);
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.inspector_set_phase(crate::inspector::recorder::Phase::Prepaint);
         self.layout_engine
             .as_mut()
             .unwrap()
@@ -3331,6 +3406,8 @@ impl Window {
 
         // Now actually paint the elements.
         self.invalidator.set_phase(DrawPhase::Paint);
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.inspector_set_phase(crate::inspector::recorder::Phase::Paint);
         root_element.paint(self, cx);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -3347,7 +3424,11 @@ impl Window {
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
-        self.paint_inspector_hitbox(cx);
+        {
+            self.inspector_finish_tree();
+            self.paint_inspector_overlays(cx);
+            self.inspector_set_phase(crate::inspector::recorder::Phase::Idle);
+        }
 
         // a11y may have been activated/deactivated halfway through the frame
         let a11y_active_start_of_frame = self.a11y.is_active();
@@ -3845,8 +3926,12 @@ impl Window {
     pub fn transact<T, U>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, U>) -> Result<T, U> {
         self.invalidator.debug_assert_prepaint();
         let index = self.prepaint_index();
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        let inspector_mark = self.inspector_mark();
         let result = f(self);
         if result.is_err() {
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            self.inspector_rollback(inspector_mark);
             self.next_frame.hitboxes.truncate(index.hitboxes_index);
             self.next_frame
                 .tooltip_requests
@@ -4191,6 +4276,8 @@ impl Window {
         content_mask: Option<ContentMask<Pixels>>,
     ) {
         self.invalidator.debug_assert_prepaint();
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.inspector_defer(&element);
         let parent_node = self.next_frame.dispatch_tree.active_node_id().unwrap();
         self.next_frame.deferred_draws.push(DeferredDraw {
             current_view: self.current_view(),
@@ -5147,9 +5234,13 @@ impl Window {
     ) {
         self.invalidator.debug_assert_prepaint();
 
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        let inspector_layout_started = self.inspector_layout_started();
         let mut layout_engine = self.layout_engine.take().unwrap();
         layout_engine.compute_layout(layout_id, available_space, self, cx);
         self.layout_engine = Some(layout_engine);
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.inspector_layout_finished(inspector_layout_started);
     }
 
     /// Obtain the bounds computed for the given LayoutId relative to the window. This method will usually be invoked by
@@ -5195,6 +5286,8 @@ impl Window {
         let content_mask = self.content_mask();
         let mut id = self.next_hitbox_id;
         self.next_hitbox_id = self.next_hitbox_id.next();
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.inspector_note_hitbox(id);
         let hitbox = Hitbox {
             id,
             bounds,
@@ -5648,6 +5741,8 @@ impl Window {
         if caused_invalidation {
             self.input_rate_tracker.borrow_mut().record_input();
         }
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        self.note_inspector_input(&event, caused_invalidation);
         #[cfg(feature = "profiler")]
         self.window_profiler.end_input(caused_invalidation);
 
@@ -5836,10 +5931,9 @@ impl Window {
             self.reset_cursor_style(cx);
         }
 
+        // While picking, mouse input over the app goes to the picker only.
         #[cfg(any(feature = "inspector", debug_assertions))]
-        if self.is_inspector_picking(cx) {
-            self.handle_inspector_mouse_event(event, cx);
-            // When inspector is picking, all other mouse handling is skipped.
+        if self.dispatch_inspector_pick_mouse(event, cx) {
             return;
         }
 
@@ -5888,6 +5982,11 @@ impl Window {
     }
 
     fn dispatch_key_event(&mut self, event: &dyn Any, cx: &mut App) {
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        if self.dispatch_inspector_pick_key(event, cx) {
+            return;
+        }
+
         if self.invalidator.is_dirty() {
             self.draw(cx).clear(cx);
         }
@@ -6875,16 +6974,12 @@ impl Window {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn toggle_inspector(&mut self, cx: &mut App) {
         if self.inspector.take().is_some() {
-            if let Some(capture) = self.inspector_capture.take() {
-                self.inspector_dock = capture.dock();
-            }
+            self.close_inspector_capture();
         } else {
             self.inspector = Some(cx.new(|_| Inspector::new()));
-            self.inspector_capture = Some(Box::new(crate::inspector::InspectorCapture::new(
-                self.inspector_dock,
-            )));
+            self.open_inspector_capture(cx);
         }
-        self.refresh();
+        self.refresh_for(RefreshReason::InspectorToggled);
     }
 
     /// Whether the inspector is open in this window.
@@ -6922,35 +7017,6 @@ impl Window {
         Bounds::new(Point::default(), self.viewport_size)
     }
 
-    /// Starts picking: the next click in the app selects an element instead
-    /// of interacting with it. Emits [`crate::inspector::InspectorEvent`]s.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub fn start_inspector_pick(&mut self) {
-        // Engine slice: route app-area mouse input to picking over the captured tree.
-        if let Some(capture) = self.inspector_capture.as_deref_mut() {
-            capture.pick.active = true;
-        }
-    }
-
-    /// Ends picking without selecting anything.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub fn stop_inspector_pick(&mut self) {
-        if let Some(capture) = self.inspector_capture.as_deref_mut() {
-            capture.pick.active = false;
-        }
-    }
-
-    /// Lets the element currently being drawn report rich facts (text, box
-    /// model, colors, list range...) to the inspector. `f` only runs while the
-    /// inspector is capturing at [`crate::inspector::CaptureLevel::Full`].
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub fn inspect_current_element(
-        &mut self,
-        _f: impl FnOnce(&mut crate::inspector::ElementDetails),
-    ) {
-        // Engine slice: attach to the record of the element being drawn.
-    }
-
     /// Resolves keystrokes against the keymap and the focused context stack
     /// without dispatching anything: which binding wins, and why each other
     /// candidate loses.
@@ -6974,37 +7040,25 @@ impl Window {
         Some(capture.dock().split(self.viewport_size).1)
     }
 
-    /// Returns true if the window is in inspector mode.
-    pub fn is_inspector_picking(&self, _cx: &App) -> bool {
+    /// Whether a cached view may replay its previous paint. While the
+    /// inspector records a tree, a view whose records it has not stored
+    /// renders again instead, so the tree stays complete.
+    #[inline]
+    pub(crate) fn inspector_can_reuse_view(&self, _global_id: &GlobalElementId) -> bool {
         #[cfg(any(feature = "inspector", debug_assertions))]
-        {
-            if let Some(inspector) = &self.inspector {
-                return inspector.read(_cx).is_picking();
-            }
+        if let Some(capture) = self.inspector_capture.as_deref() {
+            return capture.recorder.can_reuse_view(_global_id);
         }
-        false
+        true
     }
 
-    /// Executes the provided function with mutable access to an inspector state.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub fn with_inspector_state<T: 'static, R>(
-        &mut self,
-        _inspector_id: Option<&crate::InspectorElementId>,
-        cx: &mut App,
-        f: impl FnOnce(&mut Option<T>, &mut Self) -> R,
-    ) -> R {
-        if let Some(inspector_id) = _inspector_id
-            && let Some(inspector) = &self.inspector
-        {
-            let inspector = inspector.clone();
-            let active_element_id = inspector.read(cx).active_element_id();
-            if Some(inspector_id) == active_element_id {
-                return inspector.update(cx, |inspector, _cx| {
-                    inspector.with_active_element_state(self, f)
-                });
-            }
+    /// Returns true if the inspector is picking an element in this window.
+    pub fn is_inspector_picking(&self, _cx: &App) -> bool {
+        #[cfg(any(feature = "inspector", debug_assertions))]
+        if let Some(capture) = self.inspector_capture.as_deref() {
+            return capture.pick().active;
         }
-        f(&mut None, self)
+        false
     }
 
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -7024,129 +7078,34 @@ impl Window {
         crate::InspectorElementId { path, instance_id }
     }
 
+    /// Lays out the inspector's own root in the dock. Nothing it draws is
+    /// recorded; its time goes to [`crate::inspector::PhaseTimings::inspector`].
     #[cfg(any(feature = "inspector", debug_assertions))]
     fn prepaint_inspector(&mut self, cx: &mut App) -> Option<AnyElement> {
         let bounds = self.inspector_bounds()?;
-        if let Some(inspector) = self.inspector.take() {
-            let mut inspector_element = AnyView::from(inspector.clone()).into_any_element();
-            inspector_element.prepaint_as_root(bounds.origin, bounds.size.into(), self, cx);
-            self.inspector = Some(inspector);
-            Some(inspector_element)
-        } else {
-            None
+        // Taken while drawing, so the inspector's own elements are never inspected.
+        let inspector = self.inspector.take()?;
+        let phase = self.inspector_suspend(cx);
+        let hitboxes_start = self.next_frame.hitboxes.len();
+        let mut inspector_element = AnyView::from(inspector.clone()).into_any_element();
+        inspector_element.prepaint_as_root(bounds.origin, bounds.size.into(), self, cx);
+        if let Some(capture) = self.inspector_capture.as_deref_mut() {
+            capture.recorder.inspector_hitboxes = hitboxes_start..self.next_frame.hitboxes.len();
         }
+        self.inspector_resume(phase, cx);
+        self.inspector = Some(inspector);
+        Some(inspector_element)
     }
 
     #[cfg(any(feature = "inspector", debug_assertions))]
-    fn paint_inspector(&mut self, mut inspector_element: Option<AnyElement>, cx: &mut App) {
+    fn paint_inspector(&mut self, inspector_element: Option<AnyElement>, cx: &mut App) {
         if let Some(mut inspector_element) = inspector_element {
+            let inspector = self.inspector.take();
+            let phase = self.inspector_suspend(cx);
             inspector_element.paint(self, cx);
-        };
-    }
-
-    /// Registers a hitbox that can be used for inspector picking mode, allowing users to select and
-    /// inspect UI elements by clicking on them.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub fn insert_inspector_hitbox(
-        &mut self,
-        hitbox_id: HitboxId,
-        inspector_id: Option<&crate::InspectorElementId>,
-        cx: &App,
-    ) {
-        self.invalidator.debug_assert_paint_or_prepaint();
-        if !self.is_inspector_picking(cx) {
-            return;
+            self.inspector_resume(phase, cx);
+            self.inspector = inspector;
         }
-        if let Some(inspector_id) = inspector_id {
-            self.next_frame
-                .inspector_hitboxes
-                .insert(hitbox_id, inspector_id.clone());
-        }
-    }
-
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    fn paint_inspector_hitbox(&mut self, cx: &App) {
-        if let Some(inspector) = self.inspector.as_ref() {
-            let inspector = inspector.read(cx);
-            if let Some((hitbox_id, _)) = self.hovered_inspector_hitbox(inspector, &self.next_frame)
-                && let Some(hitbox) = self
-                    .next_frame
-                    .hitboxes
-                    .iter()
-                    .find(|hitbox| hitbox.id == hitbox_id)
-            {
-                self.paint_quad(crate::fill(hitbox.bounds, crate::rgba(0x61afef4d)));
-            }
-        }
-    }
-
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    fn handle_inspector_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
-        let Some(inspector) = self.inspector.clone() else {
-            return;
-        };
-        if event.downcast_ref::<MouseMoveEvent>().is_some() {
-            inspector.update(cx, |inspector, _cx| {
-                if let Some((_, inspector_id)) =
-                    self.hovered_inspector_hitbox(inspector, &self.rendered_frame)
-                {
-                    inspector.hover(inspector_id, self);
-                }
-            });
-        } else if event.downcast_ref::<crate::MouseDownEvent>().is_some() {
-            inspector.update(cx, |inspector, _cx| {
-                if let Some((_, inspector_id)) =
-                    self.hovered_inspector_hitbox(inspector, &self.rendered_frame)
-                {
-                    inspector.select(inspector_id, self);
-                }
-            });
-        } else if let Some(event) = event.downcast_ref::<crate::ScrollWheelEvent>() {
-            // This should be kept in sync with SCROLL_LINES in x11 platform.
-            const SCROLL_LINES: f32 = 3.0;
-            const SCROLL_PIXELS_PER_LAYER: f32 = 36.0;
-            let delta_y = event
-                .delta
-                .pixel_delta(px(SCROLL_PIXELS_PER_LAYER / SCROLL_LINES))
-                .y;
-            if let Some(inspector) = self.inspector.clone() {
-                inspector.update(cx, |inspector, _cx| {
-                    if let Some(depth) = inspector.pick_depth.as_mut() {
-                        *depth += f32::from(delta_y) / SCROLL_PIXELS_PER_LAYER;
-                        let max_depth = self.mouse_hit_test.entries.len() as f32 - 0.5;
-                        if *depth < 0.0 {
-                            *depth = 0.0;
-                        } else if *depth > max_depth {
-                            *depth = max_depth;
-                        }
-                        if let Some((_, inspector_id)) =
-                            self.hovered_inspector_hitbox(inspector, &self.rendered_frame)
-                        {
-                            inspector.set_active_element_id(inspector_id, self);
-                        }
-                    }
-                });
-            }
-        }
-    }
-
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    fn hovered_inspector_hitbox(
-        &self,
-        inspector: &Inspector,
-        frame: &Frame,
-    ) -> Option<(HitboxId, crate::InspectorElementId)> {
-        if let Some(pick_depth) = inspector.pick_depth {
-            let depth = (pick_depth as i64).try_into().unwrap_or(0);
-            let max_skipped = self.mouse_hit_test.entries.len().saturating_sub(1);
-            let skip_count = (depth as usize).min(max_skipped);
-            for hitbox_id in self.mouse_hit_test.ordered_ids.iter().skip(skip_count) {
-                if let Some(inspector_id) = frame.inspector_hitboxes.get(hitbox_id) {
-                    return Some((*hitbox_id, inspector_id.clone()));
-                }
-            }
-        }
-        None
     }
 
     /// For testing: set the current modifier keys state.

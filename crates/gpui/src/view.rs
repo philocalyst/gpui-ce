@@ -19,6 +19,8 @@ use std::{any::TypeId, fmt, ops::Range};
 pub struct AnyView {
     entity: AnyEntity,
     render: fn(&AnyView, &mut Window, &mut App) -> AnyElement,
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    type_name: fn() -> &'static str,
 }
 
 impl<V: Render> From<Entity<V>> for AnyView {
@@ -26,6 +28,8 @@ impl<V: Render> From<Entity<V>> for AnyView {
         AnyView {
             entity: value.into_any(),
             render: any_view::render::<V>,
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            type_name: std::any::type_name::<V>,
         }
     }
 }
@@ -45,6 +49,8 @@ impl AnyView {
         AnyWeakView {
             entity: self.entity.downgrade(),
             render: self.render,
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            type_name: self.type_name,
         }
     }
 
@@ -56,6 +62,8 @@ impl AnyView {
             Err(entity) => Err(Self {
                 entity,
                 render: self.render,
+                #[cfg(any(feature = "inspector", debug_assertions))]
+                type_name: self.type_name,
             }),
         }
     }
@@ -90,6 +98,11 @@ impl View for AnyView {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         (self.render)(&self, window, cx)
     }
+
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn view_type_name(&self) -> &'static str {
+        (self.type_name)()
+    }
 }
 
 impl<V: 'static + Render> IntoElement for Entity<V> {
@@ -112,6 +125,8 @@ impl IntoElement for AnyView {
 pub struct AnyWeakView {
     entity: AnyWeakEntity,
     render: fn(&AnyView, &mut Window, &mut App) -> AnyElement,
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    type_name: fn() -> &'static str,
 }
 
 impl AnyWeakView {
@@ -121,6 +136,8 @@ impl AnyWeakView {
         Some(AnyView {
             entity,
             render: self.render,
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            type_name: self.type_name,
         })
     }
 }
@@ -130,6 +147,8 @@ impl<V: 'static + Render> From<WeakEntity<V>> for AnyWeakView {
         AnyWeakView {
             entity: view.into(),
             render: any_view::render::<V>,
+            #[cfg(any(feature = "inspector", debug_assertions))]
+            type_name: std::any::type_name::<V>,
         }
     }
 }
@@ -192,6 +211,14 @@ pub trait View: 'static + Sized {
 
     /// Render this view into an element tree, consuming `self`.
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement;
+
+    /// The type the inspector reports for this view: the `Render` type of an
+    /// entity-backed view, or the component type itself.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    #[doc(hidden)]
+    fn view_type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 }
 
 /// A stateless component (`RenderOnce`) is a `View` with no identity.
@@ -218,6 +245,11 @@ impl<T: Render> View for Entity<T> {
             Render::render(this, window, cx).into_any_element()
         })
     }
+
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn view_type_name(&self) -> &'static str {
+        std::any::type_name::<T>()
+    }
 }
 
 impl<T: Render> Entity<T> {
@@ -241,7 +273,7 @@ pub struct ViewElement<V: View> {
     view: Option<V>,
     entity_id: Option<EntityId>,
     cached_style: Option<StyleRefinement>,
-    #[cfg(debug_assertions)]
+    #[cfg(any(feature = "inspector", debug_assertions))]
     source: &'static core::panic::Location<'static>,
 }
 
@@ -254,7 +286,7 @@ impl<V: View> ViewElement<V> {
             entity_id,
             cached_style: None,
             view: Some(view),
-            #[cfg(debug_assertions)]
+            #[cfg(any(feature = "inspector", debug_assertions))]
             source: core::panic::Location::caller(),
         }
     }
@@ -271,6 +303,16 @@ impl<V: View> ViewElement<V> {
     pub(crate) fn cached(mut self, style: StyleRefinement) -> Self {
         self.cached_style = Some(style);
         self
+    }
+}
+
+impl<V: View> ViewElement<V> {
+    /// The view's type as the inspector reports it, while it has not rendered yet.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn inspector_type_name(&self) -> &'static str {
+        self.view
+            .as_ref()
+            .map_or(std::any::type_name::<V>(), View::view_type_name)
     }
 }
 
@@ -304,11 +346,20 @@ impl<V: View> Element for ViewElement<V> {
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        #[cfg(debug_assertions)]
+        #[cfg(any(feature = "inspector", debug_assertions))]
         return Some(self.source);
 
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(feature = "inspector", debug_assertions)))]
         return None;
+    }
+
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    fn inspector_kind(&self) -> Option<crate::inspector::ElementKind> {
+        let type_name = self.inspector_type_name();
+        Some(match self.entity_id {
+            Some(entity) => crate::inspector::ElementKind::View { entity, type_name },
+            None => crate::inspector::ElementKind::Component { type_name },
+        })
     }
 
     fn request_layout(
@@ -320,25 +371,26 @@ impl<V: View> Element for ViewElement<V> {
     ) -> (LayoutId, Self::RequestLayoutState) {
         if let Some(entity_id) = self.entity_id {
             // Stateful path: create a reactive boundary.
-            window.with_rendered_view(entity_id, |window| {
-                let caching_disabled = window.is_inspector_picking(cx);
-                match self.cached_style.as_ref() {
-                    Some(style) if !caching_disabled => {
-                        let mut root_style = Style::default();
-                        root_style.refine(style);
-                        let layout_id = window.request_layout(root_style, None, cx);
-                        (layout_id, None)
-                    }
-                    _ => {
-                        let mut element = self
-                            .view
-                            .take()
-                            .unwrap()
-                            .render(window, cx)
-                            .into_any_element();
-                        let layout_id = element.request_layout(window, cx);
-                        (layout_id, Some(element))
-                    }
+            window.with_rendered_view(entity_id, |window| match self.cached_style.as_ref() {
+                Some(style) => {
+                    let mut root_style = Style::default();
+                    root_style.refine(style);
+                    let layout_id = window.request_layout(root_style, None, cx);
+                    (layout_id, None)
+                }
+                None => {
+                    #[cfg(any(feature = "inspector", debug_assertions))]
+                    let span = window.inspector_begin_view(entity_id, self.inspector_type_name());
+                    let mut element = self
+                        .view
+                        .take()
+                        .unwrap()
+                        .render(window, cx)
+                        .into_any_element();
+                    let layout_id = element.request_layout(window, cx);
+                    #[cfg(any(feature = "inspector", debug_assertions))]
+                    window.inspector_end_view(span, crate::inspector::ViewOutcome::Rendered);
+                    (layout_id, Some(element))
                 }
             })
         } else {
@@ -377,11 +429,14 @@ impl<V: View> Element for ViewElement<V> {
                     return Some(element);
                 }
 
+                let global_id = global_id.unwrap();
                 window.with_element_state::<ViewElementState, _>(
-                    global_id.unwrap(),
+                    global_id,
                     |element_state, window| {
                         let content_mask = window.content_mask();
                         let text_style = window.text_style();
+                        #[cfg(any(feature = "inspector", debug_assertions))]
+                        let type_name = self.inspector_type_name();
 
                         if let Some(mut element_state) = element_state
                             && element_state.cache_key.bounds == bounds
@@ -389,26 +444,47 @@ impl<V: View> Element for ViewElement<V> {
                             && element_state.cache_key.text_style == text_style
                             && !window.dirty_views.contains(&entity_id)
                             && !window.refreshing
+                            && window.inspector_can_reuse_view(global_id)
                         {
+                            #[cfg(any(feature = "inspector", debug_assertions))]
+                            let span = window.inspector_begin_view(entity_id, type_name);
                             let prepaint_start = window.prepaint_index();
                             window.reuse_prepaint(element_state.prepaint_range.clone());
                             cx.entities
                                 .extend_accessed(&element_state.accessed_entities);
                             let prepaint_end = window.prepaint_index();
                             element_state.prepaint_range = prepaint_start..prepaint_end;
+                            #[cfg(any(feature = "inspector", debug_assertions))]
+                            {
+                                window.inspector_splice_view(global_id);
+                                window.inspector_end_view(
+                                    span,
+                                    crate::inspector::ViewOutcome::Cached,
+                                );
+                            }
 
                             return (None, element_state);
                         }
 
                         let refreshing = mem::replace(&mut window.refreshing, true);
                         let prepaint_start = window.prepaint_index();
+                        #[cfg(any(feature = "inspector", debug_assertions))]
+                        window.inspector_note_cached_render(global_id);
                         let (mut element, accessed_entities) = cx.detect_accessed_entities(|cx| {
+                            #[cfg(any(feature = "inspector", debug_assertions))]
+                            let span = window.inspector_begin_view(entity_id, type_name);
                             let mut element = self
                                 .view
                                 .take()
                                 .unwrap()
                                 .render(window, cx)
                                 .into_any_element();
+                            // Requested here (rather than by `layout_as_root`) so the
+                            // view's span covers exactly render + request_layout.
+                            element.request_layout(window, cx);
+                            #[cfg(any(feature = "inspector", debug_assertions))]
+                            window
+                                .inspector_end_view(span, crate::inspector::ViewOutcome::Rendered);
                             element.layout_as_root(bounds.size.into(), window, cx);
                             element.prepaint_at(bounds.origin, window, cx);
                             element
@@ -458,10 +534,10 @@ impl<V: View> Element for ViewElement<V> {
         if let Some(entity_id) = self.entity_id {
             // Stateful path.
             window.with_rendered_view(entity_id, |window| {
-                let caching_disabled = window.is_inspector_picking(cx);
-                if self.cached_style.is_some() && !caching_disabled {
+                if self.cached_style.is_some() {
+                    let global_id = global_id.unwrap();
                     window.with_element_state::<ViewElementState, _>(
-                        global_id.unwrap(),
+                        global_id,
                         |element_state, window| {
                             let mut element_state = element_state.unwrap();
 
@@ -473,6 +549,8 @@ impl<V: View> Element for ViewElement<V> {
                                 window.refreshing = refreshing;
                             } else {
                                 window.reuse_paint(element_state.paint_range.clone());
+                                #[cfg(any(feature = "inspector", debug_assertions))]
+                                window.inspector_paint_reused_view(global_id);
                             }
 
                             let paint_end = window.paint_index();
