@@ -3,7 +3,7 @@
 //! ```text
 //! [All|Keys|Mouse|Actions] [filter · -exclude          ]   toolbar
 //! time    ◇ event                actions       took ● ✓   log, newest last
-//! 184 of 212 · Loupe's input hidden   [Show Loupe's input] [Follow]
+//! 184 of 212 events                [Show Loupe's input] [Follow]
 //! ───────────────────────────────────────────────────────  splitter
 //! [Event | Key tester]                                     pane switch
 //! the selected event's story, hit path, contexts, actions and frame,
@@ -71,6 +71,7 @@ pub(crate) struct EventsLens {
 type BadgeKey = (u64, usize, Option<u64>);
 
 impl EventsLens {
+    /// The lens over the shared `state`.
     pub fn new(state: Entity<LoupeState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let filter_field = text_field_state(cx);
         let key_tester = cx.new(|cx| KeyTester::new(window, cx));
@@ -215,7 +216,7 @@ impl Render for EventsLens {
         let theme = Theme::of(window, cx);
         let layout = LensLayout::of(window);
         if let Some(capture) = window.inspector_capture() {
-            self.log.refresh(capture, &self.filter);
+            self.log.refresh(capture, &self.filter, theme.metrics.row);
         }
         let split_size = self.split_size(layout, theme, window);
         let log_width = match layout {

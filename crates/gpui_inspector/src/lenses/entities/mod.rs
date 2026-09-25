@@ -106,6 +106,7 @@ pub(crate) struct EntitiesLens {
 }
 
 impl EntitiesLens {
+    /// The lens over the shared `state`.
     pub fn new(state: Entity<LoupeState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let filter_field = text_field_state(cx);
         let table = cx.new(TableState::new);

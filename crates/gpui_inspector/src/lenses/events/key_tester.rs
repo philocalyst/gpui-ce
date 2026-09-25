@@ -52,6 +52,8 @@ fn loupe_has_focus(window: &Window) -> bool {
 }
 
 impl KeyTester {
+    /// A tester that notes the app's focus now, then intercepts keys while
+    /// its capture box has the focus.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         let tester = cx.entity().downgrade();

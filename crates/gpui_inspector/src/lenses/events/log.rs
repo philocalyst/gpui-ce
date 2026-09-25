@@ -124,6 +124,7 @@ pub(super) struct EventLog {
 }
 
 impl EventLog {
+    /// An empty log that follows new input.
     pub fn new(cx: &mut App) -> Self {
         Self {
             index: LogIndex::default(),
@@ -140,8 +141,10 @@ impl EventLog {
     }
 
     /// Catches up with the capture, re-filtering only when the input or
-    /// the filter changed. While following, new rows scroll into view.
-    pub fn refresh(&mut self, capture: &InspectorCapture, filter: &LogFilter) {
+    /// the filter changed. While following, new rows scroll into view;
+    /// while paused, the rows on screen stay put even as the oldest records
+    /// fall out of the ring (`row_height` tall each).
+    pub fn refresh(&mut self, capture: &InspectorCapture, filter: &LogFilter, row_height: Pixels) {
         let input = capture.input();
         let key = RowsKey {
             generation: capture.generation(),
@@ -155,13 +158,27 @@ impl EventLog {
         self.names.refresh(capture);
         let names = &self.names;
         self.index.sync(input, |key| names.name(capture, key));
-        let newest = self.rows.last().copied();
+        let same_filter = self.key.as_ref().is_some_and(|old| old.filter == *filter);
+        let old_rows = std::mem::take(&mut self.rows);
         self.rows = self.index.visible(input, filter);
+        let newest = old_rows.last().copied();
         let loupe = input.iter().filter(|record| record.inspector).count();
         self.hidden_loupe = if filter.show_loupe { 0 } else { loupe };
         self.listed = input.len() - self.hidden_loupe;
-        if self.follow == Follow::Following && self.rows.last().copied() != newest {
-            self.scroll.scroll_to_bottom();
+        match self.follow {
+            Follow::Following if self.rows.last().copied() != newest => {
+                self.scroll.scroll_to_bottom();
+            }
+            Follow::Paused { .. } if same_filter => {
+                let dropped = dropped_rows(&old_rows, &self.rows);
+                if dropped > 0 {
+                    let state = self.scroll.0.borrow();
+                    let mut offset = state.base_handle.offset();
+                    offset.y = (offset.y + row_height * dropped as f32).min(px(0.));
+                    state.base_handle.set_offset(offset);
+                }
+            }
+            _ => {}
         }
         self.key = Some(key);
     }
@@ -467,6 +484,15 @@ impl EventsLens {
     }
 }
 
+/// How many rows at the top of `old` are gone from `new` (both sorted):
+/// the records that fell out of the ring.
+fn dropped_rows(old: &[u64], new: &[u64]) -> usize {
+    match new.first() {
+        Some(first) => old.partition_point(|seq| seq < first),
+        None => old.len(),
+    }
+}
+
 /// The glyph of an input kind.
 pub(super) fn kind_icon(kind: InputKind) -> IconName {
     match kind {
@@ -719,4 +745,17 @@ fn event_summary(record: &InputRecord, theme: &'static Theme) -> impl IntoElemen
             format::count(u64::from(record.coalesced))
         )))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dropped_rows;
+
+    #[test]
+    fn rows_that_fell_out_of_the_ring_are_counted_from_the_top() {
+        assert_eq!(dropped_rows(&[3, 5, 8, 9], &[8, 9, 12]), 2);
+        assert_eq!(dropped_rows(&[3, 5], &[3, 5, 7]), 0);
+        assert_eq!(dropped_rows(&[3, 5], &[]), 2);
+        assert_eq!(dropped_rows(&[], &[1]), 0);
+    }
 }

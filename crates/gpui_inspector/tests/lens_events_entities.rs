@@ -255,6 +255,37 @@ fn scroll(harness: &mut LoupeHarness, position: gpui::Point<Pixels>, delta_y: f3
 }
 
 #[test]
+fn a_paused_log_holds_still_while_old_records_fall_out_of_the_ring() {
+    let (mut harness, _) = inbox_harness(1280., 800.);
+    show(&mut harness, Lens::Events);
+    // A full ring: every new record pushes the oldest out.
+    harness.update(|window, _| {
+        let capture = window.inspector_capture_mut().unwrap();
+        capture.config_mut().input_capacity = capture.input().len();
+    });
+    let listed = app_input(&mut harness);
+    let seq = listed[listed.len() - 6].seq;
+    harness.click_selector(&format!("events-row-{seq}"));
+    let before = harness.bounds_of(&format!("events-row-{seq}"));
+    let first = listed[0].seq;
+    for ix in 0..4 {
+        push_input(&mut harness, |capture| {
+            InputBuilder::key(ms(9_000. + ix as f64), "n").push(capture)
+        });
+    }
+    assert!(
+        harness.capture(|capture| capture.input().front().unwrap().seq) > first,
+        "the oldest records fell out"
+    );
+    let after = harness.bounds_of(&format!("events-row-{seq}"));
+    assert_eq!(
+        after.origin.y, before.origin.y,
+        "the selected row stayed put"
+    );
+    harness.assert_text_visible("Paused · 4 new");
+}
+
+#[test]
 fn the_detail_tells_where_a_fixture_click_went() {
     let (mut harness, elements) = inbox_harness(1280., 800.);
     show(&mut harness, Lens::Events);
