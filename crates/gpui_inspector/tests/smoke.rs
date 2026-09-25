@@ -30,7 +30,7 @@ fn loupe_docks_and_renders() {
         .unwrap();
     cx.update_window(window.into(), |_, window, cx| {
         window.toggle_inspector(cx);
-        window.draw(cx);
+        window.draw(cx).clear(cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -51,7 +51,7 @@ fn loupe_docks_and_renders() {
 
         // A second frame reuses the cached Loupe view; its text must still be reported.
         window.refresh();
-        window.draw(cx);
+        window.draw(cx).clear(cx);
         assert_painted_text(window);
     })
     .unwrap();
