@@ -90,6 +90,7 @@ impl Window {
     /// Starts recording the frame about to be drawn: resolves why it is
     /// drawn and decides what it records.
     pub(super) fn inspector_begin_frame(&mut self, cx: &mut App) {
+        self.begin_app_replay();
         if cx.mode.skip_drawing() {
             return;
         }
@@ -204,6 +205,7 @@ impl Window {
     /// Merges the entities the inspector's UI read into the window's, before
     /// the window registers them for invalidation.
     pub(super) fn inspector_merge_accessed(&mut self, cx: &mut App) {
+        self.settle_app_access(cx.entities.accessed_entities.get_mut());
         if let Some(capture) = self.inspector_capture.as_deref_mut() {
             capture
                 .recorder
@@ -285,12 +287,13 @@ impl Window {
             inspector_only: recorder.inspector_only,
         };
         recorder.mode = RecordMode::Off;
-        let restyled = recorder.restyling && frame.inspector_only;
+        let restyled = (recorder.restyling || recorder.app_released) && frame.inspector_only;
         if capture.is_recording() {
             let id = capture.record_frame(frame);
             capture.recorder.unpresented = Some(id);
             if restyled {
-                // The inspector restyled the app: its tree is new app data.
+                // The inspector restyled or released the app: its tree is
+                // new app data.
                 capture.generation += 1;
             }
         }
@@ -606,6 +609,7 @@ impl Window {
     pub(super) fn open_inspector_capture(&mut self, cx: &mut App) {
         let capture = InspectorCapture::new(self.inspector_dock);
         let log = CauseLog::new(capture.epoch());
+        self.reset_app_replay();
         self.inspector_capture = Some(Box::new(capture));
         self.invalidator.set_cause_log(Some(Box::new(log)));
         self.invalidator.note_cause(CauseKind::Initial, None, false);
@@ -622,6 +626,7 @@ impl Window {
         if let Some(capture) = self.inspector_capture.take() {
             self.inspector_dock = capture.dock();
         }
+        self.reset_app_replay();
         self.invalidator.set_cause_log(None);
     }
 

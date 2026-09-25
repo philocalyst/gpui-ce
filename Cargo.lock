@@ -2434,6 +2434,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui_ce_lightbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gpui-ce",
+ "gpui_ce_wgpu",
+ "image",
+ "log",
+ "palette",
+ "png",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "gpui_ce_linux"
 version = "0.1.0"
 dependencies = [

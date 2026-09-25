@@ -403,8 +403,11 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
         cx: &mut App,
     ) -> (crate::LayoutId, Self::RequestLayoutState) {
         window.with_element_state(global_id.unwrap(), |state, window| {
+            // Use the executor clock so animations progress deterministically
+            // under test clocks, like springs and style transitions.
+            let now = cx.background_executor().now();
             let mut state = state.unwrap_or_else(|| AnimationState {
-                start: Instant::now(),
+                start: now,
                 animation_ix: 0,
                 delayed_frame_pending: Rc::new(Cell::new(false)),
             });
@@ -421,11 +424,11 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
                 let duration = self.animations[animation_ix].duration;
 
                 let elapsed = if self.animations[animation_ix].synced && !duration.is_zero() {
-                    let elapsed = cx.background_executor().now() - cx.synced_animation_epoch;
+                    let elapsed = now - cx.synced_animation_epoch;
                     // Reduce modulo the duration before f32 conversion, which loses sub-second precision at scale.
                     Duration::from_nanos((elapsed.as_nanos() % duration.as_nanos()) as u64)
                 } else {
-                    state.start.elapsed()
+                    now.saturating_duration_since(state.start)
                 };
                 let mut delta = elapsed.as_secs_f32() / duration.as_secs_f32();
 
@@ -435,7 +438,7 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
                         if animation_ix >= self.animations.len() - 1 {
                             done = true;
                         } else {
-                            state.start = Instant::now();
+                            state.start = now;
                             state.animation_ix += 1;
                         }
                         delta = 1.0;
@@ -939,6 +942,52 @@ mod tests {
             assert_eq!(simulate_next_frame(&window, cx), 1);
             assert_eq!(rendered_deltas.borrow().len(), expected_frames);
         }
+    }
+
+    struct OneshotAnimationTestView {
+        rendered_deltas: Rc<RefCell<Vec<f32>>>,
+    }
+
+    impl Render for OneshotAnimationTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let rendered_deltas = self.rendered_deltas.clone();
+            div().with_animation(
+                "oneshot-animation",
+                Animation::new(Duration::from_secs(1)).with_easing(ease_in_out),
+                move |this, delta| {
+                    rendered_deltas.borrow_mut().push(delta);
+                    this
+                },
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn test_animation_samples_the_executor_clock_exactly(cx: &mut TestAppContext) {
+        let rendered_deltas = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.open_window(size(px(100.), px(100.)), {
+            let rendered_deltas = rendered_deltas.clone();
+            move |_, _| OneshotAnimationTestView { rendered_deltas }
+        });
+        cx.run_until_parked();
+        assert_eq!(*rendered_deltas.borrow(), vec![0.0]);
+
+        // Only the test clock moves the animation: wall time spent between
+        // frames must not leak into the sampled values.
+        let mut expected = vec![0.0];
+        for (advance_ms, linear) in [(100, 0.1), (150, 0.25), (500, 0.75)] {
+            cx.executor()
+                .advance_clock(Duration::from_millis(advance_ms));
+            assert_eq!(simulate_next_frame(&window, cx), 1);
+            expected.push(ease_in_out(linear));
+            assert_eq!(*rendered_deltas.borrow(), expected);
+        }
+
+        // Past the end, a oneshot animation settles at 1 and stops asking for frames.
+        cx.executor().advance_clock(Duration::from_millis(400));
+        assert_eq!(simulate_next_frame(&window, cx), 1);
+        assert_eq!(*rendered_deltas.borrow().last().unwrap(), 1.0);
+        assert_eq!(simulate_next_frame(&window, cx), 0);
     }
 
     #[gpui::test]
