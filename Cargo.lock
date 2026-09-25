@@ -2428,7 +2428,6 @@ dependencies = [
  "gpui_ce_inspector",
  "gpui_ce_platform",
  "gpui_ce_wgpu",
- "image",
  "log",
  "serde_json",
  "smallvec",

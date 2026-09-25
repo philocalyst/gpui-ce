@@ -25,7 +25,6 @@ test-support = ["gpui/test-support", "dep:gpui_wgpu", "gpui_wgpu/test-support"]
 gpui = { workspace = true, features = ["inspector"] }
 gpui_elements.workspace = true
 gpui_wgpu = { workspace = true, optional = true }
-image.workspace = true
 log.workspace = true
 serde_json.workspace = true
 smallvec.workspace = true
