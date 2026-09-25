@@ -73,47 +73,46 @@ and the UI (this crate). Read it fully before changing either side.
 
 ## Engine API
 
-Status: ✅ implemented in Phase 0 · 🔧 stub, implemented by the engine slice.
+Everything below lives in `gpui::inspector` and `crates/gpui/src/window/inspector*.rs`
+behind `cfg(any(feature = "inspector", debug_assertions))`.
 
-| API | Status | Notes |
-|---|---|---|
-| `Window::toggle_inspector(cx)` | ✅ | creates/drops the capture; dock remembered |
-| `Window::is_inspector_open()` | ✅ | |
-| `Window::inspector_capture() / _mut()` | ✅ | |
-| `Window::app_bounds() / inspector_bounds()` | ✅ | dock split |
-| `InspectorCapture` queries (`frames`, `frame(id)`, `latest_app_frame`, `latest_tree`, `input`, `path_info`, `notify_stats`, `generation`, `overlay(_mut)`, `pick`, `dock`, `set_frozen`, `config_mut`, `overrides`, `set_override`, `forced_states`, `set_forced_states`, `selected_style`, `retained_bytes`, `clear`) | ✅ | pure store |
-| `InspectorCapture::{new_for_test, push_frame_for_test, push_input_for_test, intern_path_for_test}` | ✅ | fixtures for UI tests |
-| `ElementTree::{children, get, find, ancestors, owning_view, hit_test, rebuild_children}` | ✅ | |
-| `Inspector::ui_state(init)` / `InspectorEvent` | ✅ / 🔧 | events emitted by engine picking |
-| `Window::start_inspector_pick / stop_inspector_pick` | 🔧 | pick over the captured tree |
-| `Window::inspect_current_element(f)` | 🔧 | elements report `ElementDetails` |
-| `Window::inspector_resolve_keystrokes(&[Keystroke], cx)` | 🔧 | pure key tester |
-| `App::inspector_entities()` | 🔧 | entity registry |
-| `gpui::inspector_span!` / `inspector::span(name)` | 🔧 | user spans (guard, `#[track_caller]`) |
-| capture hooks filling `FrameRecord`, `ElementTree`, `InputRecord`, causes, view spans, scene stats, foreground slices | 🔧 | |
-| overlay pass painting `OverlayState` | 🔧 | replaces `paint_inspector_hitbox` |
-| `capture_mut().set_override / set_forced_states` applied in `Div` | 🔧 | replaces `DivInspectorState` flow |
-| `SelectedStyle` recorded for the selected element | 🔧 | |
-| `dock` changes via `capture_mut().dock = …` → relayout | 🔧 | add `set_dock` |
-| `Window::painted_text()` (test-support) | 🔧 (UI foundation slice) | text runs painted last frame with bounds |
+| Area | API |
+|---|---|
+| Lifecycle | `Window::toggle_inspector`, `is_inspector_open`, `inspector_capture()` / `_mut()`, `app_bounds()` / `inspector_bounds()` (dock split, dock ≥ 240 px, app ≥ 120 px) |
+| Store | `InspectorCapture`: `frames`, `frame(id)`, `latest_app_frame`, `latest_tree`, `input`, `path_info`, `notify_stats`, `generation`, `overlay(_mut)`, `pick`, `dock`/`set_dock`, `is_frozen`/`set_frozen`, `config_mut` (level, budget), `overrides`/`set_override`, `forced_states`/`set_forced_states`, `selected_style`, `retained_bytes`, `clear` |
+| Trees | `ElementTree::{children, get, find, ancestors, owning_view, hit_test, rebuild_children}` |
+| Picking | `start_inspector_pick` / `stop_inspector_pick`; `InspectorEvent::{PickHovered, Picked, PickCancelled}` emitted on the `Inspector` entity |
+| Elements | `Window::inspect_current_element(f)` (Div, text, Img/Svg, lists report `ElementDetails`) |
+| Keys | `Window::inspector_resolve_keystrokes(&[Keystroke], cx) -> KeyResolution` (pure; verdicts `Wins`, `Shadowed`, `ContextMismatch`, `Disabled`, `Pending`, `Unhandled`) |
+| Entities | `Window::inspector_entities(cx)` (use this from Loupe: it also sees the window being drawn) |
+| User spans | `gpui::inspector::span(name) -> SpanGuard`, `gpui::inspector_span!(name[, expr])` |
+| UI state | `Inspector::ui_state(init)` holds the per-window `Loupe` entity |
+| Tests | `InspectorCapture::{new_for_test, push_frame_for_test, push_input_for_test, intern_path_for_test, set_notify_stats_for_test, set_entities_for_test}`, `Window::{replace_inspector_capture_for_test, refresh_with_inspector, painted_text, debug_bounds}` |
 
 ### Engine rules
 
-* Every hook is `if let Some(capture) = self.inspector_capture.as_deref_mut()`
-  (or a cheap flag), inside `#[cfg(any(feature = "inspector", debug_assertions))]`.
-* Nothing is recorded while drawing the inspector's own root; that time goes to
-  `PhaseTimings::inspector`. Input routed to the dock is recorded with
-  `inspector: true`.
-* A frame is `inspector_only` when every cause is `from_inspector` (a notify on
-  an entity whose view lives under the inspector root, or input to the dock).
-* No per-frame heap churn beyond the records themselves: reuse scratch
-  buffers (parent stack, path lookups) across frames.
+* Every hook is one `Option` check (or a cheap flag) when the inspector is
+  closed; a counting-allocator test proves pointer dispatch allocates nothing.
+* Nothing is recorded while drawing the inspector's own root or overlays; that
+  time goes to `PhaseTimings::inspector` and is excluded from scene stats.
+* Whether input is the inspector's own is decided **once per event**
+  (`window/inspector_input.rs`) and feeds both the input record and the render
+  cause.
+* A frame is `inspector_only` when every cause is `from_inspector`.
+  `generation` is bumped only by app frames and app input (and by frames where
+  the inspector restyled the app), so Loupe's refresh loop cannot feed itself.
+* **The app is not perturbed.** App-code `window.refresh()` re-renders the app
+  alone; only resizes, window-state changes and inspector changes re-render
+  the inspector's cached views. Frames drawn only for the inspector replay the
+  app's previous frame instead of rendering it ("hold app"), and holding the
+  app keeps it still while you inspect a hover menu.
+* Fixture captures installed by tests replay: live frames and input are never
+  mixed into them, and the window reports the fixture's entities.
 * When frozen, rings stop updating; overlays, picking and overrides still work.
-* Picking walks the **captured tree** (`ElementTree::hit_test`), so any element
-  with bounds can be picked, not only hitbox owners. `[`/`]` or wheel change
-  depth; click selects and emits `InspectorEvent::Picked`; Escape cancels.
-* Overlays are painted after all roots with raw quads (no layout, no text
-  shaping except label chips) and never invalidate the app.
+* Picking walks the captured tree, so any element with bounds can be picked;
+  `[` / `]` or the wheel walk the ancestry; click selects; escape cancels.
+* Overlays are painted after all roots with raw quads (label chips are the only
+  shaped text) and never invalidate the app.
 
 ## UI
 
@@ -221,24 +220,26 @@ arrows, `left/right` collapse/expand in trees · `enter` open/select ·
 
 ## Testing standard ("nothing is lying")
 
-* **Engine**: tests that build known trees and assert parent links, kinds,
-  bounds, visible bounds, paint order, flags; causes for notify / refresh /
-  resize / input; cached-view reuse keeps the tree complete; input records with
-  hit paths and actions; key resolution cross-checked against real dispatch;
-  zero records while closed; `inspector_only` detection; overhead measured.
-* **UI logic**: unit tests for every `analysis/` function with edge cases.
-* **UI rendering**: fixture captures (`push_frame_for_test`) rendered headless;
-  assertions via `Window::painted_text()` (text + bounds) and pixel samples.
-* **End to end**: `harness.rs` opens a real app window with Loupe docked
-  (`HeadlessAppContext` + `CosmicTextSystem::new_without_system_fonts` +
-  `WgpuHeadlessRenderer`), drives real input (`window.dispatch_event`), clicks
-  every button by its text, and saves `target/loupe-shots/<name>.png` for
-  visual review. Every surface must have a screenshot.
+* **Engine** (`crates/gpui/src/inspector/**/tests.rs`): exact trees (links,
+  kinds, bounds, clipping, paint order), cached-view splices, causes with the
+  test's own line as the site, input records, key resolution property-tested
+  against real dispatch, entity counts, zero cost when closed.
+* **Analysis** (`src/analysis`): pure functions with edge cases.
+* **UI on fixtures**: `fixtures::inbox()` installed with
+  `LoupeHarness::install_capture` renders every surface deterministically.
+* **UI live** (`tests/live.rs` and each lens's live tests): a real app, the real
+  engine and real Loupe. Numbers Loupe shows are cross-checked against ground
+  truth (render counters, known entity graphs), idle stays idle, and frames
+  drawn only for Loupe never render the app.
+* **Visual**: every surface is screenshotted and reviewed; Lightbox
+  (`crates/gpui_lightbox`) adds contact sheets, filmstrips for animations,
+  style lint against `StyleSpec::loupe()`, goldens and benchmarks
+  (`just lightbox`, `just bench-ui`).
 
 ## Building
 
-* Nightly toolchain (repo override) with a shared build dir
-  (`~/.cargo/config.toml`), so parallel worktrees share compiled deps.
+* Nightly toolchain with a shared build dir (`~/.cargo/config.toml`), so
+  parallel worktrees share compiled dependencies.
 * `gck <cargo args>` runs cargo with one-line diagnostics and without nightly
   manifest-lint noise, e.g. `gck test -p gpui_ce_inspector`.
 * Headless GPU rendering uses Mesa lavapipe (installed).
