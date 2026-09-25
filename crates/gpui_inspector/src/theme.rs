@@ -5,6 +5,7 @@
 //! one in [`LoupeSettings`]. Color only ever means state: neutrals for chrome,
 //! the accent for selection and focus, and ok / warn / crit for budgets.
 
+use crate::analysis::stats::Grade;
 use gpui::{App, Global, Hsla, Pixels, Window, WindowAppearance, px, rgb, rgb_to_hsla, rgba};
 use std::{sync::LazyLock, time::Duration};
 
@@ -147,30 +148,6 @@ impl Phase {
             Phase::Paint => "paint",
             Phase::Present => "present",
             Phase::Inspector => "loupe",
-        }
-    }
-}
-
-/// How a duration compares to the frame budget.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Grade {
-    /// At or under budget.
-    Ok,
-    /// Over budget by at most half of it.
-    Warn,
-    /// More than 1.5× the budget.
-    Crit,
-}
-
-impl Grade {
-    /// Grades `duration` against `budget`: ok ≤ 1×, warn ≤ 1.5×, crit above.
-    pub fn of(duration: Duration, budget: Duration) -> Self {
-        if duration <= budget {
-            Grade::Ok
-        } else if duration.as_secs_f64() <= budget.as_secs_f64() * 1.5 {
-            Grade::Warn
-        } else {
-            Grade::Crit
         }
     }
 }
@@ -419,20 +396,6 @@ fn light_colors() -> Colors {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ms(value: f64) -> Duration {
-        Duration::from_secs_f64(value / 1000.)
-    }
-
-    #[test]
-    fn grades_follow_the_budget() {
-        let budget = ms(16.667);
-        assert_eq!(Grade::of(ms(3.), budget), Grade::Ok);
-        assert_eq!(Grade::of(budget, budget), Grade::Ok);
-        assert_eq!(Grade::of(ms(20.), budget), Grade::Warn);
-        assert_eq!(Grade::of(ms(25.), budget), Grade::Warn);
-        assert_eq!(Grade::of(ms(25.1), budget), Grade::Crit);
-    }
 
     #[test]
     fn phases_have_distinct_colors_in_both_themes() {

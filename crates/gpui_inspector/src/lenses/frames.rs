@@ -2,15 +2,15 @@
 
 use super::{Fact, LensOverview, LensView, RailBadge, observe_state};
 use crate::{
-    shell::{fmt, pulse},
+    analysis::{
+        format,
+        stats::{FrameStats, Grade, GradeCounts, frame_stats},
+    },
+    shell::pulse,
     state::{Lens, LensLayout, LoupeState},
-    theme::Grade,
     widgets::{IconName, Tone},
 };
-use gpui::{
-    App, Context, Entity, IntoElement, Render, Window,
-    inspector::{FrameRecord, InspectorCapture},
-};
+use gpui::{App, Context, Entity, IntoElement, Render, Window, inspector::FrameRecord};
 use std::time::Duration;
 
 /// The Frames lens (overview until the flame chart and insights land).
@@ -25,18 +25,53 @@ impl FramesLens {
     }
 }
 
-/// App frames over budget, and the worst grade among them.
-fn over_budget(capture: &InspectorCapture) -> (usize, Option<Grade>) {
-    let budget = capture.config().budget;
-    capture
-        .frames()
-        .iter()
-        .filter(|frame| !frame.inspector_only)
-        .map(|frame| Grade::of(frame.timings.app_total(), budget))
-        .filter(|grade| *grade != Grade::Ok)
-        .fold((0, None), |(count, worst), grade| {
-            (count + 1, worst.max(Some(grade)))
-        })
+/// The tone of the worst grade among `grades`.
+fn worst_tone(grades: &GradeCounts) -> Tone {
+    if grades.crit > 0 {
+        Tone::Crit
+    } else if grades.warn > 0 {
+        Tone::Warn
+    } else {
+        Tone::Neutral
+    }
+}
+
+fn millis(duration: Duration) -> String {
+    format!("{} ms", format::millis(duration))
+}
+
+fn recording_facts(stats: &FrameStats, frames: usize, budget: Duration) -> Vec<Fact> {
+    let percentiles = &stats.app_total;
+    vec![
+        Fact::new(
+            "Frames",
+            format!(
+                "{} app · {} Loupe only",
+                format::count(stats.app_frames as u64),
+                format::count((frames - stats.app_frames) as u64)
+            ),
+        ),
+        Fact::new("Frame rate", format!("{:.0} fps", stats.fps)),
+        Fact::new(
+            "p50 · p95 · p99",
+            format!(
+                "{} · {} · {}",
+                millis(percentiles.p50),
+                millis(percentiles.p95),
+                millis(percentiles.p99)
+            ),
+        ),
+        Fact::new(
+            "Over budget",
+            format!(
+                "{} of {} ({} budget)",
+                format::count(stats.grades.over_budget() as u64),
+                format::count(stats.app_frames as u64),
+                millis(budget)
+            ),
+        )
+        .tone(worst_tone(&stats.grades)),
+    ]
 }
 
 fn frame_facts(frame: &FrameRecord, budget: Duration) -> Vec<Fact> {
@@ -49,27 +84,24 @@ fn frame_facts(frame: &FrameRecord, budget: Duration) -> Vec<Fact> {
     };
     let mut facts = vec![
         Fact::new("Frame", format!("#{}", frame.id)),
-        Fact::new("App time", format!("{} ms", fmt::ms(total))).tone(tone),
+        Fact::new("App time", millis(total)).tone(tone),
         Fact::new(
             "Render · layout",
             format!(
                 "{} · {} ms",
-                fmt::ms(timings.render),
-                fmt::ms(timings.layout)
+                format::millis(timings.render),
+                format::millis(timings.layout)
             ),
         ),
         Fact::new(
             "Prepaint · paint",
             format!(
                 "{} · {} ms",
-                fmt::ms(timings.prepaint),
-                fmt::ms(timings.paint)
+                format::millis(timings.prepaint),
+                format::millis(timings.paint)
             ),
         ),
-        Fact::new(
-            "Loupe's share",
-            format!("{} ms", fmt::ms(timings.inspector)),
-        ),
+        Fact::new("Loupe's share", millis(timings.inspector)),
         Fact::new(
             "Views rendered",
             format!(
@@ -78,12 +110,15 @@ fn frame_facts(frame: &FrameRecord, budget: Duration) -> Vec<Fact> {
                 frame.views.len()
             ),
         ),
-        Fact::new("Primitives", fmt::count(frame.scene.primitives() as usize)),
+        Fact::new(
+            "Primitives",
+            format::count(u64::from(frame.scene.primitives())),
+        ),
     ];
     if let Some(cause) = frame.causes.iter().find(|cause| !cause.from_inspector) {
         let site = cause
             .site
-            .map(|site| format!(" at {}", fmt::location(site)))
+            .map(|site| format!(" at {}", format::location(site)))
             .unwrap_or_default();
         facts.push(Fact::new(
             "First cause",
@@ -105,56 +140,9 @@ impl Render for FramesLens {
         if frames.is_empty() {
             return overview;
         }
-        let app_frames = frames.iter().filter(|frame| !frame.inspector_only).count();
-        let (slow, worst) = over_budget(capture);
-        let slow_tone = match worst {
-            Some(Grade::Crit) => Tone::Crit,
-            Some(_) => Tone::Warn,
-            None => Tone::Neutral,
-        };
-        let percentile = |p| {
-            pulse::app_percentile(frames, p)
-                .map(|value| format!("{} ms", fmt::ms(value)))
-                .unwrap_or_else(|| "–".into())
-        };
-        overview = overview.section(
-            "Recording",
-            vec![
-                Fact::new(
-                    "Frames",
-                    format!(
-                        "{} app · {} Loupe only",
-                        fmt::count(app_frames),
-                        fmt::count(frames.len() - app_frames)
-                    ),
-                ),
-                Fact::new(
-                    "Frame rate",
-                    pulse::fps(frames)
-                        .map(|fps| format!("{fps:.0} fps"))
-                        .unwrap_or_else(|| "–".into()),
-                ),
-                Fact::new(
-                    "p50 · p95 · p99",
-                    format!(
-                        "{} · {} · {}",
-                        percentile(50.),
-                        percentile(95.),
-                        percentile(99.)
-                    ),
-                ),
-                Fact::new(
-                    "Over budget",
-                    format!(
-                        "{} of {} ({} ms budget)",
-                        slow,
-                        app_frames,
-                        fmt::ms(capture.config().budget)
-                    ),
-                )
-                .tone(slow_tone),
-            ],
-        );
+        let budget = capture.config().budget;
+        let stats = frame_stats(frames, budget);
+        overview = overview.section("Recording", recording_facts(&stats, frames.len(), budget));
         let frame = match selected {
             Some(id) => capture.frame(id),
             None => capture.latest_app_frame(),
@@ -165,7 +153,7 @@ impl Render for FramesLens {
             } else {
                 "Latest frame"
             };
-            overview = overview.section(title, frame_facts(frame, capture.config().budget));
+            overview = overview.section(title, frame_facts(frame, budget));
         }
         overview
     }
@@ -174,25 +162,13 @@ impl Render for FramesLens {
 impl LensView for FramesLens {
     fn rail_badge(&self, window: &Window, _cx: &App) -> Option<RailBadge> {
         let capture = window.inspector_capture()?;
-        match over_budget(capture) {
-            (0, _) => {
-                let app = capture
-                    .frames()
-                    .iter()
-                    .filter(|frame| !frame.inspector_only)
-                    .count();
-                (app > 0).then(|| RailBadge::count(fmt::count(app)))
-            }
-            (slow, worst) => Some(
-                RailBadge::alert(
-                    fmt::count(slow),
-                    if worst == Some(Grade::Crit) {
-                        Tone::Crit
-                    } else {
-                        Tone::Warn
-                    },
-                )
-                .marker(IconName::TriangleUp),
+        let stats = frame_stats(capture.frames(), capture.config().budget);
+        match stats.grades.over_budget() {
+            0 if stats.app_frames == 0 => None,
+            0 => Some(RailBadge::count(format::count(stats.app_frames as u64))),
+            slow => Some(
+                RailBadge::alert(format::count(slow as u64), worst_tone(&stats.grades))
+                    .marker(IconName::TriangleUp),
             ),
         }
     }

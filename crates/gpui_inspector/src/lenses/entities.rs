@@ -2,7 +2,7 @@
 
 use super::{Fact, LensOverview, LensView, RailBadge, observe_state};
 use crate::{
-    shell::fmt,
+    analysis::format,
     state::{Lens, LensLayout, LoupeState},
     widgets::IconName,
 };
@@ -11,6 +11,11 @@ use gpui::{
     inspector::{CauseKind, EntityInfo, InspectorCapture, short_type_name},
 };
 use std::collections::HashMap;
+
+/// An entity id as its slot number, `#6` (the version bits are noise to a reader).
+pub(crate) fn entity_label(id: EntityId) -> String {
+    format!("#{}", id.as_u64() & 0xffff_ffff)
+}
 
 /// Short type names for every entity Loupe has seen: live entities from the
 /// registry, views from recorded view spans, and notified entities from
@@ -66,15 +71,15 @@ impl Render for EntitiesLens {
         let notifies: u64 = stats.values().map(|stats| stats.total).sum();
         let mut facts = Vec::new();
         if !live.is_empty() {
-            facts.push(Fact::new("Live entities", fmt::count(live.len())));
-            facts.push(Fact::new("Rendered as views", fmt::count(views)));
+            facts.push(Fact::new("Live entities", format::count(live.len() as u64)));
+            facts.push(Fact::new("Rendered as views", format::count(views as u64)));
         }
         if !stats.is_empty() {
-            facts.push(Fact::new("Entities that notified", fmt::count(stats.len())));
             facts.push(Fact::new(
-                "Notifies recorded",
-                fmt::count(notifies as usize),
+                "Entities that notified",
+                format::count(stats.len() as u64),
             ));
+            facts.push(Fact::new("Notifies recorded", format::count(notifies)));
         }
         overview = overview.section("Registry", facts);
 
@@ -88,11 +93,11 @@ impl Render for EntitiesLens {
             .map(|(id, stats)| {
                 let site = stats
                     .last_site
-                    .map(|site| format!(" · {}", fmt::location(site)))
+                    .map(|site| format!(" · {}", format::location(site)))
                     .unwrap_or_default();
                 Fact::new(
-                    format!("{} {}", name(*id), fmt::entity(*id)),
-                    format!("{} notifies{site}", fmt::count(stats.total as usize)),
+                    format!("{} {}", name(*id), entity_label(*id)),
+                    format!("{} notifies{site}", format::count(stats.total)),
                 )
             })
             .collect();
@@ -102,7 +107,7 @@ impl Render for EntitiesLens {
             let facts = match live.iter().find(|entity| entity.id == id) {
                 Some(entity) => vec![
                     Fact::new("Type", entity.type_name),
-                    Fact::new("Strong handles", fmt::count(entity.strong_count)),
+                    Fact::new("Strong handles", format::count(entity.strong_count as u64)),
                     Fact::new(
                         "Observers · subscribers",
                         format!("{} · {}", entity.observers, entity.subscribers),
@@ -110,7 +115,7 @@ impl Render for EntitiesLens {
                 ],
                 None => vec![Fact::new(
                     "Entity",
-                    format!("{} {}", name(id), fmt::entity(id)),
+                    format!("{} {}", name(id), entity_label(id)),
                 )],
             };
             overview = overview.section("Selected entity", facts);
@@ -129,6 +134,6 @@ impl LensView for EntitiesLens {
         } else {
             window.inspector_capture()?.notify_stats().len()
         };
-        (count > 0).then(|| RailBadge::count(fmt::count(count)))
+        (count > 0).then(|| RailBadge::count(format::count(count as u64)))
     }
 }

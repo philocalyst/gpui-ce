@@ -1,7 +1,7 @@
 //! The status bar: where the selection lives, and what everything costs.
 
 use crate::{
-    shell::fmt,
+    analysis::format,
     theme::{MONO_FONT, Theme},
     widgets::{Pill, Tone},
 };
@@ -40,7 +40,7 @@ pub(crate) fn breadcrumb(tree: &ElementTree, key: ElementKey) -> (Vec<Crumb>, bo
                 return None;
             }
             Some(Crumb {
-                name: fmt::element_name(record).into(),
+                name: format::element_label(record).into(),
                 key: record.key?,
             })
         })
@@ -125,7 +125,7 @@ impl RenderOnce for StatusBar {
                 )
         };
         let ms = |duration: Option<Duration>| match duration {
-            Some(duration) => format!("{} ms", fmt::ms(duration)),
+            Some(duration) => format!("{} ms", format::millis(duration)),
             None => "–".into(),
         };
 
@@ -145,7 +145,7 @@ impl RenderOnce for StatusBar {
             .child(path)
             .child(metric("app", ms(self.app_time)))
             .child(metric("loupe", ms(self.loupe_time)))
-            .child(metric("mem", fmt::bytes(self.retained)))
+            .child(metric("mem", format::bytes(self.retained as u64)))
             .when(self.frozen, |this| {
                 this.child(Pill::new("Frozen").tone(Tone::Accent).strong())
             })

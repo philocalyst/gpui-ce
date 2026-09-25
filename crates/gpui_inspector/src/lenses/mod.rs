@@ -22,7 +22,7 @@ mod frames;
 
 pub(crate) use audit::AuditLens;
 pub(crate) use elements::ElementsLens;
-pub(crate) use entities::{EntitiesLens, entity_names};
+pub(crate) use entities::{EntitiesLens, entity_label, entity_names};
 pub(crate) use events::EventsLens;
 pub(crate) use frames::FramesLens;
 

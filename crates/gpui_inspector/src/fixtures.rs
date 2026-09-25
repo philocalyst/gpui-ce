@@ -81,7 +81,6 @@ pub struct ElementSpec {
 }
 
 const DIV: &str = "gpui::elements::div::Div";
-const STATEFUL_DIV: &str = "gpui::elements::div::Stateful<gpui::elements::div::Div>";
 const TEXT: &str = "gpui::elements::text::StyledText";
 
 impl ElementSpec {
@@ -131,13 +130,8 @@ impl ElementSpec {
         }
     }
 
-    /// Gives the element an id (a `div` becomes `Stateful<Div>`).
+    /// Gives the element an id.
     pub fn id(mut self, id: impl Into<SharedString>) -> Self {
-        if matches!(self.kind, ElementKind::Element { type_name: DIV }) {
-            self.kind = ElementKind::Element {
-                type_name: STATEFUL_DIV,
-            };
-        }
         self.id = Some(id.into());
         self
     }

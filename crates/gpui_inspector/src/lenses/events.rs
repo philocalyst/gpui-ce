@@ -2,7 +2,7 @@
 
 use super::{Fact, LensOverview, LensView, RailBadge, observe_state};
 use crate::{
-    shell::fmt,
+    analysis::format,
     state::{Lens, LensLayout, LoupeState},
     widgets::IconName,
 };
@@ -54,7 +54,7 @@ fn input_facts(record: &InputRecord) -> Vec<Fact> {
     if !record.hit_path.is_empty() {
         facts.push(Fact::new(
             "Elements under pointer",
-            fmt::count(record.hit_path.len()),
+            format::count(record.hit_path.len() as u64),
         ));
     }
     if let Some(frame) = record.frame {
@@ -94,22 +94,26 @@ impl Render for EventsLens {
         overview = overview.section(
             "Recorded input",
             vec![
-                Fact::new("Records", fmt::count(total)),
+                Fact::new("Records", format::count(total as u64)),
                 Fact::new(
                     "Clicks · keys · scrolls",
                     format!(
                         "{} · {} · {}",
-                        fmt::count(count(&[InputKind::MouseDown])),
-                        fmt::count(count(&[InputKind::KeyDown])),
-                        fmt::count(count(&[InputKind::Scroll]))
+                        format::count(count(&[InputKind::MouseDown]) as u64),
+                        format::count(count(&[InputKind::KeyDown]) as u64),
+                        format::count(count(&[InputKind::Scroll]) as u64)
                     ),
                 ),
-                Fact::new("Mouse moves (coalesced)", fmt::count(moves as usize)),
+                Fact::new("Mouse moves (coalesced)", format::count(u64::from(moves))),
                 Fact::new(
                     "Handled",
-                    format!("{} of {}", fmt::count(handled), fmt::count(total)),
+                    format!(
+                        "{} of {}",
+                        format::count(handled as u64),
+                        format::count(total as u64)
+                    ),
                 ),
-                Fact::new("Actions dispatched", fmt::count(actions)),
+                Fact::new("Actions dispatched", format::count(actions as u64)),
             ],
         );
         let record = match selected {
@@ -132,6 +136,6 @@ impl LensView for EventsLens {
     fn rail_badge(&self, window: &Window, _cx: &App) -> Option<RailBadge> {
         let capture = window.inspector_capture()?;
         let count = app_input(capture.input().iter()).count();
-        (count > 0).then(|| RailBadge::count(fmt::count(count)))
+        (count > 0).then(|| RailBadge::count(format::count(count as u64)))
     }
 }

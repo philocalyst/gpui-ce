@@ -2,7 +2,7 @@
 
 use super::{Fact, LensOverview, LensView, RailBadge, observe_state};
 use crate::{
-    shell::fmt,
+    analysis::format,
     state::{Lens, LensLayout, LoupeState},
     widgets::IconName,
 };
@@ -67,19 +67,19 @@ impl Render for ElementsLens {
                 "Latest tree",
                 vec![
                     Fact::new("Captured in frame", format!("#{}", tree.frame)),
-                    Fact::new("Elements", fmt::count(counts.elements)),
-                    Fact::new("Views", fmt::count(counts.views)),
-                    Fact::new("Components", fmt::count(counts.components)),
+                    Fact::new("Elements", format::count(counts.elements as u64)),
+                    Fact::new("Views", format::count(counts.views as u64)),
+                    Fact::new("Components", format::count(counts.components as u64)),
                     Fact::new("Deepest nesting", counts.depth.to_string()),
-                    Fact::new("Style overrides", fmt::count(counts.overridden)),
+                    Fact::new("Style overrides", format::count(counts.overridden as u64)),
                 ],
             );
             let selection = selected.and_then(|key| {
                 let ix = tree.find(key)?;
                 let record = tree.get(ix)?;
-                let mut facts = vec![Fact::new("Element", fmt::element_name(record))];
+                let mut facts = vec![Fact::new("Element", format::element_label(record))];
                 if let Some(info) = capture.path_info(key.path) {
-                    facts.push(Fact::new("Source", fmt::location(info.source)));
+                    facts.push(Fact::new("Source", format::location(info.source)));
                 }
                 let size = record.bounds.size;
                 facts.push(Fact::new(
@@ -91,7 +91,7 @@ impl Render for ElementsLens {
                     .filter(|&view| view != ix)
                     .and_then(|view| tree.get(view))
                 {
-                    facts.push(Fact::new("Owning view", fmt::element_name(view)));
+                    facts.push(Fact::new("Owning view", format::element_label(view)));
                 }
                 Some(facts)
             });
@@ -108,6 +108,6 @@ impl LensView for ElementsLens {
             Some(tree) => tree.elements.len(),
             None => capture.latest_app_frame()?.element_count as usize,
         };
-        Some(RailBadge::count(fmt::count(count)))
+        Some(RailBadge::count(format::count(count as u64)))
     }
 }

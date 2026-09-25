@@ -8,15 +8,18 @@
 //! layout function.
 
 use crate::{
-    shell::fmt,
-    theme::{Grade, Theme},
+    analysis::{
+        format,
+        stats::{Grade, pulse_height},
+    },
+    theme::Theme,
 };
 use gpui::{
     Bounds, ColorExt as _, Pixels, Point, Window, fill,
     inspector::{CauseKind, FrameRecord, InspectorCapture},
     outline, point, px, size,
 };
-use std::{collections::VecDeque, time::Duration};
+use std::time::Duration;
 
 /// Geometry of one frame in the strip.
 #[derive(Clone, Debug, PartialEq)]
@@ -60,18 +63,9 @@ impl PulseArea {
 
     /// Where the dashed budget line sits.
     pub fn budget_y(&self) -> Pixels {
-        self.baseline - bar_height(Duration::from_secs(1), Duration::from_secs(1), self.max_bar)
+        let budget = Duration::from_secs(1);
+        self.baseline - self.max_bar * pulse_height(budget, budget)
     }
-}
-
-/// Bar height for `app_total`: `sqrt(t / 3·budget)` of `max`, capped at `max`.
-pub(crate) fn bar_height(app_total: Duration, budget: Duration, max: Pixels) -> Pixels {
-    let cap = budget.as_secs_f32() * 3.;
-    if cap <= 0. {
-        return px(0.);
-    }
-    let ratio = (app_total.as_secs_f32() / cap).clamp(0., 1.);
-    max * ratio.sqrt()
 }
 
 /// Narrowest slot a frame gets; narrower strips show only the newest frames.
@@ -107,7 +101,7 @@ pub(crate) fn layout_bars<'a>(
             let height = if frame.inspector_only {
                 px(2.)
             } else {
-                bar_height(app_total, budget, area.max_bar).max(px(1.5))
+                (area.max_bar * pulse_height(app_total, budget)).max(px(1.5))
             };
             PulseBar {
                 frame: frame.id,
@@ -144,45 +138,12 @@ pub(crate) fn capture_bars(capture: &InspectorCapture, bounds: Bounds<Pixels>) -
     )
 }
 
-/// Frames per second over the last second of recorded app frames (frames
-/// only Loupe caused are ignored). `None` with fewer than two such frames.
-pub(crate) fn fps(frames: &VecDeque<FrameRecord>) -> Option<f32> {
-    let mut app = frames.iter().rev().filter(|frame| !frame.inspector_only);
-    let latest = app.next()?.start;
-    let window_start = latest.saturating_sub(Duration::from_secs(1));
-    let (count, earliest) = app
-        .take_while(|frame| frame.start >= window_start)
-        .fold((1u32, latest), |(count, _), frame| (count + 1, frame.start));
-    let span = latest.saturating_sub(earliest).as_secs_f32();
-    (count >= 2 && span > 0.).then(|| (count - 1) as f32 / span)
-}
-
-/// Nearest-rank percentile (`p` in 0..=100) of `values`, which it sorts.
-pub(crate) fn percentile(values: &mut [Duration], p: f32) -> Option<Duration> {
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_unstable();
-    let rank = ((p / 100.) * values.len() as f32).ceil() as usize;
-    Some(values[rank.clamp(1, values.len()) - 1])
-}
-
-/// `p`th percentile of app time over the app frames.
-pub(crate) fn app_percentile(frames: &VecDeque<FrameRecord>, p: f32) -> Option<Duration> {
-    let mut totals: Vec<Duration> = frames
-        .iter()
-        .filter(|frame| !frame.inspector_only)
-        .map(|frame| frame.timings.app_total())
-        .collect();
-    percentile(&mut totals, p)
-}
-
 /// One line about a frame: `#18372 · 23.4 ms · render 14.1 · IssueStore notified`.
 pub(crate) fn frame_summary(frame: &FrameRecord) -> String {
     let timings = &frame.timings;
     let mut parts = vec![
         format!("#{}", frame.id),
-        format!("{} ms", fmt::ms(timings.app_total())),
+        format!("{} ms", format::millis(timings.app_total())),
     ];
     let phases = [
         ("render", timings.render),
@@ -193,7 +154,7 @@ pub(crate) fn frame_summary(frame: &FrameRecord) -> String {
     if let Some((name, duration)) = phases.iter().max_by_key(|(_, duration)| *duration)
         && !duration.is_zero()
     {
-        parts.push(format!("{name} {}", fmt::ms(*duration)));
+        parts.push(format!("{name} {}", format::millis(*duration)));
     }
     if frame.inspector_only {
         parts.push("Loupe only".into());
@@ -209,7 +170,7 @@ pub(crate) fn cause_summary(kind: &CauseKind) -> String {
         CauseKind::Notify {
             type_name: Some(type_name),
             ..
-        } => format!("{} notified", gpui::inspector::short_type_name(type_name)),
+        } => format!("{} notified", format::type_name(type_name)),
         CauseKind::Notify { entity, .. } => format!("entity {entity:?} notified"),
         CauseKind::Refresh => "window.refresh()".into(),
         CauseKind::Resize => "resized".into(),
@@ -335,14 +296,23 @@ mod tests {
     }
 
     #[test]
-    fn bar_height_is_sqrt_scaled_and_capped_at_three_budgets() {
-        let budget = ms(16.);
-        let max = px(90.);
-        assert_eq!(bar_height(ms(0.), budget, max), px(0.));
-        assert_eq!(bar_height(ms(48.), budget, max), px(90.));
-        assert_eq!(bar_height(ms(480.), budget, max), px(90.));
-        // A quarter of the cap is half the height.
-        assert_eq!(bar_height(ms(12.), budget, max), px(45.));
+    fn bars_are_sqrt_scaled_up_from_the_baseline() {
+        let frames = [frame(0, 0., 48., false), frame(1, 16., 12., false)];
+        let area = area();
+        let bars = layout_bars(frames.iter(), 2, ms(16.), &area);
+        assert_eq!(
+            bars[0].bar.size.height, area.max_bar,
+            "three budgets fill the strip"
+        );
+        assert_eq!(
+            bars[1].bar.size.height,
+            area.max_bar * 0.5,
+            "a quarter of that is half"
+        );
+        assert_eq!(
+            area.budget_y(),
+            area.baseline - area.max_bar * (1. / 3f32).sqrt()
+        );
     }
 
     #[test]
@@ -393,28 +363,6 @@ mod tests {
         assert_eq!(bar_at(&bars, px(60.)).map(|bar| bar.frame), Some(11));
         assert_eq!(bar_at(&bars, px(239.)).map(|bar| bar.frame), Some(13));
         assert_eq!(bar_at(&bars, px(241.)), None);
-    }
-
-    #[test]
-    fn fps_counts_app_frames_in_the_last_second() {
-        let mut frames: VecDeque<_> = (0..121)
-            .map(|ix| frame(ix, ix as f64 * 1000. / 120., 3., false))
-            .collect();
-        frames.push_back(frame(121, 1000.5, 1., true));
-        let fps = fps(&frames).unwrap();
-        assert!((fps - 120.).abs() < 0.5, "{fps}");
-        assert_eq!(super::fps(&VecDeque::from([frame(0, 0., 1., false)])), None);
-    }
-
-    #[test]
-    fn percentiles_use_nearest_rank_over_app_frames() {
-        let mut frames: VecDeque<_> = (1..=100)
-            .map(|ix| frame(ix, 0., ix as f64, false))
-            .collect();
-        frames.push_back(frame(101, 0., 500., true));
-        assert_eq!(app_percentile(&frames, 95.), Some(ms(95.)));
-        assert_eq!(app_percentile(&frames, 50.), Some(ms(50.)));
-        assert_eq!(percentile(&mut [], 95.), None);
     }
 
     #[test]

@@ -10,10 +10,10 @@ use gpui::{
     px, rgb, size,
 };
 use gpui_inspector::{
-    Lens, LensLayout, REFRESH_INTERVAL,
+    Lens, LensLayout, LoupeSettings, REFRESH_INTERVAL,
     fixtures::{self, FrameBuilder, InboxElements, ms},
     harness::LoupeHarness,
-    theme::Appearance,
+    theme::{Appearance, Density},
 };
 use std::time::Duration;
 
@@ -118,6 +118,19 @@ fn shell_renders_every_surface_in_both_themes() {
     harness.set_appearance(Appearance::Light);
     harness.screenshot("shell-right-light");
     harness.assert_text_visible("Freeze");
+
+    // Comfortable density grows rows and controls by 4 px.
+    let compact_rail = harness.find_text("Events").unwrap();
+    harness.app(|cx| {
+        cx.set_global(LoupeSettings {
+            appearance: Appearance::Dark,
+            density: Density::Comfortable,
+        })
+    });
+    harness.draw();
+    let comfortable_rail = harness.find_text("Events").unwrap();
+    assert!(comfortable_rail.origin.y > compact_rail.origin.y + px(8.));
+    harness.screenshot("shell-comfortable");
 }
 
 #[test]

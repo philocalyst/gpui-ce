@@ -2,7 +2,7 @@
 
 use super::{Fact, LensOverview, LensView, RailBadge, observe_state};
 use crate::{
-    shell::fmt,
+    analysis::format,
     state::{Lens, LensLayout, LoupeState},
     widgets::{IconName, Tone},
 };
@@ -76,15 +76,21 @@ impl Render for AuditLens {
         overview = overview.section(
             "Flagged in the latest tree",
             vec![
-                Fact::new("Overflowing parent", fmt::count(counts.overflowing))
-                    .tone(warn_if_any(counts.overflowing)),
+                Fact::new(
+                    "Overflowing parent",
+                    format::count(counts.overflowing as u64),
+                )
+                .tone(warn_if_any(counts.overflowing)),
                 Fact::new(
                     "Clickable, no keyboard",
-                    fmt::count(counts.clickable_without_keyboard),
+                    format::count(counts.clickable_without_keyboard as u64),
                 )
                 .tone(warn_if_any(counts.clickable_without_keyboard)),
-                Fact::new("Empty hitboxes", fmt::count(counts.empty_hitboxes))
-                    .tone(warn_if_any(counts.empty_hitboxes)),
+                Fact::new(
+                    "Empty hitboxes",
+                    format::count(counts.empty_hitboxes as u64),
+                )
+                .tone(warn_if_any(counts.empty_hitboxes)),
             ],
         );
         overview
@@ -96,7 +102,7 @@ impl LensView for AuditLens {
         let tree = window.inspector_capture()?.latest_tree()?;
         match FlagCounts::of(tree).total() {
             0 => None,
-            count => Some(RailBadge::alert(fmt::count(count), Tone::Warn)),
+            count => Some(RailBadge::alert(format::count(count as u64), Tone::Warn)),
         }
     }
 }

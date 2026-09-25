@@ -14,11 +14,11 @@
 //! Loupe caused do not move the generation, so there is no redraw loop.
 
 use crate::{
+    analysis::{format, stats::frame_stats},
     commands::{Command, DockSide, keys},
-    lenses::{Lenses, entity_names},
+    lenses::{Lenses, entity_label, entity_names},
     palette::{Palette, PaletteEvent, PaletteGlyph, PaletteItem, PaletteTarget},
     shell::{
-        fmt,
         pulse::{self, capture_bars, frame_at, paint_pulse},
         status::{StatusBar, breadcrumb},
         toolbar::{Run, Toolbar},
@@ -406,10 +406,10 @@ impl Loupe {
                 };
                 let detail = capture
                     .path_info(key.path)
-                    .map(|info| SharedString::from(fmt::location(info.source)));
+                    .map(|info| SharedString::from(format::location(info.source)));
                 Some(PaletteItem {
                     target: PaletteTarget::Element(key),
-                    label: fmt::element_name(record).into(),
+                    label: format::element_label(record).into(),
                     detail,
                     glyph,
                     keys: None,
@@ -429,7 +429,7 @@ impl Loupe {
         items.extend(entities.into_iter().map(|(id, name)| PaletteItem {
             target: PaletteTarget::Entity(id),
             label: name.into(),
-            detail: Some(fmt::entity(id).into()),
+            detail: Some(entity_label(id).into()),
             glyph: PaletteGlyph::Entity,
             keys: None,
             checked: None,
@@ -489,13 +489,14 @@ impl Loupe {
         let selected = self.state.read(cx).selected_frame();
         let hovered = self.pulse_hover;
         let bounds_cell = self.pulse_bounds.clone();
-        let (fps, p95) = window
+        let stats = window
             .inspector_capture()
-            .map(|capture| {
-                let frames = capture.frames();
-                (pulse::fps(frames), pulse::app_percentile(frames, 95.))
-            })
-            .unwrap_or_default();
+            .map(|capture| frame_stats(capture.frames(), capture.config().budget))
+            .filter(|stats| stats.app_frames > 0);
+        let fps = stats.as_ref().map(|stats| format!("{:.0}", stats.fps));
+        let p95 = stats
+            .as_ref()
+            .map(|stats| format::millis(stats.app_total.p95));
         let stat = |value: String, unit: &'static str| {
             div()
                 .flex()
@@ -559,14 +560,10 @@ impl Loupe {
                     .items_center()
                     .gap(px(6.))
                     .text_size(theme.metrics.text_small)
-                    .child(stat(
-                        fps.map(|fps| format!("{fps:.0}"))
-                            .unwrap_or_else(|| "–".into()),
-                        "fps",
-                    ))
+                    .child(stat(fps.unwrap_or_else(|| format::NO_VALUE.into()), "fps"))
                     .child(div().text_color(colors.text_faint).child("·"))
                     .child(div().text_color(colors.text_faint).child("p95"))
-                    .child(stat(p95.map(fmt::ms).unwrap_or_else(|| "–".into()), "ms")),
+                    .child(stat(p95.unwrap_or_else(|| format::NO_VALUE.into()), "ms")),
             )
     }
 
