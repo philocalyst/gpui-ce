@@ -7,14 +7,30 @@
 //! and input only while Loupe is open. See `DESIGN.md` for the architecture.
 
 pub mod analysis;
+mod commands;
+mod lenses;
 mod loupe;
+mod palette;
+mod shell;
+mod state;
+pub mod theme;
+pub mod widgets;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixtures;
+#[cfg(any(test, feature = "test-support"))]
+pub mod harness;
 
 use gpui::{
     App, AppContext as _, IntoElement as _, KeyBinding, StyleRefinement, Styled as _, actions,
 };
 use std::borrow::Cow;
 
-pub use loupe::Loupe;
+pub use commands::{Command, DockSide};
+pub use loupe::{Loupe, REFRESH_INTERVAL};
+pub use palette::fuzzy;
+pub use state::{Filters, Lens, LensLayout, LoupeState};
+pub use theme::{LoupeSettings, MONO_FONT, UI_FONT};
 
 actions!(
     loupe,
@@ -25,11 +41,6 @@ actions!(
         TogglePick,
     ]
 );
-
-/// The UI font Loupe renders with. Embedded, so every platform looks the same.
-pub const UI_FONT: &str = "IBM Plex Sans";
-/// The font Loupe uses for values, paths and code.
-pub const MONO_FONT: &str = "Lilex";
 
 const FONTS: [&[u8]; 6] = [
     include_bytes!("../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"),
@@ -49,19 +60,9 @@ pub fn init(cx: &mut App) {
         log::warn!("loupe: failed to load its fonts: {error}");
     }
 
-    let toggle = if cfg!(target_os = "macos") {
-        "cmd-alt-i"
-    } else {
-        "ctrl-shift-i"
-    };
-    let pick = if cfg!(target_os = "macos") {
-        "cmd-shift-c"
-    } else {
-        "ctrl-shift-c"
-    };
     cx.bind_keys([
-        KeyBinding::new(toggle, ToggleInspector, None),
-        KeyBinding::new(pick, TogglePick, None),
+        KeyBinding::new(commands::keys::TOGGLE, ToggleInspector, None),
+        KeyBinding::new(commands::keys::PICK, TogglePick, None),
     ]);
     loupe::bind_keys(cx);
 
