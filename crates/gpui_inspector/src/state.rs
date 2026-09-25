@@ -94,8 +94,12 @@ pub const STACK_BELOW_WIDTH: Pixels = px(520.);
 pub fn lens_layout(dock: InspectorDock, bounds: Bounds<Pixels>) -> LensLayout {
     match dock {
         InspectorDock::Bottom { .. } => LensLayout::SideBySide,
-        InspectorDock::Right { .. } if bounds.size.width < STACK_BELOW_WIDTH => LensLayout::Stacked,
-        InspectorDock::Right { .. } => LensLayout::SideBySide,
+        InspectorDock::Right { .. } | InspectorDock::Hidden
+            if bounds.size.width < STACK_BELOW_WIDTH =>
+        {
+            LensLayout::Stacked
+        }
+        InspectorDock::Right { .. } | InspectorDock::Hidden => LensLayout::SideBySide,
     }
 }
 

@@ -62,6 +62,10 @@ pub(crate) struct StatusBar {
     pub loupe_time: Option<Duration>,
     pub retained: usize,
     pub frozen: bool,
+    /// The app is held still.
+    pub held: bool,
+    /// "Hold the app in 3 seconds" is counting down.
+    pub holding_soon: bool,
     pub on_crumb: Rc<dyn Fn(ElementKey, &mut Window, &mut App)>,
 }
 
@@ -148,6 +152,12 @@ impl RenderOnce for StatusBar {
             .child(metric("mem", format::bytes(self.retained as u64)))
             .when(self.frozen, |this| {
                 this.child(Pill::new("Frozen").tone(Tone::Accent).strong())
+            })
+            .when(self.holding_soon, |this| {
+                this.child(Pill::new("Holding in 3 s").tone(Tone::Warn))
+            })
+            .when(self.held, |this| {
+                this.child(Pill::new("Held").tone(Tone::Warn).strong())
             })
     }
 }

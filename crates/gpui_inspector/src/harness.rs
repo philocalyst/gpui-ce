@@ -11,7 +11,8 @@ use crate::{Loupe, LoupeSettings, LoupeState, REFRESH_INTERVAL, UI_FONT, theme::
 use gpui::{
     AnyWindowHandle, App, Bounds, Entity, HeadlessAppContext, Keystroke, Modifiers, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintedText, Pixels, PlatformInput, Point,
-    Render, Size, Subscription, WeakEntity, Window, inspector::InspectorCapture,
+    Render, ScrollDelta, ScrollWheelEvent, Size, Subscription, TouchPhase, WeakEntity, Window,
+    inspector::InspectorCapture,
 };
 use gpui_wgpu::{CosmicTextSystem, WgpuHeadlessRenderer};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
@@ -46,10 +47,14 @@ impl LoupeHarness {
                 *loupe.borrow_mut() = Some(cx.entity().downgrade());
             })
         });
-        let window = cx
+        let window: AnyWindowHandle = cx
             .open_window(size, build_root)
             .expect("headless window opens")
             .into();
+        // Active, like a window the user is looking at: global shortcuts
+        // (toggle Loupe, pick, hold) act on the active window.
+        cx.update_window(window, |_, window, _| window.activate_window())
+            .expect("window is open");
         let mut harness = Self {
             cx,
             window,
@@ -228,19 +233,42 @@ impl LoupeHarness {
 
     /// Clicks at `position` (move, press, release).
     pub fn click(&mut self, position: Point<Pixels>) {
+        self.click_with(position, Modifiers::default(), 1);
+    }
+
+    /// Clicks at `position` holding `modifiers`, as the `click_count`th
+    /// click in a row (2 for the second click of a double-click).
+    pub fn click_with(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: Modifiers,
+        click_count: usize,
+    ) {
         self.hover(position);
         self.dispatch(PlatformInput::MouseDown(MouseDownEvent {
             button: MouseButton::Left,
             position,
-            modifiers: Modifiers::default(),
-            click_count: 1,
+            modifiers,
+            click_count,
             first_mouse: false,
         }));
         self.dispatch(PlatformInput::MouseUp(MouseUpEvent {
             button: MouseButton::Left,
             position,
+            modifiers,
+            click_count,
+        }));
+    }
+
+    /// Scrolls the wheel by `delta` pixels at `position` (positive `y`
+    /// scrolls up, towards the top of the content).
+    pub fn scroll(&mut self, position: Point<Pixels>, delta: Point<Pixels>) {
+        self.hover(position);
+        self.dispatch(PlatformInput::ScrollWheel(ScrollWheelEvent {
+            position,
+            delta: ScrollDelta::Pixels(delta),
             modifiers: Modifiers::default(),
-            click_count: 1,
+            touch_phase: TouchPhase::Moved,
         }));
     }
 

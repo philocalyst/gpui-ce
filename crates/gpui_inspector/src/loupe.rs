@@ -88,6 +88,8 @@ pub struct Loupe {
     pulse_hover: Option<u64>,
     right_width: Pixels,
     bottom_height: Pixels,
+    /// Counts down to holding the app ("Hold the app in 3 seconds").
+    hold_timer: Option<Task<()>>,
     #[cfg(any(test, feature = "test-support"))]
     renders: usize,
     _refresh: Task<()>,
@@ -111,7 +113,7 @@ impl Loupe {
         let (right_width, bottom_height) = match window.inspector_capture().map(|c| c.dock()) {
             Some(InspectorDock::Bottom { height }) => (px(560.), height),
             Some(InspectorDock::Right { width }) => (width, px(320.)),
-            None => (px(560.), px(320.)),
+            Some(InspectorDock::Hidden) | None => (px(560.), px(320.)),
         };
         let subscriptions = vec![
             cx.subscribe_in(&inspector, window, Self::on_inspector_event),
@@ -131,6 +133,7 @@ impl Loupe {
             pulse_hover: None,
             right_width,
             bottom_height,
+            hold_timer: None,
             #[cfg(any(test, feature = "test-support"))]
             renders: 0,
             _refresh: Self::spawn_refresh(window, cx),
@@ -215,7 +218,9 @@ impl Loupe {
                 state.select_element(Some(*key), cx);
                 state.set_lens(Lens::Elements, cx);
             }),
-            InspectorEvent::PickHovered(_) | InspectorEvent::PickCancelled => cx.notify(),
+            InspectorEvent::PickHovered(_)
+            | InspectorEvent::PickCancelled
+            | InspectorEvent::HoldChanged(_) => cx.notify(),
         }
     }
 
@@ -248,6 +253,20 @@ impl Loupe {
                     let frozen = capture.is_frozen();
                     capture.set_frozen(!frozen);
                 }
+            }
+            Command::ToggleHold => {
+                self.hold_timer = None;
+                toggle_hold(window, cx);
+            }
+            Command::HoldSoon => {
+                self.hold_timer = Some(cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(HOLD_DELAY).await;
+                    this.update_in(cx, |this, window, cx| {
+                        this.hold_timer = None;
+                        window.set_inspector_holding(true, cx);
+                    })
+                    .ok();
+                }));
             }
             Command::Dock(side) => self.set_dock(side, window),
             Command::ToggleDock => {
@@ -331,6 +350,7 @@ impl Loupe {
                 self.bottom_height = height;
                 InspectorDock::Bottom { height }
             }
+            InspectorDock::Hidden => return,
         };
         if capture.dock() != dock {
             capture.set_dock(dock);
@@ -656,6 +676,8 @@ impl Loupe {
             loupe_time,
             retained: capture.map_or(0, |capture| capture.retained_bytes()),
             frozen: capture.is_some_and(|capture| capture.is_frozen()),
+            held: capture.is_some_and(|capture| capture.is_holding()),
+            holding_soon: self.hold_timer.is_some(),
             on_crumb,
         }
     }
@@ -695,6 +717,7 @@ impl Render for Loupe {
             picking: capture.pick().active,
             overlays: capture.overlay().modes,
             frozen: capture.is_frozen(),
+            holding: capture.is_holding(),
             dock: DockSide::of(dock),
             width: window
                 .inspector_bounds()
@@ -703,7 +726,7 @@ impl Render for Loupe {
         };
         let lens = self.state.read(cx).lens();
         let edge_axis = match dock {
-            InspectorDock::Right { .. } => Axis::Horizontal,
+            InspectorDock::Right { .. } | InspectorDock::Hidden => Axis::Horizontal,
             InspectorDock::Bottom { .. } => Axis::Vertical,
         };
         let edge = match edge_axis {
@@ -802,6 +825,18 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new(keys::FREEZE, ToggleFreeze, Some("Loupe && !EditableText")),
     ]);
     widgets::bind_keys(LOUPE_CONTEXT, cx);
+    crate::lenses::bind_keys(cx);
+}
+
+/// How long "Hold the app in 3 seconds" waits: enough to open a hover menu.
+const HOLD_DELAY: Duration = Duration::from_secs(3);
+
+/// Holds the app, or releases it.
+pub(crate) fn toggle_hold(window: &mut Window, cx: &mut App) {
+    let holding = window
+        .inspector_capture()
+        .is_some_and(|capture| capture.is_holding());
+    window.set_inspector_holding(!holding, cx);
 }
 
 pub(crate) fn toggle_pick(window: &mut Window) {

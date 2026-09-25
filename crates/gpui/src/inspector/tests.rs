@@ -1520,6 +1520,19 @@ fn dock_extents_are_clamped() {
     assert_eq!(dock.origin.y, px(360.));
 }
 
+#[gpui::test]
+fn a_hidden_dock_records_with_the_app_in_the_whole_window(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    write(cx, |capture| capture.set_dock(InspectorDock::Hidden));
+    redraw(cx);
+    let viewport = cx.update(|window, _| window.viewport_size());
+    assert_eq!(app_bounds(cx), Bounds::new(Point::default(), viewport));
+    assert_eq!(cx.update(|window, _| window.inspector_bounds()), None);
+    let tree = latest_tree(cx);
+    assert_eq!(record(&tree, "root").bounds.size, viewport);
+}
+
 // Overhead.
 
 /// Median `Window::draw` time of a ~2,000 element scene with the inspector

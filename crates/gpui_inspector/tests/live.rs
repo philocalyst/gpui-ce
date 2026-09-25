@@ -144,3 +144,41 @@ fn loupe_reports_real_frames_and_never_keeps_the_window_busy() {
     assert_eq!(app_renders.get(), app_renders_after_click);
     harness.screenshot("live-counter");
 }
+
+#[test]
+fn holding_keeps_the_app_on_screen_until_release() {
+    let app_renders = Rc::new(Cell::new(0));
+    let mut harness = LoupeHarness::new(size(px(1100.), px(700.)), {
+        let renders = app_renders.clone();
+        |_, cx| cx.new(|_| Counter { count: 0, renders })
+    });
+    harness.open_loupe();
+    harness.advance(Duration::from_secs(1));
+
+    // Hold from the toolbar: the app still handles the click, but what is on
+    // screen stays exactly as it was.
+    harness.click_selector("loupe-hold");
+    assert!(harness.capture(|capture| capture.is_holding()));
+    harness.assert_text_visible("HELD");
+    let held_renders = app_renders.get();
+    harness.click_text("Count: 0");
+    harness.advance(Duration::from_millis(250));
+    harness.assert_text_visible("Count: 0");
+    assert_eq!(app_renders.get(), held_renders, "a held app never renders");
+    harness.screenshot("live-held");
+
+    // Releasing draws the deferred change at once.
+    harness.click_selector("loupe-hold");
+    harness.draw();
+    assert!(!harness.capture(|capture| capture.is_holding()));
+    harness.assert_text_visible("Count: 1");
+    assert!(app_renders.get() > held_renders);
+
+    // The global shortcut holds too, even with the pointer over the app.
+    harness.type_keys(if cfg!(target_os = "macos") {
+        "cmd-shift-h"
+    } else {
+        "ctrl-shift-h"
+    });
+    assert!(harness.capture(|capture| capture.is_holding()));
+}

@@ -75,6 +75,16 @@ pub struct Finding {
     pub site: Option<&'static Location<'static>>,
     /// How many elements built at the same site have the same problem.
     pub instances: u32,
+    /// The other elements built at the same site with the same problem, in
+    /// tree order (every instance after the first).
+    pub others: Vec<ElementKey>,
+}
+
+impl Finding {
+    /// Every element concerned: the first, then the others.
+    pub fn elements(&self) -> impl Iterator<Item = ElementKey> + '_ {
+        self.element.into_iter().chain(self.others.iter().copied())
+    }
 }
 
 /// One audit check.
@@ -109,13 +119,21 @@ pub fn audit(cx: &AuditInput, rules: &[Box<dyn Rule>]) -> Vec<Finding> {
     findings
 }
 
+/// What per-element findings fold on: the construction site when known (a
+/// list's rows share it, whatever their ids), else the interned path.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Fold {
+    Site(&'static Location<'static>),
+    Path(PathKey),
+}
+
 /// Collects one rule's per-element findings, folding elements built at the
 /// same site into a single finding.
 struct PerSite<'a, 'b> {
     cx: &'a AuditInput<'b>,
     rule: &'static str,
     findings: &'a mut Vec<Finding>,
-    by_path: HashMap<PathKey, usize>,
+    by_site: HashMap<Fold, usize>,
 }
 
 impl<'a, 'b> PerSite<'a, 'b> {
@@ -124,7 +142,7 @@ impl<'a, 'b> PerSite<'a, 'b> {
             cx,
             rule,
             findings,
-            by_path: HashMap::new(),
+            by_site: HashMap::new(),
         }
     }
 
@@ -136,14 +154,23 @@ impl<'a, 'b> PerSite<'a, 'b> {
         severity: Severity,
         describe: impl FnOnce() -> (String, String),
     ) {
-        let path = record.key.map(|key| key.path);
-        if let Some(&existing) = path.and_then(|path| self.by_path.get(&path)) {
-            self.findings[existing].instances += 1;
+        let fold = match self.cx.site(record.key) {
+            Some(site) => Some(Fold::Site(site)),
+            None => record.key.map(|key| Fold::Path(key.path)),
+        };
+        if let Some(&existing) = fold.and_then(|fold| self.by_site.get(&fold)) {
+            let finding = &mut self.findings[existing];
+            finding.instances += 1;
+            if let Some(key) = record.key
+                && finding.elements().all(|known| known != key)
+            {
+                finding.others.push(key);
+            }
             return;
         }
         let (title, detail) = describe();
-        if let Some(path) = path {
-            self.by_path.insert(path, self.findings.len());
+        if let Some(fold) = fold {
+            self.by_site.insert(fold, self.findings.len());
         }
         self.findings.push(Finding {
             severity,
@@ -152,8 +179,12 @@ impl<'a, 'b> PerSite<'a, 'b> {
             detail,
             element: record.key,
             entity: None,
-            site: self.cx.site(record.key),
+            site: match fold {
+                Some(Fold::Site(site)) => Some(site),
+                _ => None,
+            },
             instances: 1,
+            others: Vec::new(),
         });
     }
 }
@@ -223,7 +254,15 @@ impl Rule for TextContrast {
             if ratio >= required {
                 continue;
             }
-            report.report(record, Severity::Warning, || {
+            // Text runs carry no source location: blame the nearest element
+            // that has one (usually the one setting the color), so the
+            // finding can be shown in the app and fixed at its site.
+            let owner = std::iter::once(ix as ElementIndex)
+                .chain(tree.ancestors(ix as ElementIndex))
+                .filter_map(|ix| tree.get(ix))
+                .find(|record| record.key.is_some())
+                .unwrap_or(record);
+            report.report(owner, Severity::Warning, || {
                 (
                     format!("Low text contrast: {ratio:.1}:1"),
                     format!(
@@ -432,12 +471,14 @@ impl Rule for RenderHotSpot {
                 entity: Some(view.entity),
                 site: cx.site(view.element),
                 instances: 1,
+                others: Vec::new(),
             });
         }
     }
 }
 
-/// Views whose render took more than half the frame budget.
+/// Views whose own render (without the views nested in them) took more than
+/// half the frame budget, so a parent is not blamed for its slow child.
 pub struct ExpensiveRender;
 
 impl Rule for ExpensiveRender {
@@ -449,12 +490,12 @@ impl Rule for ExpensiveRender {
         let threshold = cx.budget.mul_f64(EXPENSIVE_RENDER_BUDGET_SHARE);
         let mut expensive: Vec<insights::ViewActivity> = insights::view_activity(cx.frames)
             .into_iter()
-            .filter(|view| view.slowest > threshold)
+            .filter(|view| view.heaviest_self > threshold)
             .collect();
-        expensive.sort_by_key(|view| Reverse(view.slowest));
+        expensive.sort_by_key(|view| Reverse(view.heaviest_self));
         for view in expensive {
             findings.push(Finding {
-                severity: if view.slowest > cx.budget {
+                severity: if view.heaviest_self > cx.budget {
                     Severity::Critical
                 } else {
                     Severity::Warning
@@ -463,20 +504,21 @@ impl Rule for ExpensiveRender {
                 title: format!(
                     "Expensive render: {} took {}",
                     format::type_name(view.type_name),
-                    format::duration(view.slowest)
+                    format::duration(view.heaviest_self)
                 ),
                 detail: format!(
-                    "Its render (with its subtree's layout requests) took {} in frame #{}, \
-                     more than half the {} budget. Cache it, split it, or virtualize long \
-                     content.",
-                    format::duration(view.slowest),
-                    view.slowest_frame,
+                    "Its own render (with its subtree's layout requests, without the views \
+                     nested in it) took {} in frame #{}, more than half the {} budget. Cache \
+                     it, split it, or virtualize long content.",
+                    format::duration(view.heaviest_self),
+                    view.heaviest_self_frame,
                     format::duration(cx.budget)
                 ),
                 element: view.element,
                 entity: Some(view.entity),
                 site: cx.site(view.element),
                 instances: 1,
+                others: Vec::new(),
             });
         }
     }
@@ -558,7 +600,7 @@ mod tests {
         tree: Option<&ElementTree>,
         frames: &VecDeque<FrameRecord>,
     ) -> Vec<Finding> {
-        let source = |_: PathKey| Some(Location::caller());
+        let source = |path: PathKey| Some(site_of(path));
         let cx = AuditInput {
             tree,
             frames,
@@ -568,6 +610,31 @@ mod tests {
         let mut findings = Vec::new();
         rule.check(&cx, &mut findings);
         findings
+    }
+
+    /// A construction site per fabricated path (paths share one when they
+    /// are equal modulo 16), so findings fold only where a test makes
+    /// elements share a path.
+    fn site_of(path: PathKey) -> &'static Location<'static> {
+        let sites: [&'static Location<'static>; 16] = [
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+            Location::caller(),
+        ];
+        sites[path.0 as usize % sites.len()]
     }
 
     fn check_tree(rule: &dyn Rule, tree: &ElementTree) -> Vec<Finding> {
@@ -641,6 +708,12 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].instances, 3);
         assert_eq!(findings[0].element.map(|key| key.instance), Some(0));
+        let instances: Vec<u32> = findings[0].elements().map(|key| key.instance).collect();
+        assert_eq!(
+            instances,
+            [0, 1, 2],
+            "every instance is listed, in tree order"
+        );
     }
 
     fn text_on(builder: &mut TreeBuilder, ix: ElementIndex, text: &str, fg: Hsla) {
@@ -677,6 +750,22 @@ mod tests {
              WCAG AA minimum of 4.5:1 for text this size. Darken the text or lighten the \
              background (or the reverse)."
         );
+    }
+
+    #[test]
+    fn text_contrast_blames_the_nearest_element_with_a_site() {
+        let mut builder = TreeBuilder::new();
+        let root = builder.root(bounds(0., 0., 800., 600.));
+        builder.details(root).background = Some(color(0xffffff));
+        let label = builder.child(root, bounds(0., 0., 100., 20.));
+        let text = builder.child(label, bounds(0., 0., 100., 20.));
+        text_on(&mut builder, text, "faint", color(0xdddddd));
+        builder.record(text).key = None;
+        let tree = builder.build();
+        let findings = check_tree(&TextContrast, &tree);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].element, tree.elements[label as usize].key);
+        assert!(findings[0].detail.starts_with("“faint”"));
     }
 
     #[test]
@@ -838,6 +927,16 @@ mod tests {
 
         let cheap = vec![frame(0, ms(0.0), ms(10.0))];
         assert!(check_frames(&ExpensiveRender, cheap).is_empty());
+
+        // A parent is not blamed for the slow view nested in it.
+        let mut nested = frame(0, ms(0.0), ms(30.0));
+        nested.views = vec![
+            view(1, "app::Page", 0, ms(0.0), ms(26.0)),
+            view(2, "app::Chart", 1, ms(1.0), ms(24.0)),
+        ];
+        let findings = check_frames(&ExpensiveRender, vec![nested]);
+        let titles: Vec<&str> = findings.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(titles, ["Expensive render: Chart took 24.0 ms"]);
     }
 
     #[test]
