@@ -791,6 +791,37 @@ fn causes_explain_each_frame(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn animation_frames_are_a_cause(cx: &mut TestAppContext) {
+    struct Animated {
+        site: Option<&'static Location<'static>>,
+    }
+    impl Render for Animated {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            if self.site.is_none() {
+                self.site = Some(request_animation_frame_here(window));
+            }
+            div().w(px(10.)).h(px(10.))
+        }
+    }
+    #[track_caller]
+    fn request_animation_frame_here(window: &mut Window) -> &'static Location<'static> {
+        window.request_animation_frame();
+        Location::caller()
+    }
+
+    let (view, cx) = cx.add_window_view(|_, _| Animated { site: None });
+    open(cx);
+    let site = view.read_with(cx, |view, _| view.site).expect("rendered");
+    // Tests deliver next-frame callbacks by hand.
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    let frame = latest_frame(cx);
+    assert_eq!(frame.causes.len(), 1, "{:?}", frame.causes);
+    assert_eq!(frame.causes[0].kind, CauseKind::Animation);
+    assert_eq!(frame.causes[0].site, Some(site));
+    assert!(!frame.inspector_only);
+}
+
+#[gpui::test]
 fn input_that_invalidates_is_a_cause(cx: &mut TestAppContext) {
     struct Hover;
     impl Render for Hover {
@@ -1038,6 +1069,8 @@ fn elements_report_details(cx: &mut TestAppContext) {
                 })
                 .h(px(50.)),
             )
+            .child(crate::svg().path("icons/close.svg").id("icon").size_4())
+            .child(crate::img("images/logo.png").id("logo").size_4())
     });
     open(cx);
     let tree = latest_tree(cx);
@@ -1075,6 +1108,15 @@ fn elements_report_details(cx: &mut TestAppContext) {
 
     let list = record(&tree, "list").details.clone().expect("list details");
     assert_eq!(list.list, Some((100, 0..5)));
+
+    let source = |id| {
+        record(&tree, id)
+            .details
+            .clone()
+            .and_then(|details| details.source)
+    };
+    assert_eq!(source("icon").as_deref(), Some("icons/close.svg"));
+    assert_eq!(source("logo").as_deref(), Some("images/logo.png"));
 }
 
 // Style overrides.

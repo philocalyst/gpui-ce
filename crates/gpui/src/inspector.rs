@@ -28,9 +28,9 @@ pub(crate) mod describe;
 mod model;
 #[cfg(any(feature = "inspector", debug_assertions))]
 pub(crate) mod recorder;
-pub(crate) mod user_span;
 #[cfg(all(test, any(feature = "inspector", debug_assertions)))]
 mod tests;
+pub(crate) mod user_span;
 #[cfg(any(feature = "inspector", debug_assertions))]
 pub use capture::*;
 #[cfg(any(feature = "inspector", debug_assertions))]
