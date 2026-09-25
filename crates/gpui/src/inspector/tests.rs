@@ -538,7 +538,6 @@ fn clipped_and_scrolled_content(cx: &mut TestAppContext) {
     let scroll = ScrollHandle::new();
     scroll.set_offset(point(px(0.), px(-30.)));
     let (_, cx) = scene(cx, {
-        let scroll = scroll.clone();
         move || {
             div()
                 .flex()
