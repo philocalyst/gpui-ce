@@ -11,7 +11,7 @@ use crate::{
     },
     commands::keys,
     state::Lens,
-    theme::{MONO_FONT, Theme},
+    theme::{LoupeSettings, MONO_FONT, Theme},
     widgets::{
         Button, ButtonSize, ButtonStyle, EmptyState, Icon, IconName, Kbd, Pill, SectionHeader,
         Tone, Tooltip,
@@ -212,18 +212,21 @@ fn detail_facts(details: &ElementDetails, bounds_text: String) -> Vec<(&'static 
 
 impl ElementsLens {
     /// The detail pane.
+    /// The detail pane; `wide` lays the sections out in two columns.
     pub(super) fn render_detail_pane(
         &self,
+        holding: bool,
+        wide: bool,
         theme: &'static Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = &theme.colors;
         let Some(selection) = self.selection.clone() else {
-            return self.render_nothing_selected(theme);
+            return self.render_empty_detail(holding, theme, cx);
         };
         let tree = selection.index.tree.clone();
         let Some(record) = tree.get(selection.ix) else {
-            return self.render_nothing_selected(theme);
+            return self.render_empty_detail(holding, theme, cx);
         };
         let details = record.details.as_deref().cloned().unwrap_or_default();
 
@@ -239,8 +242,9 @@ impl ElementsLens {
             )
         });
         let style = selection.style.as_ref().map(|style| {
-            let overridden = style.rows.iter().filter(|row| row.overridden).count();
-            let detail = (overridden > 0).then(|| format!("{overridden} overridden"));
+            let detail = style
+                .has_overrides()
+                .then(|| format!("{} overridden", style.overridden));
             self.section(Section::Style, detail, theme, cx, |this, cx| {
                 this.render_style(style, selection.editable, theme, cx)
             })
@@ -260,6 +264,30 @@ impl ElementsLens {
             render_cost(&selection, theme)
         });
 
+        let column = || div().flex_1().min_w_0().flex().flex_col();
+        let sections = if wide {
+            // Geometry on the left, code and facts on the right.
+            div()
+                .flex()
+                .items_start()
+                .child(column().child(why).child(box_model).child(interactivity))
+                .child(
+                    column()
+                        .border_l_1()
+                        .border_color(colors.line)
+                        .children(style)
+                        .child(facts)
+                        .child(cost),
+                )
+        } else {
+            column()
+                .child(why)
+                .child(box_model)
+                .children(style)
+                .child(interactivity)
+                .child(facts)
+                .child(cost)
+        };
         div()
             .id("elements-detail")
             .size_full()
@@ -272,12 +300,7 @@ impl ElementsLens {
             .when(selection.missing, |this| {
                 this.child(render_missing(&selection, self.shown_frame(), theme))
             })
-            .child(why)
-            .child(box_model)
-            .children(style)
-            .child(interactivity)
-            .child(facts)
-            .child(cost)
+            .child(sections)
             .into_any_element()
     }
 
@@ -286,7 +309,13 @@ impl ElementsLens {
         self.shown.as_ref().map(|shown| shown.frame)
     }
 
-    fn render_nothing_selected(&self, theme: &'static Theme) -> AnyElement {
+    /// Nothing selected, or the selection is not in the shown tree.
+    fn render_empty_detail(
+        &self,
+        holding: bool,
+        theme: &'static Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let colors = &theme.colors;
         let missing = self.selected.filter(|_| self.shown.is_some());
         if missing.is_some() {
@@ -298,6 +327,24 @@ impl ElementsLens {
                 ))
                 .into_any_element();
         }
+        div()
+            .size_full()
+            .bg(colors.bg)
+            .child(
+                EmptyState::new("Nothing selected")
+                    .icon(IconName::Pick)
+                    .description(Lens::Elements.question())
+                    .action(self.render_pick_actions(holding, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// Start picking (with its key) and hold the app, for empty states.
+    pub(super) fn render_pick_actions(
+        &self,
+        holding: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let pick = div()
             .flex()
             .items_center()
@@ -310,16 +357,29 @@ impl ElementsLens {
                     .on_click(|_, window, _| window.start_inspector_pick()),
             )
             .child(Kbd::new(keys::PICK));
+        let hold = Button::new("elements-hold-app")
+            .icon(if holding {
+                IconName::Play
+            } else {
+                IconName::Pause
+            })
+            .label(if holding { "Release app" } else { "Hold app" })
+            .size(ButtonSize::Small)
+            .toggle_state(holding)
+            .tooltip("Keep the app still (a hover menu stays open) while you pick")
+            .on_click(cx.listener(move |_, _, window, cx| {
+                if let Some(capture) = window.inspector_capture_mut() {
+                    capture.set_holding(!holding);
+                }
+                cx.notify();
+            }));
         div()
-            .size_full()
-            .bg(colors.bg)
-            .child(
-                EmptyState::new("Nothing selected")
-                    .icon(IconName::Pick)
-                    .description(Lens::Elements.question())
-                    .action(pick),
-            )
-            .into_any_element()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .child(pick)
+            .child(hold)
     }
 
     /// A collapsible section: its header, and its body when expanded.
@@ -391,7 +451,7 @@ impl ElementsLens {
                     .min_w_0()
                     .flex_shrink_1()
                     .truncate()
-                    .text_size(px(13.))
+                    .text_size(theme.metrics.text)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors.text)
                     .child(name.clone())
@@ -417,9 +477,9 @@ impl ElementsLens {
                     .child(format::size(record.bounds.size)),
             );
 
-        let source = match selection.source.zip(self.source_path()) {
-            Some((location, (path, _))) => {
-                let editor = crate::theme::LoupeSettings::get(cx).editor;
+        let source = match selection.source.clone() {
+            Some((location, path)) => {
+                let editor = LoupeSettings::get(cx).editor;
                 let full_path = format!("{path}:{}:{}", location.line(), location.column());
                 div()
                     .flex_none()
@@ -474,14 +534,28 @@ impl ElementsLens {
                 .into_any_element(),
         };
         let owner =
-            selection.owner.clone().map(|(key, label)| {
+            selection.owner.clone().map(|owner| {
+                let (glyph, glyph_color, tooltip) = if owner.view {
+                    (
+                        IconName::View,
+                        colors.view,
+                        "Select the view that renders it",
+                    )
+                } else {
+                    (
+                        IconName::ElementDot,
+                        colors.text_faint,
+                        "Select the element it is part of",
+                    )
+                };
+                let key = owner.key;
                 div()
                     .min_w_0()
                     .flex()
                     .items_center()
                     .gap(px(4.))
                     .child(div().flex_none().text_color(colors.text_faint).child("in"))
-                    .child(Icon::new(IconName::View).size(px(10.)).color(colors.view))
+                    .child(Icon::new(glyph).size(px(10.)).color(glyph_color))
                     .child(
                         div()
                             .id("elements-owner")
@@ -490,8 +564,8 @@ impl ElementsLens {
                             .cursor_pointer()
                             .text_color(colors.text_muted)
                             .hover(|style| style.text_color(colors.accent))
-                            .child(label)
-                            .tooltip(Tooltip::text("Select the view that renders it"))
+                            .child(owner.label)
+                            .tooltip(Tooltip::text(tooltip))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.select_key(key, window, cx)
                             })),
@@ -544,22 +618,12 @@ impl ElementsLens {
                     .into_iter()
                     .map(|(label, tone)| Pill::new(label).tone(tone)),
             );
-        let forced = div()
-            .min_h(theme.metrics.property_row)
-            .px(theme.metrics.gutter)
-            .py(px(2.))
+        let toggles = div()
+            .flex_1()
+            .min_w_0()
             .flex()
             .flex_wrap()
-            .items_center()
             .gap_1()
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(44.))
-                    .text_size(theme.metrics.text_small)
-                    .text_color(colors.text_muted)
-                    .child("Force"),
-            )
             .children(FORCED.into_iter().map(|(state, label)| {
                 Button::new(SharedString::from(format!(
                     "elements-force-{}",
@@ -575,6 +639,24 @@ impl ElementsLens {
                     cx.listener(move |this, _, window, cx| this.toggle_forced(state, window, cx)),
                 )
             }));
+        let forced = div()
+            .px(theme.metrics.gutter)
+            .py(px(2.))
+            .flex()
+            .items_start()
+            .gap_1()
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(44.))
+                    .h(theme.metrics.control_small)
+                    .flex()
+                    .items_center()
+                    .text_size(theme.metrics.text_small)
+                    .text_color(colors.text_muted)
+                    .child("Force"),
+            )
+            .child(toggles);
         div()
             .flex()
             .flex_col()
@@ -743,10 +825,10 @@ fn render_cost(selection: &Selection, theme: &Theme) -> AnyElement {
     let cost = &selection.cost;
     let line = |label: &'static str, value: String| {
         div()
-            .min_h(theme.metrics.property_row)
             .px(theme.metrics.gutter)
+            .py(px(4.))
             .flex()
-            .items_center()
+            .items_start()
             .gap_2()
             .child(
                 div()

@@ -97,7 +97,7 @@ pub(crate) struct RowInfo {
     pub library: bool,
     /// Lowercased [`Self::label`], [`Self::text`], [`Self::file`] and
     /// [`Self::type_name`], in [`MatchField`] order, for filtering.
-    search: [Option<Box<str>>; 4],
+    search: [Option<SharedString>; 4],
 }
 
 /// Which searchable field of a row a filter matched.
@@ -150,6 +150,7 @@ impl TreeIndex {
         // Records list parents before their children, so a parent's key and
         // classification are known when its children are reached.
         let mut ordinals: Vec<u32> = vec![0; tree.elements.len()];
+        let mut labels = Labels::default();
         for (ix, record) in tree.elements.iter().enumerate() {
             let parent = record.parent.map(|parent| parent as usize);
             let key = match record.key {
@@ -169,12 +170,20 @@ impl TreeIndex {
                 ordinals[parent] += 1;
             }
             let source = record.key.and_then(|key| source_file(key.path));
-            let library = source::is_library_element(&record.kind, source).unwrap_or_else(|| {
+            let library = labels.is_library(&record.kind, source).unwrap_or_else(|| {
                 parent
                     .and_then(|parent| infos.get(parent))
                     .is_some_and(|parent| parent.library)
             });
-            let info = row_info(&tree, ix as ElementIndex, record, key, source, library);
+            let info = row_info(
+                &tree,
+                ix as ElementIndex,
+                record,
+                key,
+                source,
+                library,
+                &mut labels,
+            );
             by_key.insert(key, ix as ElementIndex);
             infos.push(info);
         }
@@ -215,6 +224,76 @@ fn anonymous_key(parent: Option<&RowInfo>, ordinal: u32) -> NodeKey {
     NodeKey::Anonymous { anchor, path }
 }
 
+/// Strings shared by many elements of a tree (names of the same type,
+/// files, sizes), built once per tree instead of once per element.
+#[derive(Default)]
+struct Labels {
+    /// Label without `#id` and its lowercase, by element type.
+    names: HashMap<&'static str, (SharedString, SharedString)>,
+    /// Lowercased short type names.
+    types: HashMap<&'static str, SharedString>,
+    /// File name and its lowercase, by source path.
+    files: HashMap<&'static str, (SharedString, SharedString)>,
+    /// `620×64`, by width and height bits.
+    sizes: HashMap<(u32, u32), SharedString>,
+    /// Whether a source path is library code.
+    library_paths: HashMap<&'static str, bool>,
+}
+
+impl Labels {
+    fn is_library(&mut self, kind: &ElementKind, source: Option<&'static str>) -> Option<bool> {
+        match (kind, source) {
+            (ElementKind::Element { .. }, Some(path)) => Some(
+                *self
+                    .library_paths
+                    .entry(path)
+                    .or_insert_with(|| source::is_library_path(path)),
+            ),
+            _ => source::is_library_element(kind, source),
+        }
+    }
+
+    fn name(&mut self, record: &ElementRecord) -> (SharedString, SharedString) {
+        self.names
+            .entry(record.kind.type_name())
+            .or_insert_with(|| {
+                let label = format::element_label(record);
+                let id_len = record.id.as_ref().map_or(0, |id| id.len() + 1);
+                let name = label[..label.len() - id_len].to_string();
+                (name.to_lowercase().into(), name.into())
+            })
+            .clone()
+    }
+
+    fn type_lower(&mut self, type_name: &'static str) -> SharedString {
+        self.types
+            .entry(type_name)
+            .or_insert_with(|| type_name.to_lowercase().into())
+            .clone()
+    }
+
+    fn file(&mut self, path: &'static str) -> (SharedString, SharedString) {
+        self.files
+            .entry(path)
+            .or_insert_with(|| {
+                let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+                (file.to_string().into(), file.to_lowercase().into())
+            })
+            .clone()
+    }
+
+    fn size(&mut self, size: gpui::Size<gpui::Pixels>) -> SharedString {
+        let bits = (
+            f32::from(size.width).to_bits(),
+            f32::from(size.height).to_bits(),
+        );
+        self.sizes
+            .entry(bits)
+            .or_insert_with(|| format::size(size).into())
+            .clone()
+    }
+}
+
 fn row_info(
     tree: &ElementTree,
     ix: ElementIndex,
@@ -222,6 +301,7 @@ fn row_info(
     key: NodeKey,
     source: Option<&'static str>,
     library: bool,
+    labels: &mut Labels,
 ) -> RowInfo {
     let text = record
         .details
@@ -236,34 +316,41 @@ fn row_info(
         ElementKind::Element { .. } if is_text => (RowKind::Text, None),
         ElementKind::Element { .. } => (RowKind::Element, None),
     };
-    let (label, id_start) = match (&text, kind) {
-        (Some(text), RowKind::Text) => (text_preview(text), None),
+    let (label, label_lower, id_start) = match (&text, kind) {
+        (Some(text), RowKind::Text) => {
+            let preview = text_preview(text);
+            let lower = preview.to_lowercase();
+            (preview.into(), lower.into(), None)
+        }
         _ => {
-            let label = format::element_label(record);
-            let id_start = record.id.as_ref().map(|id| label.len() - id.len() - 1);
-            (label, id_start)
+            let (name_lower, name) = labels.name(record);
+            match &record.id {
+                Some(id) => (
+                    SharedString::from(format!("{name}#{id}")),
+                    SharedString::from(format!("{name_lower}#{}", id.to_lowercase())),
+                    Some(name.len()),
+                ),
+                None => (name, name_lower, None),
+            }
         }
     };
-    let file = source.map(|path| {
-        SharedString::from(path.rsplit(['/', '\\']).next().unwrap_or(path).to_string())
-    });
+    let file = source.map(|path| labels.file(path));
     let type_name = record.kind.short_name();
     let search = [
-        Some(label.as_str()),
-        text.as_deref(),
-        file.as_deref(),
-        Some(type_name),
-    ]
-    .map(|field| field.map(|field| field.to_lowercase().into_boxed_str()));
+        Some(label_lower),
+        text.as_deref().map(|text| text.to_lowercase().into()),
+        file.as_ref().map(|(_, lower)| lower.clone()),
+        Some(labels.type_lower(type_name)),
+    ];
     RowInfo {
         key,
         kind,
-        label: label.into(),
+        label,
         id_start,
         text,
-        file,
+        file: file.map(|(file, _)| file),
         type_name,
-        size: format::size(record.bounds.size).into(),
+        size: labels.size(record.bounds.size),
         entity,
         library,
         search,
@@ -672,7 +759,7 @@ mod tests {
         // Unoptimized test builds are several times slower than release;
         // these bounds still leave room within a 16 ms frame there.
         eprintln!("5k elements: index {indexed:?}, rows {rows:?}, filter {filter:?}");
-        assert!(indexed.as_millis() < 60, "index took {indexed:?}");
+        assert!(indexed.as_millis() < 40, "index took {indexed:?}");
         assert!(rows.as_millis() < 16, "rows took {rows:?}");
         assert!(filter.as_millis() < 16, "filter took {filter:?}");
     }

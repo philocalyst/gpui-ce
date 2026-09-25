@@ -7,15 +7,15 @@ use super::{
 };
 use crate::{
     analysis::format,
-    theme::{MONO_FONT, Theme},
+    theme::{MONO_FONT, Theme, UI_FONT},
     widgets::{
-        Button, ButtonSize, EmptyState, Icon, IconName, TextField, Tooltip, Tree, TreeRow,
-        TreeState,
+        Button, ButtonSize, EmptyState, Icon, IconName, TextField, Tooltip, Tree, TreeModel,
+        TreeRow, TreeState,
     },
 };
 use gpui::{
     AnyElement, App, Context, Entity, EntityId, FontWeight, HighlightStyle, IntoElement,
-    StyledText, Window, div,
+    StyledText, WeakEntity, Window, div,
     inspector::{ElementFlags, ElementRecord},
     prelude::*,
     px,
@@ -38,20 +38,14 @@ impl ElementsLens {
         let index = self.memo.index.clone().filter(|_| self.shown.is_some());
         let state = self.active_tree().clone();
         let body = match (&index, &rows) {
-            (Some(index), Some(rows)) if !rows.nodes.is_empty() => {
-                let crumbs = self.render_sticky_crumbs(index, rows, &state, theme, cx);
-                div()
-                    .size_full()
-                    .relative()
-                    .child(render_rows(
-                        index.clone(),
-                        rows.clone(),
-                        self.stats(),
-                        &state,
-                    ))
-                    .children(crumbs)
-                    .into_any_element()
-            }
+            (Some(index), Some(rows)) if !rows.nodes.is_empty() => render_rows(
+                index.clone(),
+                rows.clone(),
+                self.stats(),
+                &state,
+                cx.entity().downgrade(),
+            )
+            .into_any_element(),
             (Some(_), Some(_)) => EmptyState::new("No elements match")
                 .icon(IconName::Filter)
                 .description(format!(
@@ -59,10 +53,8 @@ impl ElementsLens {
                     self.query.trim()
                 ))
                 .into_any_element(),
-            _ => EmptyState::new("No element tree yet")
-                .icon(IconName::Pick)
-                .description("Interact with the app… Loupe captures its tree with the next frame.")
-                .into_any_element(),
+            // Without a tree the whole lens shows one empty state instead.
+            _ => div().into_any_element(),
         };
         div()
             .size_full()
@@ -181,111 +173,113 @@ impl ElementsLens {
                     .on_click(cx.listener(|this, _, _, cx| this.back_to_live(cx))),
             )
     }
-
-    /// The ancestors of the first row under the top edge, pinned over the
-    /// list while it is scrolled.
-    fn render_sticky_crumbs(
-        &self,
-        index: &Rc<TreeIndex>,
-        rows: &Rc<RowSet>,
-        state: &Entity<TreeState<NodeKey>>,
-        theme: &'static Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let colors = &theme.colors;
-        let tree = state.read(cx);
-        let scroll_top = f32::from(tree.scroll_top());
-        if scroll_top <= 0. {
-            return None;
-        }
-        let model = tree.model();
-        // The first row fully below the pinned bar.
-        let row = (scroll_top / f32::from(theme.metrics.row)).ceil() as usize + 1;
-        let &node = model
-            .rows()
-            .get(row.min(model.rows().len().checked_sub(1)?))?;
-        let mut chain = Vec::new();
-        let mut parent = model.nodes().get(node)?.parent;
-        while let Some(ix) = parent {
-            chain.push(ix);
-            parent = model.nodes()[ix].parent;
-        }
-        // The nearest ancestor, then only landmarks (views and components)
-        // above it, like the status bar's breadcrumb.
-        let nearest = *chain.first()?;
-        let mut chain: Vec<usize> = chain
-            .into_iter()
-            .filter(|&node| {
-                node == nearest
-                    || matches!(
-                        index.infos[rows.rows[node].ix as usize].kind,
-                        RowKind::View | RowKind::Component
-                    )
-            })
-            .collect();
-        chain.reverse();
-        let elided = chain.len() > MAX_CRUMBS;
-        let chain = chain.split_off(chain.len().saturating_sub(MAX_CRUMBS));
-        let last = chain.len() - 1;
-        let crumbs = chain.into_iter().enumerate().flat_map(|(position, node)| {
-            let row = &rows.rows[node];
-            let label = index.infos[row.ix as usize].label.clone();
-            let key = model.nodes()[node].key;
-            let crumb = div()
-                .id(("elements-crumb", position))
-                .min_w_0()
-                .truncate()
-                .when(position == last, |this| this.flex_none().max_w(px(180.)))
-                .when(position < last, |this| this.flex_shrink_1())
-                .cursor_pointer()
-                .text_color(colors.text_muted)
-                .hover(|style| style.text_color(colors.accent))
-                .child(label)
-                .on_click(cx.listener(move |this, _, window, cx| this.select_node(key, window, cx)))
-                .into_any_element();
-            let separator = (position < last).then(|| {
-                div()
-                    .flex_none()
-                    .text_color(colors.text_faint)
-                    .child("›")
-                    .into_any_element()
-            });
-            std::iter::once(crumb).chain(separator)
-        });
-        Some(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .h(theme.metrics.row)
-                .px(theme.metrics.gutter)
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .overflow_hidden()
-                .bg(colors.surface)
-                .border_b_1()
-                .border_color(colors.line)
-                .text_size(theme.metrics.text_small)
-                .when(elided, |this| {
-                    this.child(div().flex_none().text_color(colors.text_faint).child("… ›"))
-                })
-                .children(crumbs)
-                .into_any_element(),
-        )
-    }
 }
 
-/// The virtual list of rows.
+/// The ancestors of the visible row `row` (the first one under the pinned
+/// bar): its parent, then the landmarks (views and components) above it,
+/// like the status bar's breadcrumb. Clicking one selects it.
+fn render_crumbs(
+    index: &TreeIndex,
+    rows: &RowSet,
+    model: &TreeModel<NodeKey>,
+    row: usize,
+    lens: &WeakEntity<ElementsLens>,
+    theme: &Theme,
+) -> Option<AnyElement> {
+    let colors = &theme.colors;
+    let &node = model.rows().get(row)?;
+    let mut chain = Vec::new();
+    let mut parent = model.nodes().get(node)?.parent;
+    while let Some(ix) = parent {
+        chain.push(ix);
+        parent = model.nodes()[ix].parent;
+    }
+    let nearest = *chain.first()?;
+    let mut chain: Vec<usize> = chain
+        .into_iter()
+        .filter(|&node| {
+            node == nearest
+                || rows.rows.get(node).is_some_and(|row| {
+                    matches!(
+                        index.infos[row.ix as usize].kind,
+                        RowKind::View | RowKind::Component
+                    )
+                })
+        })
+        .collect();
+    chain.reverse();
+    let elided = chain.len() > MAX_CRUMBS;
+    let chain = chain.split_off(chain.len().saturating_sub(MAX_CRUMBS));
+    let last = chain.len() - 1;
+    let crumbs = chain.into_iter().enumerate().flat_map(|(position, node)| {
+        let label = rows
+            .rows
+            .get(node)
+            .map(|row| index.infos[row.ix as usize].label.clone())
+            .unwrap_or_default();
+        let key = model.nodes()[node].key;
+        let lens = lens.clone();
+        let crumb = div()
+            .id(("elements-crumb", position))
+            .min_w_0()
+            .truncate()
+            .when(position == last, |this| this.flex_none().max_w(px(180.)))
+            .when(position < last, |this| this.flex_shrink_1())
+            .cursor_pointer()
+            .text_color(colors.text_muted)
+            .hover(|style| style.text_color(colors.accent))
+            .child(label)
+            .on_click(move |_, window, cx| {
+                lens.update(cx, |lens, cx| lens.select_node(key, window, cx))
+                    .ok();
+            })
+            .into_any_element();
+        let separator = (position < last).then(|| {
+            div()
+                .flex_none()
+                .text_color(colors.text_faint)
+                .child("›")
+                .into_any_element()
+        });
+        std::iter::once(crumb).chain(separator)
+    });
+    Some(
+        div()
+            .size_full()
+            .px(theme.metrics.gutter)
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .overflow_hidden()
+            .bg(colors.surface)
+            .border_b_1()
+            .border_color(colors.line)
+            .font_family(UI_FONT)
+            .text_size(theme.metrics.text_small)
+            .when(elided, |this| {
+                this.child(div().flex_none().text_color(colors.text_faint).child("… ›"))
+            })
+            .children(crumbs)
+            .into_any_element(),
+    )
+}
+
+/// The virtual list of rows, with the ancestors of the rows scrolled past
+/// pinned over its top.
 fn render_rows(
     index: Rc<TreeIndex>,
     rows: Rc<RowSet>,
     stats: Rc<HashMap<EntityId, ViewStats>>,
     state: &Entity<TreeState<NodeKey>>,
+    lens: WeakEntity<ElementsLens>,
 ) -> impl IntoElement {
+    let (crumb_index, crumb_rows) = (index.clone(), rows.clone());
     Tree::new("elements-tree", state, move |row, window, cx| {
         render_row(&index, &rows, &stats, row, window, cx)
+    })
+    .pinned_header(move |model, row, window, cx| {
+        let theme = Theme::of(window, cx);
+        render_crumbs(&crumb_index, &crumb_rows, model, row, &lens, theme)
     })
 }
 
@@ -386,9 +380,11 @@ fn render_row(
                 div()
                     .id(("overridden", row.node))
                     .flex_none()
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(colors.accent)
+                    .child(
+                        Icon::new(IconName::ElementDot)
+                            .size(px(12.))
+                            .color(colors.accent),
+                    )
                     .tooltip(Tooltip::text("Loupe overrides its style")),
             )
         })

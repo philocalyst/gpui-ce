@@ -255,6 +255,14 @@ fn empty_states_say_what_to_do() {
     harness.click_text("Start picking");
     assert!(harness.capture(|capture| capture.pick().active));
     harness.type_keys("escape");
+    assert!(!harness.capture(|capture| capture.pick().active));
+
+    // Holding keeps the app still while you pick (say, a hover menu).
+    harness.click_text("Hold app");
+    assert!(harness.capture(|capture| capture.is_holding()));
+    harness.assert_text_visible("Release app");
+    harness.click_text("Release app");
+    assert!(!harness.capture(|capture| capture.is_holding()));
 
     let mut empty = LoupeHarness::new(size(px(1280.), px(800.)), |_, cx| cx.new(|_| InboxApp));
     empty.open_loupe();
@@ -672,6 +680,72 @@ fn scrubbing_padding_relayouts_the_app_and_copy_rust_writes_the_patch() {
     let reverted = live_record(&mut harness, "card");
     assert_eq!(reverted.bounds, card.bounds);
     assert!(!reverted.flags.contains(ElementFlags::OVERRIDDEN));
+}
+
+#[test]
+fn adding_properties_and_typing_colors_restyle_the_app() {
+    let mut harness = live_harness();
+    let card = live_record(&mut harness, "card");
+    harness.click_text("div#card");
+    settle(&mut harness);
+
+    // Add a property by name: it starts at a sensible value, overridden.
+    harness.click_text("Add property");
+    harness.type_text("margin.top");
+    harness.screenshot("elements-live-add-property");
+    harness.type_keys("enter");
+    settle(&mut harness);
+    let moved = live_record(&mut harness, "card");
+    assert_eq!(
+        moved.bounds.origin.y,
+        card.bounds.origin.y + px(8.),
+        "margin.top 8 px pushed the card down"
+    );
+    harness.assert_text_visible("margin.top");
+
+    // Type a color: the app repaints with it as soon as the hex is valid.
+    let field = harness.find_text("#f6f8fa").expect("the background's hex");
+    harness.click(field.center());
+    harness.type_keys("secondary-a");
+    harness.type_text("#ffe0b2");
+    settle(&mut harness);
+    let painted = harness.update(|window, _| {
+        let app_right = f32::from(window.app_bounds().right()) * window.scale_factor();
+        window.painted_quads().iter().any(|quad| {
+            quad.bounds.origin.x.as_f32() < app_right
+                && quad.background.as_solid() == Some(rgb_to_hsla(rgb(0xffe0b2)))
+        })
+    });
+    assert!(painted, "the app paints the typed color");
+    harness.assert_text_visible("2 overridden");
+    harness.screenshot("elements-live-color");
+
+    // Reverting one property keeps the other.
+    harness.click_selector("revert/margin/top");
+    settle(&mut harness);
+    assert_eq!(
+        live_record(&mut harness, "card").bounds.origin,
+        card.bounds.origin
+    );
+    harness.assert_text_visible("1 overridden");
+}
+
+#[test]
+fn enums_cycle_through_their_options() {
+    let mut harness = live_harness();
+    let save = live_record(&mut harness, "save");
+    harness.click_text("div#app");
+    settle(&mut harness);
+    harness.assert_text_visible("flex_direction");
+    // Column → RowReverse: the card and the button now share a row.
+    harness.click_selector("enum/flex_direction");
+    settle(&mut harness);
+    let card = live_record(&mut harness, "card");
+    let moved = live_record(&mut harness, "save");
+    assert_eq!(moved.bounds.origin.y, card.bounds.origin.y);
+    assert_ne!(moved.bounds.origin, save.bounds.origin);
+    harness.assert_text_visible("RowReverse");
+    harness.screenshot("elements-live-enum");
 }
 
 #[test]

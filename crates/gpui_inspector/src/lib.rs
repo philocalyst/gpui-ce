@@ -26,6 +26,7 @@ use gpui::{
 };
 use std::borrow::Cow;
 
+pub use analysis::source::EditorUrl;
 pub use commands::{Command, DockSide};
 pub use loupe::{Loupe, REFRESH_INTERVAL};
 pub use palette::fuzzy;

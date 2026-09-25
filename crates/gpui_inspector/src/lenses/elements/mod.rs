@@ -33,7 +33,7 @@ use crate::{
     shell::pulse::cause_summary,
     state::{LensLayout, LoupeState},
     theme::{LoupeSettings, Theme},
-    widgets::{Split, TreeEvent, TreeState, text_field_state},
+    widgets::{EmptyState, IconName, Split, TreeEvent, TreeState, text_field_state},
 };
 use box_model::BoxFields;
 use detail::Section;
@@ -59,6 +59,8 @@ use style::{StyleEditors, StyleModel};
 
 /// Rows shallower than this start expanded the first time a tree shows.
 const INITIAL_DEPTH: u16 = 3;
+/// Detail panes at least this wide lay their sections out in two columns.
+const WIDE_DETAIL: Pixels = px(720.);
 /// Height of Loupe's chrome around a lens body: toolbar, pulse strip, rail
 /// and status bar at compact density (for the default split).
 const CHROME_HEIGHT: Pixels = px(122.);
@@ -161,10 +163,11 @@ struct Selection {
     pub seen_in: u64,
     /// Edits apply: a keyed element of the live tree.
     pub editable: bool,
-    /// Where it was constructed.
-    pub source: Option<&'static Location<'static>>,
-    /// Its nearest enclosing view (other than itself).
-    pub owner: Option<(ElementKey, SharedString)>,
+    /// Where it was constructed, and that file's absolute path.
+    pub source: Option<(&'static Location<'static>, SharedString)>,
+    /// What it belongs to: its nearest enclosing view, or for text without
+    /// a key the element standing for it.
+    pub owner: Option<Owner>,
     /// Why it has its size.
     pub why: Option<SizeExplanation>,
     /// Its style grid (keyed elements).
@@ -173,6 +176,29 @@ struct Selection {
     pub forced: ForcedStates,
     /// What drawing it costs.
     pub cost: Cost,
+}
+
+/// A record of the selected element, and where it was found.
+struct Found {
+    /// The tree it is in.
+    index: Rc<TreeIndex>,
+    /// Its record.
+    ix: ElementIndex,
+    /// The frame that tree was drawn in.
+    seen_in: u64,
+    /// Not in the shown tree: this is where it was last seen.
+    missing: bool,
+}
+
+/// The element a selection belongs to, linked from the detail header.
+#[derive(Clone, Debug, PartialEq)]
+struct Owner {
+    /// Selecting it.
+    pub key: ElementKey,
+    /// `IssueList`, `div#card`.
+    pub label: SharedString,
+    /// A view (rather than the keyed parent of an anonymous element).
+    pub view: bool,
 }
 
 /// What drawing an element costs.
@@ -201,7 +227,7 @@ struct ViewCost {
 /// The Elements lens.
 pub(crate) struct ElementsLens {
     state: Entity<LoupeState>,
-    /// The unfiltered tree (without gpui's elements in "your code" mode).
+    /// The unfiltered tree (without library elements in "your code" mode).
     tree: Entity<TreeState<NodeKey>>,
     /// The filter's results, fully expanded.
     filtered: Entity<TreeState<NodeKey>>,
@@ -457,17 +483,24 @@ impl ElementsLens {
             self.selection = None;
             return;
         };
-        let found = index.and_then(|index| Some((index.clone(), index.find(node)?)));
         let shown_frame = self.shown.as_ref().map_or(0, |shown| shown.frame);
-        let (index, ix, seen_in, missing) = match found {
+        let found = match index.and_then(|index| Some((index, index.find(node)?))) {
             Some((index, ix)) => {
                 self.last_seen = Some((node, index.clone(), ix, shown_frame));
-                (index, ix, shown_frame, false)
+                Found {
+                    index: index.clone(),
+                    ix,
+                    seen_in: shown_frame,
+                    missing: false,
+                }
             }
             None => match &self.last_seen {
-                Some((seen, index, ix, frame)) if *seen == node => {
-                    (index.clone(), *ix, *frame, true)
-                }
+                Some((seen, index, ix, frame)) if *seen == node => Found {
+                    index: index.clone(),
+                    ix: *ix,
+                    seen_in: *frame,
+                    missing: true,
+                },
                 _ => {
                     self.selection = None;
                     return;
@@ -481,8 +514,16 @@ impl ElementsLens {
             .shown
             .as_ref()
             .is_some_and(|shown| shown.past.is_none());
-        let mut selection = selection_model(capture, &self.stats(), node, index, ix, missing, live);
-        selection.seen_in = seen_in;
+        let previous = self.selection.take();
+        let mut selection = selection_model(capture, &self.stats(), node, found, live);
+        // Resolving a path touches the file system: once per location.
+        selection.source = match (selection.source.take(), previous.and_then(|p| p.source)) {
+            (Some((location, _)), Some((known, path))) if std::ptr::eq(location, known) => {
+                Some((location, path))
+            }
+            (Some((location, _)), _) => Some((location, resolve_source(location))),
+            (None, _) => None,
+        };
         self.selection = Some(selection);
     }
 
@@ -518,7 +559,7 @@ impl ElementsLens {
             }
             tree.model_mut().select(Some(node));
             cx.notify();
-        });
+        })
     }
 
     fn on_tree_event(
@@ -681,17 +722,14 @@ impl ElementsLens {
         self.sync(window, cx);
     }
 
-    /// The absolute path of the selection's source file.
-    fn source_path(&self) -> Option<(String, &'static Location<'static>)> {
-        let location = self.selection.as_ref()?.source?;
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let path = source::resolve_source_path(location.file(), &cwd, |path| path.exists());
-        Some((path.to_string_lossy().into_owned(), location))
+    /// Where the selection was constructed, and that file's absolute path.
+    fn source(&self) -> Option<(&'static Location<'static>, SharedString)> {
+        self.selection.as_ref()?.source.clone()
     }
 
     /// Opens the selection's construction site in the configured editor.
     fn open_source(&mut self, cx: &mut Context<Self>) {
-        let Some((path, location)) = self.source_path() else {
+        let Some((location, path)) = self.source() else {
             return;
         };
         let url = LoupeSettings::get(cx)
@@ -704,7 +742,7 @@ impl ElementsLens {
 
     /// Copies `path:line:column` of the selection's construction site.
     fn copy_source(&mut self, cx: &mut Context<Self>) {
-        if let Some((path, location)) = self.source_path() {
+        if let Some((location, path)) = self.source() {
             let text = format!("{path}:{}:{}", location.line(), location.column());
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
@@ -718,30 +756,54 @@ impl ElementsLens {
     }
 }
 
-/// Builds the detail model of element `ix` of `index`.
+/// The absolute path of a construction site's file.
+fn resolve_source(location: &Location<'_>) -> SharedString {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let path = source::resolve_source_path(location.file(), &cwd, |path| path.exists());
+    path.to_string_lossy().into_owned().into()
+}
+
+/// Builds the detail model of the `found` record of row `node`. Its source
+/// path is left unresolved (the file itself).
 fn selection_model(
     capture: &InspectorCapture,
     stats: &HashMap<EntityId, ViewStats>,
     node: NodeKey,
-    index: Rc<TreeIndex>,
-    ix: ElementIndex,
-    missing: bool,
+    found: Found,
     live: bool,
 ) -> Selection {
+    let Found {
+        index,
+        ix,
+        seen_in,
+        missing,
+    } = found;
     let tree = &index.tree;
     let record = &tree.elements[ix as usize];
     let key = node.element();
     let editable = live && !missing && key.is_some();
     let source = key
         .and_then(|key| capture.path_info(key.path))
-        .map(|info| info.source);
-    let owner: Option<(ElementKey, SharedString)> = tree
-        .owning_view(ix)
-        .filter(|&view| view != ix)
-        .and_then(|view| {
-            let record = tree.get(view)?;
-            Some((record.key?, format::element_label(record).into()))
-        });
+        .map(|info| (info.source, SharedString::new_static(info.source.file())));
+    let owning_view = tree.owning_view(ix).filter(|&view| view != ix);
+    let owner = match node {
+        // Text without a key belongs to the element that stands for it.
+        NodeKey::Anonymous {
+            anchor: Some(anchor),
+            ..
+        } => index
+            .find(NodeKey::Element(anchor))
+            .map(|anchor_ix| (anchor_ix, false)),
+        _ => owning_view.map(|view| (view, true)),
+    }
+    .and_then(|(owner, view)| {
+        let record = tree.get(owner)?;
+        Some(Owner {
+            key: record.key?,
+            label: format::element_label(record).into(),
+            view,
+        })
+    });
     let style = key.filter(|_| editable).map(|key| {
         let base = capture
             .selected_style()
@@ -773,13 +835,13 @@ fn selection_model(
         }),
         _ => None,
     };
-    let owner_cost = owner.as_ref().and_then(|(_, label)| {
-        let view = tree.owning_view(ix)?;
-        let ElementKind::View { entity, .. } = tree.get(view)?.kind else {
+    let owner_cost = owning_view.and_then(|view| {
+        let record = tree.get(view)?;
+        let ElementKind::View { entity, .. } = record.kind else {
             return None;
         };
         Some((
-            label.clone(),
+            SharedString::from(format::element_label(record)),
             stats.get(&entity).cloned().unwrap_or_default(),
         ))
     });
@@ -789,7 +851,7 @@ fn selection_model(
         index: index.clone(),
         ix,
         missing,
-        seen_in: tree.frame,
+        seen_in,
         editable,
         source,
         owner,
@@ -824,12 +886,29 @@ fn last_render(
 impl Render for ElementsLens {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(window, cx);
-        let tree = self.render_tree_pane(theme, cx);
-        let detail = self.render_detail_pane(theme, cx);
+        let holding = window
+            .inspector_capture()
+            .is_some_and(|capture| capture.is_holding());
+        if self.shown.is_none() {
+            return div()
+                .size_full()
+                .bg(theme.colors.bg)
+                .child(
+                    EmptyState::new("No element tree yet")
+                        .icon(IconName::Pick)
+                        .description(
+                            "Interact with the app… Loupe captures its tree with the next frame.",
+                        )
+                        .action(self.render_pick_actions(holding, cx)),
+                )
+                .into_any_element();
+        }
         let dock = window
             .inspector_bounds()
             .map_or(gpui::size(px(560.), px(700.)), |bounds| bounds.size);
-        let (axis, default, min_first, min_second) = match LensLayout::of(window) {
+        let layout = LensLayout::of(window);
+        let tree = self.render_tree_pane(theme, cx);
+        let (axis, default, min_first, min_second) = match layout {
             LensLayout::Stacked => (
                 Axis::Vertical,
                 ((dock.height - CHROME_HEIGHT) * 0.42).max(px(120.)),
@@ -843,6 +922,9 @@ impl Render for ElementsLens {
                 px(280.),
             ),
         };
+        let first = self.split.unwrap_or(default);
+        let wide = layout == LensLayout::SideBySide && dock.width - first >= WIDE_DETAIL;
+        let detail = self.render_detail_pane(holding, wide, theme, cx);
         div()
             .size_full()
             // Loupe's views are cached and app refreshes skip them, so a
@@ -858,7 +940,7 @@ impl Render for ElementsLens {
                 }
             }))
             .child(
-                Split::new("elements-split", axis, self.split.unwrap_or(default))
+                Split::new("elements-split", axis, first)
                     .min_sizes(min_first, min_second)
                     .first(tree)
                     .second(detail)
@@ -866,6 +948,7 @@ impl Render for ElementsLens {
                         cx.listener(|this, size: &Pixels, _, cx| this.resize_split(*size, cx)),
                     ),
             )
+            .into_any_element()
     }
 }
 
@@ -908,5 +991,173 @@ mod tests {
             fallback.past.is_none(),
             "frames without a tree show the latest"
         );
+    }
+
+    /// A blank app window with Loupe open over `capture`, and its Elements lens.
+    fn lens_harness(
+        capture: InspectorCapture,
+    ) -> (crate::harness::LoupeHarness, Entity<ElementsLens>) {
+        struct Blank;
+        impl Render for Blank {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full()
+            }
+        }
+        let lens = Rc::new(std::cell::RefCell::new(None));
+        let mut harness =
+            crate::harness::LoupeHarness::new(gpui::size(px(1280.), px(800.)), |_, cx| {
+                cx.new(|_| Blank)
+            });
+        let slot = lens.clone();
+        let _created = harness.app(|cx| {
+            cx.observe_new(move |_: &mut ElementsLens, _, cx| {
+                *slot.borrow_mut() = Some(cx.entity());
+            })
+        });
+        harness.open_loupe();
+        harness.install_capture(capture);
+        let lens = lens
+            .borrow_mut()
+            .take()
+            .expect("Loupe created its Elements lens");
+        (harness, lens)
+    }
+
+    #[test]
+    fn renders_and_selection_changes_reuse_the_memoized_rows() {
+        let (capture, elements) = fixtures::inbox();
+        let (mut harness, lens) = lens_harness(capture);
+        let builds = |harness: &mut crate::harness::LoupeHarness| {
+            harness.app(|cx| lens.read(cx).memo_builds())
+        };
+        let settled = builds(&mut harness);
+        assert_eq!((settled.index, settled.rows), (1, 1));
+
+        // Re-rendering, hovering and selecting reuse everything.
+        for key in [elements.row_3, elements.close, elements.issue_list] {
+            harness.update_state(|state, cx| state.select_element(Some(key), cx));
+        }
+        harness.redraw_all();
+        let row = harness.find_text("IssueList").unwrap();
+        harness.hover(row.center());
+        harness.redraw_all();
+        assert_eq!(builds(&mut harness), settled);
+
+        // Typing a filter builds rows once per distinct query; clearing it
+        // goes back to the memoized unfiltered rows.
+        harness.click_text("Filter elements");
+        harness.type_text("row");
+        assert_eq!(builds(&mut harness).rows, settled.rows + 3);
+        harness.type_keys("escape");
+        harness.redraw_all();
+        assert_eq!(builds(&mut harness).rows, settled.rows + 3);
+        assert_eq!(builds(&mut harness).index, settled.index);
+    }
+
+    #[test]
+    fn a_five_thousand_element_tree_syncs_within_a_frame() {
+        use crate::fixtures::{ElementSpec, FrameBuilder, TreeBuilder, ms};
+        use std::time::Instant;
+
+        let mut capture = InspectorCapture::new_for_test();
+        let mut builder = TreeBuilder::new(&mut capture);
+        builder.open(ElementSpec::view("app::Root", 1).bounds(0., 0., 800., 600.));
+        let mut row_3 = None;
+        for row in 0..1_250 {
+            let y = row as f32 * 24.;
+            let key = builder.open(
+                ElementSpec::div()
+                    .id(format!("row-{row}"))
+                    .bounds(0., y, 800., 24.),
+            );
+            row_3 = row_3.or((row == 3).then_some(key));
+            builder.leaf(ElementSpec::text(format!("Sender {row}")).bounds(4., y, 200., 16.));
+            builder.leaf(ElementSpec::text("Subject").bounds(240., y, 300., 16.));
+            builder.leaf(
+                ElementSpec::div()
+                    .id("star")
+                    .clickable()
+                    .bounds(780., y, 16., 16.),
+            );
+            builder.close();
+        }
+        builder.close();
+        let tree = builder.build(0);
+        assert!(tree.elements.len() > 5_000);
+        FrameBuilder::new()
+            .app_time(ms(5.), ms(0.3))
+            .tree(Arc::new(tree.clone()))
+            .push(&mut capture);
+        let (mut harness, lens) = lens_harness(capture);
+        harness.update_state(|state, cx| state.select_element(row_3, cx));
+
+        let sync = |harness: &mut crate::harness::LoupeHarness| {
+            harness.update(|window, cx| {
+                lens.update(cx, |lens, cx| {
+                    let start = Instant::now();
+                    lens.sync(window, cx);
+                    (start.elapsed(), lens.memo_builds())
+                })
+            })
+        };
+        let (_, settled) = sync(&mut harness);
+
+        // The app draws a new frame with a new (identical) tree: indexed and
+        // flattened once.
+        harness.update(|window, _| {
+            FrameBuilder::new()
+                .at(ms(16.))
+                .app_time(ms(5.), ms(0.3))
+                .tree(Arc::new(tree))
+                .push(window.inspector_capture_mut().unwrap());
+        });
+        let (new_tree, builds) = sync(&mut harness);
+        assert_eq!(builds.index, settled.index + 1);
+        assert_eq!(builds.rows, settled.rows + 1);
+
+        // Anything else (a selection, a notify) reuses it all.
+        let (steady, builds_after) = sync(&mut harness);
+        assert_eq!(builds_after.index, builds.index);
+        assert_eq!(builds_after.rows, builds.rows);
+        eprintln!("5k tree sync: new tree {new_tree:?}, steady {steady:?} (unoptimized build)");
+        assert!(steady.as_millis() < 16, "steady sync took {steady:?}");
+        assert!(
+            new_tree.as_millis() < 100,
+            "new tree sync took {new_tree:?}"
+        );
+    }
+
+    #[test]
+    fn the_source_link_opens_the_configured_editor_at_the_line() {
+        let (capture, elements) = fixtures::inbox();
+        let (mut harness, lens) = lens_harness(capture);
+        harness.update_state(|state, cx| state.select_element(Some(elements.close), cx));
+        let location =
+            harness.capture(|capture| capture.path_info(elements.close.path).unwrap().source);
+        harness.click_selector("elements-source");
+        let opened = harness.app(|cx| lens.read(cx).opened_urls.clone());
+        let url = opened.last().expect("an editor URL was opened");
+        let suffix = format!(
+            "gpui_inspector/src/fixtures.rs:{}:{}",
+            location.line(),
+            location.column()
+        );
+        assert!(
+            url.starts_with("zed://file/") && url.ends_with(&suffix),
+            "{url}"
+        );
+        let path = &url
+            ["zed://file".len()..url.len() - suffix.len() + "gpui_inspector/src/fixtures.rs".len()];
+        assert!(std::path::Path::new(path).exists(), "{path} exists");
+
+        harness.app(|cx| {
+            cx.set_global(LoupeSettings {
+                editor: source::EditorUrl::VsCode,
+                ..LoupeSettings::get(cx)
+            })
+        });
+        harness.click_selector("elements-source");
+        let opened = harness.app(|cx| lens.read(cx).opened_urls.clone());
+        assert!(opened.last().unwrap().starts_with("vscode://file/"));
     }
 }

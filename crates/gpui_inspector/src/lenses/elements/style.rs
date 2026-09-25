@@ -16,7 +16,7 @@ use crate::{
     fuzzy::fuzzy_match,
     theme::{MONO_FONT, Theme},
     widgets::{
-        Button, ButtonSize, ButtonStyle, ColorSwatch, IconName, ScrubChanged, ScrubField,
+        Button, ButtonSize, ButtonStyle, ColorSwatch, Icon, IconName, ScrubChanged, ScrubField,
         TextField, Tooltip, text_field_state,
     },
 };
@@ -25,7 +25,7 @@ use gpui::{
     SharedString, StyleRefinement, Subscription, Window, div, inspector::PathKey, prelude::*, px,
     rgb_to_hsla, rgba,
 };
-use gpui_elements::editable_text::{EditableTextState, TextChanged};
+use gpui_elements::editable_text::{EditableTextState, StringStorage, TextChanged};
 use std::collections::HashMap;
 
 /// Most matches the "Add property" list shows.
@@ -39,9 +39,9 @@ pub(super) struct StyleModel {
     pub path: PathKey,
     /// The element's own style; `None` until a frame drew the selection.
     pub base: Option<StyleRefinement>,
-    /// Loupe's override for the path (empty when there is none).
-    pub overrides: StyleRefinement,
-    /// Every set property of the base with the override applied.
+    /// How many properties Loupe's override sets.
+    pub overridden: usize,
+    /// Every set property of the base with the override applied, by group.
     pub rows: Vec<StyleRow>,
     /// The builder calls "Copy Rust" copies: the calls to append for the
     /// override, or the whole style when nothing is overridden.
@@ -75,13 +75,15 @@ impl StyleModel {
             .collect();
         let base_style = base.clone().unwrap_or_default();
         let merged = style_grid::merge(&base_style, &overrides);
-        let rows = style_grid::rows(&merged)
+        let mut rows: Vec<StyleRow> = style_grid::rows(&merged)
             .into_iter()
             .map(|row| StyleRow {
                 overridden: overridden.contains(&row.path),
                 row,
             })
             .collect();
+        // One heading per group; the style's own field order within it.
+        rows.sort_by_key(|row| row.row.group);
         let has_overrides = !overridden.is_empty();
         let patch = if has_overrides {
             rust_patch::rust_patch(&base_style, &overrides)
@@ -96,7 +98,7 @@ impl StyleModel {
         Self {
             path,
             base,
-            overrides,
+            overridden: overridden.len(),
             rows,
             patch,
             diff,
@@ -106,7 +108,7 @@ impl StyleModel {
 
     /// Whether Loupe overrides anything.
     pub fn has_overrides(&self) -> bool {
-        self.rows.iter().any(|row| row.overridden) || !style_grid::rows(&self.overrides).is_empty()
+        self.overridden > 0
     }
 
     /// The "Copy patch" text: changed lines as `- …` / `+ …`.
@@ -452,12 +454,7 @@ impl ElementsLens {
             }
             return;
         }
-        let state = cx.new(|cx| {
-            EditableTextState::new(
-                gpui_elements::editable_text::StringStorage::from(text.as_str()),
-                cx,
-            )
-        });
+        let state = cx.new(|cx| EditableTextState::new(StringStorage::from(text.as_str()), cx));
         let row_pointer = pointer.clone();
         let changed = cx.subscribe_in(
             &state,
@@ -615,9 +612,14 @@ impl ElementsLens {
             .child(
                 div()
                     .flex_none()
-                    .size(px(5.))
-                    .rounded_full()
-                    .when(row.overridden, |this| this.bg(colors.accent)),
+                    .size(px(10.))
+                    .when(row.overridden, |this| {
+                        this.child(
+                            Icon::new(IconName::ElementDot)
+                                .size(px(10.))
+                                .color(colors.accent),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -634,17 +636,21 @@ impl ElementsLens {
                     .child(row.row.label.clone()),
             )
             .child(div().flex_1().min_w_0().flex().items_center().child(editor))
-            .when(row.overridden && editable, |this| {
-                this.child(
-                    Button::new(SharedString::from(format!("revert{pointer}")))
-                        .icon(IconName::Revert)
-                        .size(ButtonSize::Small)
-                        .tooltip("Revert to the code's value")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.revert_property(&pointer, window, cx)
-                        })),
-                )
-            })
+            // Every row keeps the revert slot, so editors line up.
+            .child(div().flex_none().size(theme.metrics.control_small).when(
+                row.overridden && editable,
+                |this| {
+                    this.child(
+                        Button::new(SharedString::from(format!("revert{pointer}")))
+                            .icon(IconName::Revert)
+                            .size(ButtonSize::Small)
+                            .tooltip("Revert to the code's value")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.revert_property(&pointer, window, cx)
+                            })),
+                    )
+                },
+            ))
     }
 
     /// An editor for `row`, if its value type is editable.
@@ -653,11 +659,10 @@ impl ElementsLens {
         Some(match (&row.value, self.style_editors.rows.get(&row.path)) {
             (_, Some(RowEditor::Number { field, .. })) => div()
                 .flex_none()
-                .min_w(px(64.))
+                .w(px(80.))
                 .child(field.clone())
                 .into_any_element(),
             (PropertyValue::Color(color), Some(RowEditor::Text { state, .. })) => div()
-                .flex_1()
                 .min_w_0()
                 .flex()
                 .items_center()
@@ -665,9 +670,9 @@ impl ElementsLens {
                 .child(ColorSwatch::new(*color))
                 .child(
                     div()
-                        .flex_1()
+                        .w(px(96.))
                         .min_w_0()
-                        .max_w(px(120.))
+                        .flex_shrink_1()
                         .child(TextField::new(
                             SharedString::from(format!("hex{pointer}")),
                             state,
