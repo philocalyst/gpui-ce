@@ -21,11 +21,15 @@ pub use conditional::*;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod capture;
 #[cfg(any(feature = "inspector", debug_assertions))]
+mod keys;
+#[cfg(any(feature = "inspector", debug_assertions))]
 mod model;
 #[cfg(any(feature = "inspector", debug_assertions))]
 pub use capture::*;
 #[cfg(any(feature = "inspector", debug_assertions))]
 pub use model::*;
+#[cfg(any(feature = "inspector", debug_assertions))]
+pub(crate) use keys::resolve_keystrokes;
 
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod conditional {

@@ -598,8 +598,10 @@ pub struct KeyResolution {
     pub keystrokes: SmallVec<[Keystroke; 2]>,
     /// The focused key context stack, outermost first.
     pub context_stack: Vec<KeyContext>,
-    /// Every binding whose keystrokes match or start with the input, in the
-    /// keymap's precedence order (the winner, if any, first).
+    /// Every binding whose keystrokes match or start with the input: the
+    /// winner, if any, first; then the other complete matches, the longer
+    /// bindings and the context mismatches, each in the keymap's precedence
+    /// order.
     pub candidates: Vec<BindingCandidate>,
 }
 
@@ -609,6 +611,15 @@ impl KeyResolution {
         self.candidates
             .iter()
             .find(|candidate| candidate.verdict == BindingVerdict::Wins)
+    }
+
+    /// Whether GPUI would wait for more keystrokes before running anything.
+    /// The winner still runs if the next keystroke doesn't continue a pending
+    /// binding, or after a one second timeout.
+    pub fn is_pending(&self) -> bool {
+        self.candidates
+            .iter()
+            .any(|candidate| candidate.verdict == BindingVerdict::Pending)
     }
 }
 
@@ -633,9 +644,12 @@ pub struct BindingCandidate {
 pub enum BindingVerdict {
     /// This binding's action would be dispatched.
     Wins,
-    /// Matches, but a binding at a deeper context or later in the keymap wins.
+    /// Matches, but a binding at a deeper context or later in the keymap takes
+    /// precedence: the winner, a `NoAction` / `Unbind` binding that disables
+    /// this one, or, for a binding the input is a prefix of, the complete match
+    /// that makes GPUI stop waiting for more keys.
     Shadowed {
-        /// Index into [`KeyResolution::candidates`] of the binding that wins.
+        /// Index into [`KeyResolution::candidates`] of the binding that takes precedence.
         by: usize,
     },
     /// The keystrokes match but the context predicate is false here.
@@ -644,6 +658,10 @@ pub enum BindingVerdict {
     Disabled,
     /// The input is a prefix of this binding: GPUI would wait for more keys.
     Pending,
+    /// Matches and outranks the winner, but nothing on the focus path (and no
+    /// global listener) handles its action, so dispatch falls through to the
+    /// next binding.
+    Unhandled,
 }
 
 bitflags::bitflags! {

@@ -6892,17 +6892,32 @@ impl Window {
     /// Resolves keystrokes against the keymap and the focused context stack
     /// without dispatching anything: which binding wins, and why each other
     /// candidate loses.
+    ///
+    /// `keystrokes` is the whole sequence, as if typed from scratch with the
+    /// current focus. The result matches what key dispatch does with the
+    /// latest rendered frame: the winner is the highest-precedence matching
+    /// binding whose action is handled on the focus path or by a global
+    /// listener (bindings above it resolve to
+    /// [`crate::inspector::BindingVerdict::Unhandled`]). It assumes action
+    /// handlers don't call `cx.propagate()`, keystroke interceptors
+    /// (`cx.intercept_keystrokes`) don't stop the keystroke, and the platform
+    /// didn't prefer character input for it (e.g. AltGr on some layouts).
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub fn inspector_resolve_keystrokes(
         &self,
         keystrokes: &[Keystroke],
-        _cx: &App,
+        cx: &App,
     ) -> crate::inspector::KeyResolution {
-        // Engine slice: Keymap::bindings_for_input + context stack + predicate evaluation.
-        crate::inspector::KeyResolution {
-            keystrokes: keystrokes.iter().cloned().collect(),
-            ..Default::default()
-        }
+        let node_id = self.focus_node_id_in_rendered_frame(self.focus);
+        let dispatch_tree = &self.rendered_frame.dispatch_tree;
+        let keymap = cx.keymap.borrow();
+        crate::inspector::resolve_keystrokes(&keymap, keystrokes, self.context_stack(), |action| {
+            dispatch_tree.is_action_available(action, node_id)
+                || cx
+                    .global_action_listeners
+                    .get(&action.as_any().type_id())
+                    .is_some_and(|listeners| !listeners.is_empty())
+        })
     }
 
     /// Where the inspector UI is drawn, while it is open.
