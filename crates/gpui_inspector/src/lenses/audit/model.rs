@@ -130,9 +130,10 @@ pub(crate) fn health(counts: &Counts, elements: usize, frames: usize) -> String 
 /// The checks the current capture cannot run, in a sentence.
 pub(crate) fn blind_spots(level: CaptureLevel, has_tree: bool) -> Option<&'static str> {
     match (level, has_tree) {
-        (CaptureLevel::Frames, _) | (_, false) => Some(
+        (CaptureLevel::Frames, _) => Some(
             "Element checks need a retained element tree: set the capture level to Tree or Full.",
         ),
+        (_, false) => Some("Element checks run on the next element tree the app draws."),
         (CaptureLevel::Tree, true) => Some(
             "Contrast and accessible-name checks need element details: set the capture level \
              to Full.",

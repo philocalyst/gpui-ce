@@ -100,7 +100,7 @@ impl Render for FramesLens {
             self.idle_check = None;
             return root.child(
                 EmptyState::new("No app frames recorded yet")
-                    .icon(IconName::Pause)
+                    .icon(IconName::Clock)
                     .description(format!(
                         "{} Use the app: every frame it draws lands here, with why it was \
                          drawn and where its time went.",

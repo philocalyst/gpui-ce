@@ -426,7 +426,12 @@ fn render_summary(
 ) -> AnyElement {
     let colors = &theme.colors;
     let worst = findings.first().map(|finding| finding.severity);
-    let (icon, tone) = worst.map_or((IconName::Check, Tone::Ok), severity_glyph);
+    // Nothing recorded is not a pass: a neutral clock until the app draws.
+    let (icon, tone) = match worst {
+        Some(severity) => severity_glyph(severity),
+        None if frames == 0 => (IconName::Clock, Tone::Neutral),
+        None => (IconName::Check, Tone::Ok),
+    };
     let chips = [
         (Severity::Critical, counts.critical),
         (Severity::Warning, counts.warning),

@@ -898,7 +898,8 @@ impl Render for ElementsLens {
                     EmptyState::new("No element tree yet")
                         .icon(IconName::Pick)
                         .description(
-                            "Interact with the app… Loupe captures its tree with the next frame.",
+                            "Use the app: Loupe records its element tree with the next frame \
+                             it draws.",
                         )
                         .action(self.render_pick_actions(holding, cx)),
                 )

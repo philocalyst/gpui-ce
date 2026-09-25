@@ -166,12 +166,16 @@ impl EventsLens {
 
     fn render_no_event(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let newest = self.log_newest();
+        let description = if newest.is_some() {
+            "Select an event to see where it went: the elements under the pointer, the key \
+             contexts, the actions it ran and the frame it caused."
+        } else {
+            "Use the app, then select an event to see where it went. To see what a key would \
+             do right now, open the Key tester."
+        };
         EmptyState::new(Lens::Events.question())
             .icon(IconName::Mouse)
-            .description(
-                "Select an event to see where it went: the elements under the pointer, the key \
-                 contexts, the actions it ran and the frame it caused.",
-            )
+            .description(description)
             .when_some(newest, |this, seq| {
                 this.action(
                     Button::new("events-select-newest")

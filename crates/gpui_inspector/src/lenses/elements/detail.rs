@@ -332,9 +332,12 @@ impl ElementsLens {
             .size_full()
             .bg(colors.bg)
             .child(
-                EmptyState::new("Nothing selected")
+                EmptyState::new(Lens::Elements.question())
                     .icon(IconName::Pick)
-                    .description(Lens::Elements.question())
+                    .description(
+                        "Select an element in the tree, or pick one in the app, to see why it \
+                         has its size, its style and where it was built.",
+                    )
                     .action(self.render_pick_actions(holding, cx)),
             )
             .into_any_element()
