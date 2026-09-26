@@ -477,7 +477,7 @@ impl FramesLens {
                     .pb(px(8.))
                     .child(
                         PhaseBarView::new(PhaseBar::new(&frame.timings, shown.budget))
-                            .replayed(frame.inspector_only),
+                            .replayed(frame.replayed_app()),
                     ),
             )
             .into_any_element()
@@ -726,20 +726,17 @@ impl FramesLens {
                     .child("wheel zooms · drag pans · double-click fits"),
             );
 
-        let replayed = data.replayed.then(|| {
+        let note = data.note.map(|note| {
             div()
                 .px(theme.metrics.gutter)
                 .pb(px(4.))
                 .text_size(theme.metrics.text_small)
                 .text_color(colors.text_muted)
-                .child(
-                    "Loupe drew this frame for itself: the app was replayed from its previous \
-                     frame, not rendered, so its views show as reused.",
-                )
+                .child(note)
         });
         div()
             .child(header)
-            .children(replayed)
+            .children(note)
             .child(chart)
             .child(legend_row)
             .children(self.render_selected_bar(&data, shown, navigate, theme, cx))
@@ -948,7 +945,13 @@ impl FramesLens {
                 .px(theme.metrics.gutter)
                 .pb(px(8.))
                 .text_color(colors.text_muted)
-                .child("No view rendered or reused in this frame")
+                .child(
+                    if self.scope == Scope::Frame && shown.frame.replayed_app() {
+                        "The app was replayed: no view rendered in this frame"
+                    } else {
+                        "No view rendered or reused in this frame"
+                    },
+                )
                 .into_any_element()
         } else {
             let height = theme.metrics.control

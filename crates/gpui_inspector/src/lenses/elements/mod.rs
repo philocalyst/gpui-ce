@@ -216,7 +216,7 @@ struct Cost {
 /// A view's render history.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct ViewCost {
-    /// Renders and cache hits.
+    /// Renders, cache hits and replays.
     pub stats: ViewStats,
     /// App frames recorded.
     pub frames: usize,

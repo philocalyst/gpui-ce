@@ -132,6 +132,25 @@ pub(crate) fn frame_title(frame: &FrameRecord, now: Duration) -> String {
     )
 }
 
+/// How `frame` drew the app, when not simply by rendering what the app
+/// asked for: it replayed the app's previous frame (on a frame Loupe drew
+/// for itself, or while the app was held), or rendered the app on a frame
+/// Loupe drew for itself.
+pub(crate) fn app_note(frame: &FrameRecord) -> Option<&'static str> {
+    match (frame.inspector_only, frame.replayed_app()) {
+        (true, true) => Some(
+            "Loupe drew this frame for itself: the app was replayed from its previous frame, \
+             so none of its views rendered.",
+        ),
+        (false, true) => Some(
+            "The app was held: this frame replayed its previous frame, so none of its views \
+             rendered, and what the app asked for waited for the release.",
+        ),
+        (true, false) => Some("Loupe drew this frame for itself, and the app rendered with it."),
+        (false, false) => None,
+    }
+}
+
 /// The frame the lens shows: the selected one while it is still recorded,
 /// else the latest app frame. The flag says whether it is the selection.
 pub(crate) fn shown_frame(
@@ -361,7 +380,7 @@ pub(crate) fn input_summary(input: &VecDeque<InputRecord>, range: Range<u64>) ->
 mod tests {
     use super::*;
     use crate::fixtures::{FrameBuilder, InputBuilder, ms, steady_frames};
-    use gpui::{point, px};
+    use gpui::{inspector::ViewOutcome, point, px};
 
     const BUDGET: Duration = Duration::from_micros(16_667);
 
@@ -462,6 +481,36 @@ mod tests {
         assert_eq!(
             frame_title(frame, frame.start + ms(2_100.0)),
             "#1 · 23.4 ms · 2.1 s ago"
+        );
+    }
+
+    #[test]
+    fn app_notes_say_how_a_frame_drew_the_app() {
+        let frame = |outcome, inspector_only: bool| {
+            let frame = FrameBuilder::new().view(1, "app::App", 0, ms(0.), ms(0.), outcome);
+            if inspector_only {
+                frame.inspector_only().build()
+            } else {
+                frame.build()
+            }
+        };
+        let note = |outcome, inspector_only| app_note(&frame(outcome, inspector_only));
+        assert_eq!(note(ViewOutcome::Rendered, false), None);
+        assert_eq!(note(ViewOutcome::Cached, false), None);
+        assert!(
+            note(ViewOutcome::Replayed, true)
+                .unwrap()
+                .contains("replayed")
+        );
+        assert!(
+            note(ViewOutcome::Replayed, false)
+                .unwrap()
+                .starts_with("The app was held")
+        );
+        assert!(
+            note(ViewOutcome::Rendered, true)
+                .unwrap()
+                .ends_with("rendered with it.")
         );
     }
 

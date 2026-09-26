@@ -666,7 +666,7 @@ impl InspectorCapture {
     ///
     /// The window never renders the app for frames the inspector draws for
     /// itself: it replays the app's layers from the previous frame instead
-    /// (the app shows as [`ViewOutcome::Cached`] and the frame has no tree).
+    /// (the app shows as [`ViewOutcome::Replayed`] and the frame has no tree).
     /// Holding extends this to every frame, even when app views are notified,
     /// so a hover menu or a tooltip stays on screen while it is inspected.
     /// The app keeps running; the invalidations it receives while held wait,

@@ -8,7 +8,7 @@ use gpui::{
     inspector::{CauseKind, ElementKind, InspectorCapture, ViewOutcome},
     px, rgb, size,
 };
-use gpui_inspector::harness::LoupeHarness;
+use gpui_inspector::{Lens, harness::LoupeHarness};
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 /// A counter whose button notifies on click, counting its own renders.
@@ -106,7 +106,7 @@ fn loupe_reports_real_frames_and_never_keeps_the_window_busy() {
                     .views
                     .iter()
                     .filter(|view| view.type_name.ends_with("Counter"))
-                    .all(|view| view.outcome == ViewOutcome::Cached),
+                    .all(|view| view.outcome == ViewOutcome::Replayed),
                 "frame {} drawn only for Loupe re-rendered the app",
                 frame.id
             );
@@ -166,6 +166,26 @@ fn holding_keeps_the_app_on_screen_until_release() {
     harness.assert_text_visible("Count: 0");
     assert_eq!(app_renders.get(), held_renders, "a held app never renders");
     harness.screenshot("live-held");
+
+    // Frames tells that frame apart: the app asked for it, and the window
+    // replayed the held app instead of rendering it.
+    let held_frame = harness.capture(|capture| {
+        let frame = capture.latest_app_frame().expect("the click drew a frame");
+        assert!(frame.replayed_app() && !frame.inspector_only);
+        assert!(
+            frame
+                .views
+                .iter()
+                .all(|view| view.outcome == ViewOutcome::Replayed)
+        );
+        frame.id
+    });
+    harness.update_state(|state, cx| {
+        state.select_frame(Some(held_frame), cx);
+        state.set_lens(Lens::Frames, cx);
+    });
+    harness.assert_text_visible("The app was held");
+    harness.assert_text_visible("The app's part replayed its previous frame");
 
     // Releasing draws the deferred change at once.
     harness.click_selector("loupe-hold");

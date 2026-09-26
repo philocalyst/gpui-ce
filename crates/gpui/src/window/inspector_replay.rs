@@ -7,7 +7,7 @@
 //! instead, the way a cached view replays its subtree: the same scene,
 //! hitboxes, dispatch tree, listeners, deferred draws and tooltip, and no
 //! view renders. The capture records such a frame without a tree and with
-//! every app view [`ViewOutcome::Cached`](crate::inspector::ViewOutcome).
+//! every app view [`ViewOutcome::Replayed`](crate::inspector::ViewOutcome).
 //!
 //! A frame replays the app when the previous frame drew it, nothing changed
 //! its geometry (bounds, viewport, scale, rem size, root view), accessibility

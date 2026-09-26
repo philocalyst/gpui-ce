@@ -1001,20 +1001,44 @@ const VIEWS: [(u64, &str, u16); 5] = [
 fn with_views(mut frame: FrameBuilder, render: Duration, rendered: &[u64]) -> FrameBuilder {
     let mut start = Duration::ZERO;
     for (entity, type_name, depth) in VIEWS {
-        let outcome = if rendered.contains(&entity) {
-            ViewOutcome::Rendered
+        let (outcome, duration) = if !rendered.contains(&entity) {
+            (ViewOutcome::Cached, ms(0.02))
+        } else if depth == 0 {
+            (ViewOutcome::Rendered, render)
         } else {
-            ViewOutcome::Cached
-        };
-        let duration = match (outcome, depth) {
-            (ViewOutcome::Cached, _) => ms(0.02),
-            (ViewOutcome::Rendered, 0) => render,
-            (ViewOutcome::Rendered, _) => render.mul_f64(0.8 / rendered.len().max(1) as f64),
+            let share = render.mul_f64(0.8 / rendered.len().max(1) as f64);
+            (ViewOutcome::Rendered, share)
         };
         frame = frame.view(entity, type_name, depth, start, duration, outcome);
         if depth > 0 {
             start += duration;
         }
+    }
+    frame
+}
+
+/// Makes `frame` one that replayed the app's previous frame instead of
+/// drawing it, as the window does on the frames Loupe draws for itself: the
+/// replay is all the app's part of the frame, and every view is
+/// [`ViewOutcome::Replayed`].
+fn replayed(mut frame: FrameBuilder, inspector: Duration) -> FrameBuilder {
+    let replay = ms(0.12);
+    frame = frame.phases(PhaseTimings {
+        paint: replay,
+        inspector,
+        present: Some(ms(0.4)),
+        total: replay + inspector,
+        ..PhaseTimings::default()
+    });
+    for (entity, type_name, depth) in VIEWS {
+        frame = frame.view(
+            entity,
+            type_name,
+            depth,
+            Duration::ZERO,
+            Duration::ZERO,
+            ViewOutcome::Replayed,
+        );
     }
     frame
 }
@@ -1113,11 +1137,11 @@ pub fn inbox() -> (InspectorCapture, InboxElements) {
         let inspector = ms(rng.between(0.25, 0.7));
         let mut frame = FrameBuilder::new()
             .at(clock)
-            .app_time(if loupe_only { ms(0.9) } else { app }, inspector)
+            .app_time(app, inspector)
             .scene(inbox_scene(&mut rng))
             .input(input_start..seq);
         frame = if loupe_only {
-            with_views(frame.inspector_only(), ms(0.4), &[])
+            replayed(frame.inspector_only(), inspector)
                 .cause(CauseKind::Input { event: "MouseMove" }, true)
         } else if ix == 0 {
             with_views(frame, app.mul_f64(0.52), &VIEWS.map(|view| view.0))
@@ -1171,7 +1195,8 @@ pub fn inbox() -> (InspectorCapture, InboxElements) {
             };
             with_views(frame, app.mul_f64(0.52), &[entities::ISSUE_LIST]).cause(cause, false)
         };
-        let keep_tree = spike || ix + 6 >= frame_count;
+        // A frame that replayed the app has no tree of its own.
+        let keep_tree = (spike || ix + 6 >= frame_count) && !loupe_only;
         frame = if keep_tree {
             let mut snapshot = (*tree).clone();
             snapshot.frame = capture.frames().back().map_or(0, |last| last.id + 1);

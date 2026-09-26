@@ -48,10 +48,11 @@ pub fn self_times(views: &[ViewSpan]) -> Vec<Duration> {
 
 /// Aggregates the views of `frames` by type, sorted by self time (then total
 /// time, then name). Pass one frame for a frame's breakdown, or a selection
-/// for a range; `inspector_only` frames are included if passed.
+/// for a range; `inspector_only` frames are included if passed. Frames that
+/// replayed the app add nothing: none of its views did any work in them.
 pub fn bottom_up<'a>(frames: impl IntoIterator<Item = &'a FrameRecord>) -> Vec<BottomUpRow> {
     let mut rows: HashMap<&'static str, Accumulator> = HashMap::new();
-    for frame in frames {
+    for frame in frames.into_iter().filter(|frame| !frame.replayed_app()) {
         let views = &frame.views;
         let self_times = self_times(views);
         let mut ancestors: Vec<usize> = Vec::new();
@@ -137,10 +138,8 @@ struct Accumulator {
 impl Accumulator {
     fn add(&mut self, view: &ViewSpan, self_time: Duration, counts_in_total: bool) {
         self.calls += 1;
-        match view.outcome {
-            ViewOutcome::Rendered => self.rendered += 1,
-            ViewOutcome::Cached => self.cached += 1,
-        }
+        self.rendered += u32::from(view.outcome == ViewOutcome::Rendered);
+        self.cached += u32::from(view.outcome == ViewOutcome::Cached);
         if counts_in_total {
             self.total += view.duration;
         }
@@ -166,7 +165,7 @@ impl Accumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::fixtures::{cached_view, frame, ms, view};
+    use crate::analysis::fixtures::{cached_view, frame, ms, replayed_view, view};
 
     /// Workspace (0..10) ⊃ Sidebar (1..3), IssueList (3..9) ⊃ Row ×2.
     fn workspace() -> FrameRecord {
@@ -223,6 +222,20 @@ mod tests {
         assert!(bottom_up(&[frame(0, Duration::ZERO, ms(1.0))]).is_empty());
         assert!(self_times(&[]).is_empty());
         assert!(bottom_up(&[]).is_empty());
+    }
+
+    #[test]
+    fn frames_that_replayed_the_app_add_nothing() {
+        let mut replayed = frame(1, ms(20.0), ms(0.5));
+        replayed.views = vec![
+            replayed_view(1, "app::Workspace", 0, ms(0.1)),
+            replayed_view(3, "app::IssueList", 1, ms(0.1)),
+        ];
+        assert!(bottom_up(&[replayed.clone()]).is_empty());
+        assert_eq!(
+            bottom_up(&[workspace(), replayed]),
+            bottom_up(&[workspace()])
+        );
     }
 
     #[test]

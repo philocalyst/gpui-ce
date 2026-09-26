@@ -2150,8 +2150,9 @@ fn inspector_only_frames_replay_the_app(cx: &mut TestAppContext) {
     assert_eq!(frame.element_count, app_frame.element_count);
     assert!(frame.timings.render.is_zero());
 
-    // The capture tells the truth: every app view is served from cache, and
-    // the frame has no tree of its own; the last live tree still applies.
+    // The capture tells the truth: every app view was replayed, not served
+    // from its cache, and the frame has no tree of its own; the last live
+    // tree still applies.
     assert!(frame.tree.is_none());
     assert!(Arc::ptr_eq(&latest_tree(cx), &tree));
     assert_eq!(read(cx, |capture| capture.generation()), generation);
@@ -2167,8 +2168,11 @@ fn inspector_only_frames_replay_the_app(cx: &mut TestAppContext) {
         frame
             .views
             .iter()
-            .all(|view| view.outcome == ViewOutcome::Cached && view.element.is_none())
+            .all(|view| view.outcome == ViewOutcome::Replayed
+                && view.element.is_none()
+                && view.duration.is_zero())
     );
+    assert!(frame.replayed_app() && !app_frame.replayed_app());
 
     // Picking walks the last live tree over the replayed app.
     cx.update(|window, _| window.start_inspector_pick());
@@ -2290,6 +2294,49 @@ fn app_notified_during_a_replayed_frame_renders_on_the_next(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn views_are_rendered_served_from_cache_or_replayed(cx: &mut TestAppContext) {
+    let (view, cx) = replayed(cx);
+    let dock = dock_renderer(cx);
+    open(cx);
+    let dock = dock.borrow().clone().expect("the dock rendered");
+    let child = cx.update(|_, cx| view.read(cx).child.clone());
+
+    // The app renders; its cached child has nothing new: a real cache hit.
+    view.update(cx, |_, cx| cx.notify());
+    let frame = latest_frame(cx);
+    assert_eq!(
+        view_outcomes(&frame),
+        [
+            ("Replayed", ViewOutcome::Rendered),
+            ("Counted", ViewOutcome::Cached)
+        ]
+    );
+    assert!(!frame.replayed_app());
+
+    // A frame drawn for the inspector alone draws nothing of the app.
+    dock.update(cx, |_, cx| cx.notify());
+    let frame = latest_frame(cx);
+    assert_eq!(
+        view_outcomes(&frame),
+        [
+            ("Replayed", ViewOutcome::Replayed),
+            ("Counted", ViewOutcome::Replayed)
+        ]
+    );
+    assert!(frame.replayed_app());
+
+    // The child notified: it renders, inside the (uncached) root.
+    child.update(cx, |_, cx| cx.notify());
+    assert_eq!(
+        view_outcomes(&latest_frame(cx)),
+        [
+            ("Replayed", ViewOutcome::Rendered),
+            ("Counted", ViewOutcome::Rendered)
+        ]
+    );
+}
+
+#[gpui::test]
 fn holding_replays_the_app_until_release(cx: &mut TestAppContext) {
     let (view, cx) = replayed(cx);
     let dock = dock_renderer(cx);
@@ -2321,7 +2368,7 @@ fn holding_replays_the_app_until_release(cx: &mut TestAppContext) {
         frame
             .views
             .iter()
-            .all(|view| view.outcome == ViewOutcome::Cached)
+            .all(|view| view.outcome == ViewOutcome::Replayed)
     );
     assert_eq!(renders(&view, cx), rendered);
     assert_eq!(drawn(cx), before);

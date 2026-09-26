@@ -890,8 +890,8 @@ impl Recorder {
     }
 
     /// Records that this frame replays the app's layers from the previous
-    /// frame: the app's views are reported as served from cache, and the
-    /// previous frame's tree and hitbox owners still apply.
+    /// frame: the app's views are reported as [`ViewOutcome::Replayed`], and
+    /// the previous frame's tree and hitbox owners still apply.
     pub(crate) fn replay_app(&mut self) {
         self.app_replayed = true;
         mem::swap(&mut self.hitbox_owners, &mut self.previous_hitbox_owners);
@@ -903,7 +903,7 @@ impl Recorder {
                 element: None,
                 start,
                 duration: Duration::ZERO,
-                outcome: ViewOutcome::Cached,
+                outcome: ViewOutcome::Replayed,
                 ..view.clone()
             })
             .collect();

@@ -485,14 +485,16 @@ impl RowSet {
     }
 }
 
-/// How often each view rendered and was served from the cache, over the
-/// recorded frames.
+/// How often each view rendered, was served from the cache, or was replayed
+/// with the rest of the app (while it was held), over the recorded frames.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ViewStats {
     /// Frames in which `render()` ran.
     pub rendered: u32,
     /// Frames that reused its cached output.
     pub cached: u32,
+    /// Frames that replayed the app's previous frame instead of drawing it.
+    pub replayed: u32,
     /// The latest frame that rendered it.
     pub last_rendered: Option<u64>,
 }
@@ -511,6 +513,7 @@ pub(crate) fn view_stats<'a>(
                     entry.last_rendered = Some(frame.id);
                 }
                 gpui::inspector::ViewOutcome::Cached => entry.cached += 1,
+                gpui::inspector::ViewOutcome::Replayed => entry.replayed += 1,
             }
         }
     }
@@ -707,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn view_stats_count_renders_and_cache_hits_of_app_frames() {
+    fn view_stats_count_renders_cache_hits_and_replays_of_app_frames() {
         use crate::fixtures::{FrameBuilder, ms};
         use gpui::inspector::ViewOutcome;
         let mut capture = InspectorCapture::new_for_test();
@@ -715,6 +718,7 @@ mod tests {
             ViewOutcome::Rendered,
             ViewOutcome::Cached,
             ViewOutcome::Rendered,
+            ViewOutcome::Replayed,
         ]
         .into_iter()
         .enumerate()
@@ -734,6 +738,7 @@ mod tests {
             ViewStats {
                 rendered: 2,
                 cached: 1,
+                replayed: 1,
                 last_rendered: Some(2)
             }
         );

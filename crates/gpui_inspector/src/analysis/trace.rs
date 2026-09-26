@@ -153,6 +153,7 @@ fn push_frame(events: &mut Vec<Value>, frame: &FrameRecord) {
             "inspector_ms": micros(frame.timings.inspector) / 1e3,
             "input_ms": micros(frame.timings.input) / 1e3,
             "inspector_only": frame.inspector_only,
+            "replayed_app": frame.replayed_app(),
             "viewport": format::size(frame.viewport),
             "elements": frame.element_count,
             "primitives": frame.scene.primitives(),
@@ -196,6 +197,7 @@ fn push_views(events: &mut Vec<Value>, frame: &FrameRecord) {
         let outcome = match view.outcome {
             ViewOutcome::Rendered => "rendered",
             ViewOutcome::Cached => "cached",
+            ViewOutcome::Replayed => "replayed",
         };
         events.push(complete(
             &format::type_name(view.type_name),
@@ -322,7 +324,9 @@ fn push_input(events: &mut Vec<Value>, record: &InputRecord) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::fixtures::{cached_view, entity, frame, input, ms, us, view};
+    use crate::analysis::fixtures::{
+        cached_view, entity, frame, input, ms, replayed_view, us, view,
+    };
     use gpui::inspector::{ActionRecord, ForegroundSlice, InputKind, PhaseTimings, UserSpan};
 
     fn parse(frames: &[FrameRecord], input: &[InputRecord]) -> Value {
@@ -459,6 +463,24 @@ mod tests {
         assert_eq!(list["args"]["type"], "app::IssueList<app::Row>");
         assert_eq!(sidebar["args"]["outcome"], "cached");
         assert_eq!(list["args"]["entity"], entity(2).as_u64());
+        assert_eq!(
+            find(&trace, "X", "Frame #7")[0]["args"]["replayed_app"],
+            false
+        );
+    }
+
+    #[test]
+    fn a_frame_that_replayed_the_app_says_so() {
+        let mut record = frame(8, ms(1_030.0), ms(0.5));
+        record.views = vec![replayed_view(1, "app::Workspace", 0, ms(0.1))];
+        let trace = parse(&[record], &[]);
+        assert_eq!(
+            find(&trace, "X", "Frame #8")[0]["args"]["replayed_app"],
+            true
+        );
+        let workspace = find(&trace, "X", "Workspace")[0];
+        assert_eq!(workspace["args"]["outcome"], "replayed");
+        assert_eq!(workspace["dur"], 0.0);
     }
 
     #[test]

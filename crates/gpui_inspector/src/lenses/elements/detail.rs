@@ -855,10 +855,14 @@ fn render_cost(selection: &Selection, theme: &Theme) -> AnyElement {
         ),
     )];
     if let Some(view) = &cost.view {
+        let replayed = match view.stats.replayed {
+            0 => String::new(),
+            replayed => format!(" · {replayed} replayed"),
+        };
         lines.push(line(
             "Renders",
             format!(
-                "{} of {} frames · {} cached",
+                "{} of {} frames · {} cached{replayed}",
                 view.stats.rendered, view.frames, view.stats.cached
             ),
         ));

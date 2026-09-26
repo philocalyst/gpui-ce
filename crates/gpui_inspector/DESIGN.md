@@ -114,7 +114,9 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
   alone; only resizes, window-state changes and inspector changes re-render
   the inspector's cached views. Frames drawn only for the inspector replay the
   app's previous frame instead of rendering it ("hold app"), and holding the
-  app keeps it still while you inspect a hover menu.
+  app keeps it still while you inspect a hover menu. Such a frame reports the
+  app's views as `ViewOutcome::Replayed`, never `Cached`: `Cached` is a real
+  cache hit, and replayed views count as neither renders nor cache hits.
 * Fixture captures installed by tests replay: live frames and input are never
   mixed into them, and the window reports the fixture's entities.
 * When frozen, rings stop updating; overlays, picking and overrides still work.

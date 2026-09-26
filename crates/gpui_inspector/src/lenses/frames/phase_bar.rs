@@ -174,8 +174,9 @@ impl PhaseBarView {
         }
     }
 
-    /// Marks a frame drawn only for Loupe, whose app phases replayed the
-    /// previous frame: the verdict says so instead of naming a phase.
+    /// Marks a frame that replayed the app's previous frame instead of
+    /// drawing the app (a frame drawn only for Loupe, or while the app was
+    /// held): the verdict says so instead of naming a phase.
     pub fn replayed(mut self, replayed: bool) -> Self {
         self.replayed = replayed;
         self
@@ -246,7 +247,7 @@ impl RenderOnce for PhaseBarView {
             )
             .children(
                 if self.replayed {
-                    Some("Drawn only for Loupe: the app's part replayed its previous frame".into())
+                    Some("The app's part replayed its previous frame".into())
                 } else {
                     self.bar.verdict()
                 }

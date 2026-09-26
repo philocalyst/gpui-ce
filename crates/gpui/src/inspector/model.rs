@@ -328,9 +328,11 @@ pub struct ViewSpan {
     pub depth: u16,
     /// Start offset from the beginning of the frame.
     pub start: Duration,
-    /// Duration of `render()` plus the subtree's `request_layout`.
+    /// Duration of `render()` plus the subtree's `request_layout`; zero when
+    /// the view was [`ViewOutcome::Replayed`].
     pub duration: Duration,
-    /// Whether the view rendered or was served from the view cache.
+    /// Whether the view rendered, was served from the view cache, or was
+    /// replayed with the rest of the app.
     pub outcome: ViewOutcome,
 }
 
@@ -339,13 +341,21 @@ pub struct ViewSpan {
 /// and audit flag it.
 pub const HOT_RENDERS_PER_SECOND: u32 = 30;
 
-/// Whether a view produced a new element tree this frame.
+/// How a view was drawn in a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewOutcome {
     /// `render()` ran.
     Rendered,
-    /// Prepaint and paint were reused from the previous frame.
+    /// A cached view (`AnyView::cached`) was drawn without rendering:
+    /// nothing it reads changed, so it reused its layout, prepaint and paint
+    /// from the previous frame.
     Cached,
+    /// The window did not draw the app at all: it replayed the app's
+    /// previous frame, on a frame the inspector drew for itself or while the
+    /// app is held ([`crate::inspector::InspectorCapture::set_holding`]).
+    /// Such a frame has no element tree of its own, and its spans take no
+    /// time.
+    Replayed,
 }
 
 /// A named user span (`gpui::inspector_span!`) recorded inside a frame.
@@ -482,6 +492,14 @@ impl FrameRecord {
         self.views
             .iter()
             .filter(|view| view.outcome == ViewOutcome::Rendered)
+    }
+
+    /// Whether the window replayed the app's previous frame instead of
+    /// drawing the app: its views are [`ViewOutcome::Replayed`].
+    pub fn replayed_app(&self) -> bool {
+        self.views
+            .iter()
+            .any(|view| view.outcome == ViewOutcome::Replayed)
     }
 }
 

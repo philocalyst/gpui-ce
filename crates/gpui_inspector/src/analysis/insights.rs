@@ -182,6 +182,12 @@ pub fn view_activity<'a>(frames: impl IntoIterator<Item = &'a FrameRecord>) -> V
         previous_scene = Some(frame.scene);
         let self_times = bottom_up::self_times(&frame.views);
         for (view, self_time) in frame.views.iter().zip(self_times) {
+            let rendered = match view.outcome {
+                ViewOutcome::Rendered => true,
+                ViewOutcome::Cached => false,
+                // Replayed with the rest of the app: not drawn this frame.
+                ViewOutcome::Replayed => continue,
+            };
             let entry = activity.entry(view.entity).or_insert_with(|| ViewActivity {
                 entity: view.entity,
                 type_name: view.type_name,
@@ -202,20 +208,19 @@ pub fn view_activity<'a>(frames: impl IntoIterator<Item = &'a FrameRecord>) -> V
                 .zip(view.element)
                 .and_then(|(tree, ix)| tree.get(ix)?.key);
             entry.element = element.or(entry.element);
-            match view.outcome {
-                ViewOutcome::Cached => entry.cached += 1,
-                ViewOutcome::Rendered => {
-                    entry.rendered += 1;
-                    entry.unchanged_scene += u32::from(scene_unchanged);
-                    if view.duration > entry.slowest {
-                        entry.slowest = view.duration;
-                        entry.slowest_frame = frame.id;
-                    }
-                    if self_time > entry.heaviest_self {
-                        entry.heaviest_self = self_time;
-                        entry.heaviest_self_frame = frame.id;
-                    }
+            if rendered {
+                entry.rendered += 1;
+                entry.unchanged_scene += u32::from(scene_unchanged);
+                if view.duration > entry.slowest {
+                    entry.slowest = view.duration;
+                    entry.slowest_frame = frame.id;
                 }
+                if self_time > entry.heaviest_self {
+                    entry.heaviest_self = self_time;
+                    entry.heaviest_self_frame = frame.id;
+                }
+            } else {
+                entry.cached += 1;
             }
         }
     }
@@ -721,7 +726,7 @@ impl TypeNames {
 mod tests {
     use super::*;
     use crate::analysis::fixtures::{
-        TreeBuilder, bounds, cached_view, entity, frames_every, input, ms, view,
+        TreeBuilder, bounds, cached_view, entity, frames_every, input, ms, replayed_view, view,
     };
     use gpui::inspector::{InputKind, PhaseTimings, RenderCause};
     use std::sync::Arc;
@@ -1110,7 +1115,7 @@ mod tests {
 
     #[test]
     fn view_activity_counts_renders_and_cache_hits_per_entity() {
-        let mut frames = frames_every(3, ms(16.0), ms(1.0));
+        let mut frames = frames_every(5, ms(16.0), ms(1.0));
         frames[0].views = vec![view(1, "app::A", 0, ms(0.0), ms(2.0))];
         frames[1].views = vec![
             view(1, "app::A", 0, ms(0.0), ms(5.0)),
@@ -1118,14 +1123,17 @@ mod tests {
         ];
         frames[2].views = vec![cached_view(1, "app::A", 0, ms(0.0), ms(0.1))];
         frames[2].inspector_only = true;
+        // Held: the app was replayed, neither rendered nor served from cache.
+        frames[3].views = vec![replayed_view(1, "app::A", 0, ms(0.1))];
+        frames[4].views = vec![cached_view(1, "app::A", 0, ms(0.0), ms(0.1))];
 
         let activity = view_activity(&frames);
         assert_eq!(activity.len(), 2);
         let a = &activity[0];
-        assert_eq!((a.type_name, a.rendered, a.cached), ("app::A", 2, 0));
+        assert_eq!((a.type_name, a.rendered, a.cached), ("app::A", 2, 1));
         assert_eq!(
             (a.slowest, a.slowest_frame, a.latest_frame),
-            (ms(5.0), 1, 1)
+            (ms(5.0), 1, 4)
         );
         assert_eq!(a.unchanged_scene, 1);
     }

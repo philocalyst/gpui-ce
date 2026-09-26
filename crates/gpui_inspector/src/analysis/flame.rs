@@ -21,7 +21,8 @@ pub const DEFAULT_MIN_SPAN: Duration = Duration::from_micros(10);
 pub enum Lane {
     /// The frame as a whole.
     Frame,
-    /// Views rendered or reused, one row per nesting depth.
+    /// Views rendered or served from the view cache, one row per nesting
+    /// depth (none when the frame replayed the app).
     Views,
     /// `inspector_span!` spans, one row per nesting depth.
     UserSpans,
@@ -125,8 +126,15 @@ pub fn flame_layout(frame: &FrameRecord) -> FlameLayout {
         site: None,
     });
 
-    let view_rows = layout.push_rows(Lane::Views, frame.views.iter().map(|view| view.depth));
-    for view in &frame.views {
+    // Views replayed with the rest of the app did no work: no bars.
+    let views = || {
+        frame
+            .views
+            .iter()
+            .filter(|view| view.outcome != ViewOutcome::Replayed)
+    };
+    let view_rows = layout.push_rows(Lane::Views, views().map(|view| view.depth));
+    for view in views() {
         layout.bars.push(FlameBar {
             row: view_rows.row(view.depth),
             start: frame.start + view.start,
@@ -473,7 +481,7 @@ fn duration(nanos: f64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::fixtures::{cached_view, entity, frame, ms, us, view};
+    use crate::analysis::fixtures::{cached_view, entity, frame, ms, replayed_view, us, view};
     use gpui::inspector::{ForegroundSlice, UserSpan};
 
     const WIDTH: f32 = 1_000.0;
@@ -508,6 +516,19 @@ mod tests {
         assert_eq!(layout.bars.len(), 1);
         assert_eq!(layout.bars[0].label, "Frame #3 · 8.0 ms");
         assert_eq!(layout.bars[0].kind, BarKind::Frame);
+    }
+
+    #[test]
+    fn a_frame_that_replayed_the_app_lays_out_no_views() {
+        let mut record = frame(3, ms(100.0), ms(0.5));
+        record.views = vec![
+            replayed_view(1, "app::Workspace", 0, ms(0.1)),
+            replayed_view(2, "app::Sidebar", 1, ms(0.1)),
+        ];
+        assert_eq!(
+            flame_layout(&record),
+            flame_layout(&frame(3, ms(100.0), ms(0.5)))
+        );
     }
 
     #[test]

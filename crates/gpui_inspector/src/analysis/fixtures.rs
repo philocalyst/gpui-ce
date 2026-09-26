@@ -92,6 +92,20 @@ pub fn cached_view(
     }
 }
 
+/// A view span of a frame that replayed the app: drawn by none of its own
+/// work, so it takes no time.
+pub fn replayed_view(
+    entity_id: u64,
+    type_name: &'static str,
+    depth: u16,
+    start: Duration,
+) -> ViewSpan {
+    ViewSpan {
+        outcome: ViewOutcome::Replayed,
+        ..view(entity_id, type_name, depth, start, Duration::ZERO)
+    }
+}
+
 /// An app input record at `at`, drawn by `frame`.
 pub fn input(seq: u64, at: Duration, kind: InputKind, frame: Option<u64>) -> InputRecord {
     InputRecord {

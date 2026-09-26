@@ -7,7 +7,10 @@
 //! places only the bars in the visible range, merging runs too narrow to
 //! read, so zooming redraws in time proportional to what is on screen.
 
-use super::text::{fit, shape};
+use super::{
+    model::app_note,
+    text::{fit, shape},
+};
 use crate::{
     analysis::{
         bottom_up, contrast,
@@ -77,8 +80,9 @@ pub(crate) struct FlameData {
     pub app_total: Duration,
     /// Loupe's share of the frame.
     pub loupe: Duration,
-    /// Drawn only for Loupe: the app was replayed, not rendered.
-    pub replayed: bool,
+    /// How the frame drew the app, when not simply by rendering it
+    /// ([`app_note`]).
+    pub note: Option<&'static str>,
     /// Rows and bars.
     pub layout: FlameLayout,
     /// For each bar of `layout.bars`, the view it stands for.
@@ -128,7 +132,7 @@ impl FlameData {
             budget_end: frame.start + budget,
             app_total: frame.timings.app_total(),
             loupe: frame.timings.inspector,
-            replayed: frame.inspector_only,
+            note: app_note(frame),
             layout,
             views,
             lanes,
@@ -316,6 +320,7 @@ pub(crate) fn bar_color(kind: BarKind, theme: &Theme) -> Hsla {
         BarKind::Frame => theme.colors.line_strong,
         BarKind::View(ViewOutcome::Rendered) => theme.phase(Phase::Render),
         BarKind::View(ViewOutcome::Cached) => theme.phase(Phase::Render).opacity(0.35),
+        BarKind::View(ViewOutcome::Replayed) => theme.colors.text_faint.opacity(0.35),
         BarKind::UserSpan => theme.colors.component,
         BarKind::Task => theme.phase(Phase::Paint),
         BarKind::Action => theme.phase(Phase::Prepaint),
@@ -331,6 +336,7 @@ pub(crate) fn kind_name(kind: BarKind) -> &'static str {
         BarKind::Frame => "frame",
         BarKind::View(ViewOutcome::Rendered) => "rendered view",
         BarKind::View(ViewOutcome::Cached) => "cached view",
+        BarKind::View(ViewOutcome::Replayed) => "replayed view",
         BarKind::UserSpan => "user span",
         BarKind::Task => "task",
         BarKind::Action => "action",
