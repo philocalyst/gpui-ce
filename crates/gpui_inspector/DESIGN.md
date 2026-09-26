@@ -218,7 +218,9 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
 Box model on hover/selection with a label chip (`div#close 24×24 ·
 issue_detail.rs:97`), outlines by depth, paint flashing, hitboxes, slow-frame
 border, overflow stripes, and UI-requested highlights (e.g. hovering a flame
-span highlights its element).
+span highlights its element). A lens hovers and highlights elements as its
+own entity, so it never clears what another lens put there, and the lens host
+withdraws everything a lens put on the overlay once another lens shows.
 
 Paint flashing outlines every view that rendered (not cached, not replayed)
 for ~300 ms, fading on the executor clock, colored by how often it rendered

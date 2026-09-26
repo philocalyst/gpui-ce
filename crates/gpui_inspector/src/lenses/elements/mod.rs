@@ -615,10 +615,8 @@ impl ElementsLens {
         let Some(capture) = window.inspector_capture_mut() else {
             return;
         };
-        let hovered = node.and_then(NodeKey::element);
         let overlay = capture.overlay_mut();
-        let moved = overlay.hovered != hovered;
-        overlay.hovered = hovered;
+        let moved = overlay.set_hovered(owner, node.and_then(NodeKey::element));
         if overlay.set_highlights(owner, highlight.into_iter().collect()) || moved {
             // The overlay is painted with the next frame.
             cx.notify();

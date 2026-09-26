@@ -303,7 +303,7 @@ fn the_detail_tells_where_a_fixture_click_went() {
     let hit = harness.bounds_of("events-hit-0");
     harness.hover(hit.center());
     assert_eq!(
-        harness.capture(|capture| capture.overlay().hovered),
+        harness.capture(|capture| capture.overlay().hovered()),
         Some(elements.row_3)
     );
     harness.click_selector("events-hit-1");
@@ -316,7 +316,17 @@ fn the_detail_tells_where_a_fixture_click_went() {
         Some(elements.issue_list)
     );
     harness.hover(gpui::point(px(100.), px(400.)));
-    assert_eq!(harness.capture(|capture| capture.overlay().hovered), None);
+    assert_eq!(harness.capture(|capture| capture.overlay().hovered()), None);
+
+    // Showing another lens withdraws a hover the pointer never left.
+    harness.hover(hit.center());
+    assert_eq!(
+        harness.capture(|capture| capture.overlay().hovered()),
+        Some(elements.row_3)
+    );
+    harness.type_keys("alt-4");
+    assert_eq!(harness.capture(|capture| capture.overlay().hovered()), None);
+    harness.type_keys("alt-3");
 
     // The frame it caused opens in Frames.
     harness.click_selector("events-frame");

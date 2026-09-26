@@ -130,7 +130,7 @@ impl Loupe {
         let subscriptions = vec![
             cx.subscribe_in(&inspector, window, Self::on_inspector_event),
             cx.observe_in(&state, window, |this, state, window, cx| {
-                this.sync_overlay_selection(&state, window, cx);
+                this.sync_overlay(&state, window, cx);
                 cx.notify();
             }),
             cx.observe_global_in::<LoupeSettings>(window, |this, window, cx| {
@@ -251,13 +251,17 @@ impl Loupe {
         }
     }
 
-    fn sync_overlay_selection(
+    /// Keeps the app's overlay in step with the shared state: it outlines the
+    /// selected element, and keeps nothing a hidden lens put there.
+    fn sync_overlay(
         &mut self,
         state: &Entity<LoupeState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let selected = state.read(cx).selected_element();
+        let state = state.read(cx);
+        let selected = state.selected_element();
+        self.lenses.show(state.lens(), window);
         if let Some(capture) = window.inspector_capture_mut()
             && capture.overlay().selected != selected
         {

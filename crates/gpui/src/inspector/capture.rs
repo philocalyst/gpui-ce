@@ -116,17 +116,30 @@ pub struct OverlayHighlight {
 }
 
 /// What the overlay pass paints this frame.
+///
+/// Views of the inspector's UI point at the app through it: each hovers
+/// and highlights elements as their owner, never touching what another view
+/// put there, and [`Self::withdraw`]s it all once it stops being shown.
 #[derive(Clone, Debug)]
 pub struct OverlayState {
     /// Enabled modes.
     pub modes: OverlayModes,
-    /// Element under the pointer while picking, or hovered in the inspector tree.
-    pub hovered: Option<ElementKey>,
+    /// The hovered element (see [`Self::hovered`]), and who hovers it.
+    hovered: Option<(Hoverer, ElementKey)>,
     /// The selected element; its outline persists after picking.
     pub selected: Option<ElementKey>,
     /// Extra highlights requested by the UI (findings, flame hover...), by
     /// owner, in the order the owners first set theirs.
     highlights: Vec<(EntityId, Vec<OverlayHighlight>)>,
+}
+
+/// Who hovers the element [`OverlayState::hovered`] returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hoverer {
+    /// The picker, following the pointer over the app.
+    Picker,
+    /// A view of the inspector's UI (a row the pointer is over).
+    View(EntityId),
 }
 
 impl Default for OverlayState {
@@ -141,6 +154,37 @@ impl Default for OverlayState {
 }
 
 impl OverlayState {
+    /// The hovered element, outlined with its box model: the one under the
+    /// pointer while picking, or the one a row of the inspector's UI points
+    /// at while the pointer is over that row.
+    pub fn hovered(&self) -> Option<ElementKey> {
+        self.hovered.map(|(_, key)| key)
+    }
+
+    /// Hovers `key` on behalf of `owner` (typically the entity of the view
+    /// whose row the pointer is over); `None` ends `owner`'s hover, leaving
+    /// one that someone else started since alone. Returns whether the
+    /// hovered element changed: the window paints the change on its next
+    /// frame, so the caller asks for one (by notifying its view).
+    pub fn set_hovered(&mut self, owner: EntityId, key: Option<ElementKey>) -> bool {
+        self.hover(Hoverer::View(owner), key)
+    }
+
+    /// Hovers `key` for the picker; `None` ends the picker's hover.
+    pub(crate) fn set_pick_hovered(&mut self, key: Option<ElementKey>) -> bool {
+        self.hover(Hoverer::Picker, key)
+    }
+
+    fn hover(&mut self, hoverer: Hoverer, key: Option<ElementKey>) -> bool {
+        let before = self.hovered();
+        match key {
+            Some(key) => self.hovered = Some((hoverer, key)),
+            None if self.hovered.is_some_and(|(by, _)| by == hoverer) => self.hovered = None,
+            None => {}
+        }
+        self.hovered() != before
+    }
+
     /// Replaces the highlights of `owner` (typically the entity of the view
     /// asking for them), leaving everyone else's alone; an empty list clears
     /// them. Returns whether anything changed: the window paints the change
@@ -171,6 +215,14 @@ impl OverlayState {
     /// Removes the highlights of `owner`. Returns whether it had any.
     pub fn clear_highlights(&mut self, owner: EntityId) -> bool {
         self.set_highlights(owner, Vec::new())
+    }
+
+    /// Withdraws everything `owner` put on the overlay, its highlights and
+    /// its hover, as when its view stops being shown. Returns whether
+    /// anything changed.
+    pub fn withdraw(&mut self, owner: EntityId) -> bool {
+        let unhovered = self.set_hovered(owner, None);
+        self.clear_highlights(owner) || unhovered
     }
 
     /// Every highlight, in the order they are painted.

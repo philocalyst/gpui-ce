@@ -74,7 +74,7 @@ impl InspectorCapture {
     fn overlays_need_tree(&self) -> bool {
         let overlay = self.overlay();
         self.pick.active
-            || overlay.hovered.is_some()
+            || overlay.hovered().is_some()
             || overlay.selected.is_some()
             || overlay.modes.intersects(
                 OverlayModes::OUTLINES

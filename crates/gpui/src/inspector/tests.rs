@@ -1292,7 +1292,7 @@ fn picking_selects_the_deepest_element_and_walks_up(cx: &mut TestAppContext) {
     assert!(cx.update(|window, cx| window.is_inspector_picking(cx)));
     let position = point(px(20.), px(30.));
     cx.simulate_mouse_move(position, None, Modifiers::none());
-    assert_eq!(read(cx, |capture| capture.overlay().hovered), Some(inner));
+    assert_eq!(read(cx, |capture| capture.overlay().hovered()), Some(inner));
     assert_eq!(
         events.borrow().last(),
         Some(&InspectorEvent::PickHovered(Some(inner)))
@@ -1305,16 +1305,16 @@ fn picking_selects_the_deepest_element_and_walks_up(cx: &mut TestAppContext) {
     );
 
     cx.simulate_keystrokes("]");
-    assert_eq!(read(cx, |capture| capture.overlay().hovered), Some(outer));
+    assert_eq!(read(cx, |capture| capture.overlay().hovered()), Some(outer));
     cx.simulate_keystrokes("[");
-    assert_eq!(read(cx, |capture| capture.overlay().hovered), Some(inner));
+    assert_eq!(read(cx, |capture| capture.overlay().hovered()), Some(inner));
     cx.simulate_event(ScrollWheelEvent {
         position,
         delta: ScrollDelta::Pixels(point(px(0.), px(36.))),
         modifiers: Modifiers::none(),
         touch_phase: TouchPhase::Moved,
     });
-    assert_eq!(read(cx, |capture| capture.overlay().hovered), Some(outer));
+    assert_eq!(read(cx, |capture| capture.overlay().hovered()), Some(outer));
     assert_eq!(read(cx, |capture| capture.pick().depth), 1);
 
     cx.simulate_click(position, Modifiers::none());
@@ -1342,7 +1342,7 @@ fn escape_or_stopping_cancels_picking(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(point(px(20.), px(30.)), None, Modifiers::none());
     cx.simulate_keystrokes("escape");
     assert!(!read(cx, |capture| capture.pick().active));
-    assert_eq!(read(cx, |capture| capture.overlay().hovered), None);
+    assert_eq!(read(cx, |capture| capture.overlay().hovered()), None);
     assert_eq!(events.borrow().last(), Some(&InspectorEvent::PickCancelled));
 
     events.borrow_mut().clear();
@@ -1710,6 +1710,46 @@ fn highlights_are_set_and_cleared_per_owner(cx: &mut TestAppContext) {
     assert!(painted(cx).is_empty());
 }
 
+#[test]
+fn hovers_belong_to_whoever_started_them() {
+    let (elements, events) = (EntityId::from(1u64), EntityId::from(2u64));
+    let key = |path| ElementKey {
+        path: PathKey(path),
+        instance: 0,
+    };
+    let mut overlay = OverlayState::default();
+
+    assert!(overlay.set_hovered(elements, Some(key(1))));
+    assert!(!overlay.set_hovered(elements, Some(key(1))), "unchanged");
+    // Another view takes the hover over; the first one ending its own no
+    // longer touches it.
+    assert!(overlay.set_hovered(events, Some(key(2))));
+    assert!(!overlay.set_hovered(elements, None));
+    assert_eq!(overlay.hovered(), Some(key(2)));
+    // Nor does the picker ending its hover.
+    assert!(!overlay.set_pick_hovered(None));
+    assert!(overlay.set_hovered(events, None));
+    assert_eq!(overlay.hovered(), None);
+
+    // Withdrawing a view takes its highlights and its hover, nobody else's.
+    let highlight = OverlayHighlight {
+        bounds: bounds(0., 0., 10., 10.),
+        color: blue(),
+        label: None,
+    };
+    overlay.set_highlights(elements, vec![highlight.clone()]);
+    overlay.set_highlights(events, vec![highlight]);
+    overlay.set_hovered(elements, Some(key(1)));
+    assert!(overlay.withdraw(elements));
+    assert_eq!(overlay.hovered(), None);
+    assert_eq!(overlay.highlights().count(), 1);
+    assert!(!overlay.withdraw(elements), "nothing left to withdraw");
+    assert!(overlay.set_pick_hovered(Some(key(3))));
+    assert!(overlay.withdraw(events));
+    assert_eq!(overlay.hovered(), Some(key(3)), "the picker's hover stays");
+    assert_eq!(overlay.highlights().count(), 0);
+}
+
 // Lifetime, freezing, dock.
 
 #[gpui::test]
@@ -1754,7 +1794,7 @@ fn freezing_stops_the_rings_but_not_picking(cx: &mut TestAppContext) {
     cx.update(|window, _| window.start_inspector_pick());
     cx.simulate_mouse_move(point(px(300.), px(50.)), None, Modifiers::none());
     let outer = key_of(&latest_tree(cx), "outer");
-    assert_eq!(read(cx, |capture| capture.overlay().hovered), Some(outer));
+    assert_eq!(read(cx, |capture| capture.overlay().hovered()), Some(outer));
 
     write(cx, |capture| capture.set_frozen(false));
     view.update(cx, |_, cx| cx.notify());
@@ -2135,7 +2175,7 @@ fn inspector_only_frames_replay_the_app(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(point(px(12.), px(12.)), None, Modifiers::none());
     assert!(app_replayed(cx));
     assert_eq!(
-        read(cx, |capture| capture.overlay().hovered),
+        read(cx, |capture| capture.overlay().hovered()),
         Some(key_of(&tree, "button"))
     );
     cx.update(|window, _| window.stop_inspector_pick());

@@ -64,8 +64,6 @@ pub(crate) struct EventsLens {
     /// The shared input selection this lens last showed, to tell when
     /// something else (a link from Frames, the palette) selected a record.
     shown_input: Option<u64>,
-    /// The element this lens asked the overlay to highlight.
-    hovered_element: Option<ElementKey>,
     badge: Cell<Option<(BadgeKey, usize)>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -118,7 +116,6 @@ impl EventsLens {
             key_tester,
             split: None,
             shown_input,
-            hovered_element: None,
             badge: Cell::new(None),
             _subscriptions: subscriptions,
         }
@@ -176,25 +173,30 @@ impl EventsLens {
         }
     }
 
-    /// Asks the overlay to highlight `key` in the app (or stop, for `None`).
+    /// Hovers `key` in the app while the pointer is over its hit-path row
+    /// (`hovered`), and stops when it leaves the row.
     fn hover_element(
         &mut self,
-        key: Option<ElementKey>,
+        key: ElementKey,
+        hovered: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let owner = cx.entity_id();
         let Some(capture) = window.inspector_capture_mut() else {
             return;
         };
         let overlay = capture.overlay_mut();
-        match key {
-            Some(key) => overlay.hovered = Some(key),
-            // Only clear what this lens set; another lens may own the hover.
-            None if overlay.hovered == self.hovered_element => overlay.hovered = None,
-            None => {}
+        let changed = if hovered {
+            overlay.set_hovered(owner, Some(key))
+        } else {
+            // The row the pointer entered may have taken the hover over.
+            overlay.hovered() == Some(key) && overlay.set_hovered(owner, None)
+        };
+        if changed {
+            // The overlay is painted with the next frame.
+            cx.notify();
         }
-        self.hovered_element = key;
-        cx.notify();
     }
 
     /// The log pane's size: what the user dragged it to, or 45% of the lens

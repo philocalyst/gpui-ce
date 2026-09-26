@@ -4,8 +4,8 @@
 //! screenshots to `target/loupe-shots/` for review.
 
 use gpui::{
-    AppContext as _, Context, IntoElement, Modifiers, ParentElement as _, PlatformInput, Render,
-    ScrollDelta, ScrollWheelEvent, Styled as _, TouchPhase, Window, div,
+    AppContext as _, Bounds, Context, IntoElement, Modifiers, ParentElement as _, PlatformInput,
+    Render, ScaledPixels, ScrollDelta, ScrollWheelEvent, Styled as _, TouchPhase, Window, div,
     inspector::{
         CauseKind, ElementFlags, ElementKey, ElementTree, InspectorDock, LayoutFacts, SizeSpec,
     },
@@ -355,11 +355,11 @@ fn hovering_a_row_outlines_its_element_in_the_app() {
     let row = harness.find_text("IssueList").unwrap();
     harness.hover(row.center());
     assert_eq!(
-        harness.capture(|capture| capture.overlay().hovered),
+        harness.capture(|capture| capture.overlay().hovered()),
         Some(elements.issue_list)
     );
     harness.hover(point(px(100.), px(100.)));
-    assert_eq!(harness.capture(|capture| capture.overlay().hovered), None);
+    assert_eq!(harness.capture(|capture| capture.overlay().hovered()), None);
 }
 
 #[test]
@@ -801,6 +801,63 @@ fn text_without_a_source_location_is_selectable_with_its_contrast() {
     harness.assert_text_visible("Contrast");
     harness.assert_text_visible("AA");
     harness.screenshot("elements-live-text");
+}
+
+#[test]
+fn a_lens_switched_away_from_leaves_nothing_over_the_app() {
+    let mut harness = live_harness();
+    // Loupe has the keyboard, as it does once the user clicked in it.
+    harness.click_text("Elements");
+    let bare = overlay_quads(&mut harness);
+
+    // A hovered row outlines its element in the app...
+    let card = live_record(&mut harness, "card");
+    let row = harness.find_text("div#card").expect("the card's row");
+    harness.hover(row.center());
+    assert_eq!(
+        harness.capture(|capture| capture.overlay().hovered()),
+        card.key
+    );
+    assert_ne!(overlay_quads(&mut harness), bare, "the hover box shows");
+    // ...until another lens shows: the next frame paints the app bare.
+    harness.type_keys("alt-2");
+    assert_eq!(harness.state(|state| state.lens()), Lens::Frames);
+    assert_eq!(harness.capture(|capture| capture.overlay().hovered()), None);
+    assert_eq!(overlay_quads(&mut harness), bare);
+
+    // Back in Elements, the same row outlines its element again.
+    harness.type_keys("alt-1");
+    harness.hover(row.center());
+    assert_eq!(
+        harness.capture(|capture| capture.overlay().hovered()),
+        card.key
+    );
+
+    // A row without a key highlights its element instead; that goes too.
+    let row = harness.find_text("\"Hello\"").expect("the text's row");
+    harness.hover(row.center());
+    let highlights = |harness: &mut LoupeHarness| {
+        harness.capture(|capture| capture.overlay().highlights().count())
+    };
+    assert_eq!(highlights(&mut harness), 1);
+    assert_ne!(overlay_quads(&mut harness), bare, "the highlight shows");
+    harness.type_keys("alt-2");
+    assert_eq!(highlights(&mut harness), 0);
+    assert_eq!(overlay_quads(&mut harness), bare);
+}
+
+/// The quads the last frame painted over the app, left of the dock: the
+/// app's own and the overlay's.
+fn overlay_quads(harness: &mut LoupeHarness) -> Vec<Bounds<ScaledPixels>> {
+    harness.update(|window, _| {
+        let app_right = f32::from(window.app_bounds().right()) * window.scale_factor();
+        window
+            .painted_quads()
+            .iter()
+            .filter(|quad| quad.bounds.origin.x.as_f32() < app_right)
+            .map(|quad| quad.bounds)
+            .collect()
+    })
 }
 
 #[test]

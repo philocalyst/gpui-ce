@@ -382,8 +382,8 @@ impl OverlayPass {
                 });
             };
             add_target(overlay.selected, true);
-            if overlay.hovered != overlay.selected {
-                add_target(overlay.hovered, false);
+            if overlay.hovered() != overlay.selected {
+                add_target(overlay.hovered(), false);
             }
         }
         OverlayPass {

@@ -277,7 +277,7 @@ impl EventsLens {
                     .child(short)
             }))
             .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-                this.hover_element(hovered.then_some(key), window, cx)
+                this.hover_element(key, *hovered, window, cx)
             }))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.state

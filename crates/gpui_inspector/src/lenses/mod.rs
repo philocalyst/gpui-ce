@@ -11,6 +11,8 @@
 //! * reads the capture in `render` through `window.inspector_capture()`,
 //! * reads and updates selection and filters through [`LoupeState`],
 //! * implements [`LensView::rail_badge`] for its live count in the rail,
+//! * points at the app through the capture's overlay as its own entity
+//!   (`cx.entity_id()`), which the host withdraws when the lens is hidden,
 //! * lays itself out for [`crate::state::LensLayout::of`] (stacked in narrow
 //!   right docks, side by side otherwise).
 
@@ -39,6 +41,7 @@ use crate::{
 use gpui::{
     AnyView, App, AppContext as _, Context, Entity, KeyBinding, Render, SharedString, Window,
 };
+use std::mem;
 
 /// The lenses with keys of their own, and the key context those apply in.
 pub(crate) const KEY_CONTEXTS: [(Lens, &str); 2] = [
@@ -114,13 +117,14 @@ pub(crate) trait LensView: Render {
     fn rail_badge(&self, window: &Window, cx: &App) -> Option<RailBadge>;
 }
 
-/// The five lens entities.
+/// The five lens entities, and which one is on screen.
 pub(crate) struct Lenses {
     elements: Entity<ElementsLens>,
     frames: Entity<FramesLens>,
     events: Entity<EventsLens>,
     entities: Entity<EntitiesLens>,
     audit: Entity<AuditLens>,
+    shown: Lens,
 }
 
 impl Lenses {
@@ -132,6 +136,22 @@ impl Lenses {
             events: cx.new(|cx| EventsLens::new(state.clone(), window, cx)),
             entities: cx.new(|cx| EntitiesLens::new(state.clone(), window, cx)),
             audit: cx.new(|cx| AuditLens::new(state.clone(), window, cx)),
+            shown: state.read(cx).lens(),
+        }
+    }
+
+    /// Puts `lens` on screen. Whatever the lens it replaces put on the app's
+    /// overlay (highlights, a hovered element) is withdrawn, so nothing a
+    /// hidden lens points at lingers over the app, however the lens changed
+    /// (a key, the rail, the palette, a link from another lens).
+    pub fn show(&mut self, lens: Lens, window: &mut Window) {
+        let hidden = mem::replace(&mut self.shown, lens);
+        if hidden != lens
+            && let Some(capture) = window.inspector_capture_mut()
+        {
+            capture
+                .overlay_mut()
+                .withdraw(self.view(hidden).entity_id());
         }
     }
 

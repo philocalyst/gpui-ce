@@ -389,7 +389,9 @@ impl<K: Clone + Eq + Hash + 'static> TreeState<K> {
 
     fn hover_node(&mut self, node: Option<usize>, cx: &mut Context<Self>) {
         let key = node.and_then(|node| self.model.nodes().get(node).map(|node| node.key.clone()));
-        if key != self.hovered {
+        // Entering a row always reports it: it may be the row hovered when
+        // the tree was hidden, which never saw the pointer leave.
+        if key.is_some() || key != self.hovered {
             self.hovered = key.clone();
             cx.emit(TreeEvent::Hovered(key));
         }

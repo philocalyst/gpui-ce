@@ -155,8 +155,7 @@ impl Window {
             return;
         };
         capture.pick.position = Some(position);
-        if capture.overlay.hovered != hovered {
-            capture.overlay.hovered = hovered;
+        if capture.overlay.set_pick_hovered(hovered) {
             self.emit_inspector_event(InspectorEvent::PickHovered(hovered), cx);
         }
         self.invalidator.set_dirty(true);
@@ -189,7 +188,7 @@ impl Window {
         capture.pick = PickState::default();
         capture.recorder.pick_scroll = 0.;
         if was_active {
-            capture.overlay.hovered = None;
+            capture.overlay.set_pick_hovered(None);
         }
         was_active
     }
