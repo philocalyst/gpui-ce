@@ -1442,41 +1442,206 @@ fn paint_flash_fades_in_inspector_only_frames(cx: &mut TestAppContext) {
     );
 }
 
+/// The paint flash quads the latest frame painted, in window pixels: the
+/// faint fills and the 2 px outlines (which the scene splits into strips,
+/// gathered back here), each with its color.
+#[derive(Debug, Default)]
+struct FlashQuads {
+    fills: Vec<(Bounds<Pixels>, Hsla)>,
+    outlines: Vec<(Bounds<Pixels>, Hsla)>,
+}
+
+impl FlashQuads {
+    fn of(cx: &mut VisualTestContext) -> Self {
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            let unscale = |bounds: Bounds<crate::ScaledPixels>| {
+                Bounds::new(
+                    point(px(bounds.origin.x.0 / scale), px(bounds.origin.y.0 / scale)),
+                    size(
+                        px(bounds.size.width.0 / scale),
+                        px(bounds.size.height.0 / scale),
+                    ),
+                )
+            };
+            let mut quads = FlashQuads::default();
+            for quad in window.painted_quads() {
+                let background = quad.background.as_solid().unwrap_or_default();
+                let border = quad.border_widths.top.0 / scale;
+                let rounded = quad.corner_radii.top_left.0 > 0.;
+                if border == 0. && !rounded && background.alpha > 0. {
+                    if background.alpha <= flash::FLASH_FILL_ALPHA + 1e-4 {
+                        quads.fills.push((unscale(quad.bounds), background));
+                    }
+                } else if (border - 2.).abs() < 1e-3 && background.alpha == 0. {
+                    let outline = (
+                        unscale(quad.bounds),
+                        quad.border_color.as_solid().unwrap_or_default(),
+                    );
+                    if !quads.outlines.contains(&outline) {
+                        quads.outlines.push(outline);
+                    }
+                }
+            }
+            quads
+        })
+    }
+
+    fn outline_at(&self, bounds: Bounds<Pixels>) -> Option<Hsla> {
+        self.outlines
+            .iter()
+            .find(|(outline, _)| *outline == bounds)
+            .map(|(_, color)| *color)
+    }
+}
+
+fn flash_on(cx: &mut VisualTestContext) {
+    write(cx, |capture| {
+        capture.overlay_mut().modes = OverlayModes::PAINT_FLASH
+    });
+}
+
+fn hue(color: Hsla) -> f32 {
+    color.color.hue.into_positive_degrees()
+}
+
 #[gpui::test]
 fn paint_flashes_fade_on_the_executor_clock(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|_, _| Nested::new());
     open(cx);
-    write(cx, |capture| {
-        capture.overlay_mut().modes = OverlayModes::PAINT_FLASH
-    });
+    flash_on(cx);
     view.update(cx, |_, cx| cx.notify());
     let tree = latest_tree(cx);
     let view_bounds = tree.get(tree.roots[0]).unwrap().bounds;
-    // The flash over the view that rendered (nothing else paints there): its
-    // opacity, if painted.
+    // The view's fill and outline opacities, while painted.
     let flash = |cx: &mut VisualTestContext| {
-        cx.update(|window, _| {
-            let bounds = view_bounds.scale(window.scale_factor());
-            window
-                .painted_quads()
-                .iter()
-                .find(|quad| quad.bounds == bounds)
-                .and_then(|quad| quad.background.as_solid())
-                .map(|color| color.alpha)
-        })
+        let quads = FlashQuads::of(cx);
+        let fill = quads
+            .fills
+            .iter()
+            .find(|(bounds, _)| *bounds == view_bounds)
+            .map(|(_, color)| color.alpha);
+        fill.zip(quads.outline_at(view_bounds).map(|color| color.alpha))
     };
-    let fresh = flash(cx).expect("the flash is painted");
-    assert!((fresh - 0.45).abs() < 1e-6, "{fresh}");
+    let (fill, outline) = flash(cx).expect("the flash is painted");
+    assert!((fill - flash::FLASH_FILL_ALPHA).abs() < 1e-6, "{fill}");
+    assert!((outline - 1.).abs() < 1e-6, "{outline}");
 
     // Half the fade later, on fake time, exactly half as opaque.
-    cx.executor().advance_clock(recorder::FLASH_DURATION / 2);
+    cx.executor().advance_clock(flash::FLASH_DURATION / 2);
     redraw_inspector_only(cx);
-    let half = flash(cx).expect("still fading");
-    assert!((half - 0.225).abs() < 1e-6, "{half}");
+    let (fill, outline) = flash(cx).expect("still fading");
+    assert!((fill - flash::FLASH_FILL_ALPHA / 2.).abs() < 1e-6, "{fill}");
+    assert!((outline - 0.5).abs() < 1e-6, "{outline}");
 
-    cx.executor().advance_clock(recorder::FLASH_DURATION / 2);
+    cx.executor().advance_clock(flash::FLASH_DURATION / 2);
     redraw_inspector_only(cx);
     assert_eq!(flash(cx), None, "faded out");
+    assert!(
+        !cx.update(|window, _| window.invalidator.is_dirty()),
+        "and nothing more is drawn for it"
+    );
+}
+
+#[gpui::test]
+fn nested_views_flash_one_faint_fill_and_an_outline_each(cx: &mut TestAppContext) {
+    let (view, cx) = parent(cx, false);
+    open(cx);
+    flash_on(cx);
+    view.update(cx, |_, cx| cx.notify());
+    let tree = latest_tree(cx);
+    let view_bounds = |entity: EntityId| {
+        let ix = tree
+            .elements
+            .iter()
+            .position(|record| {
+                matches!(record.kind, ElementKind::View { entity: drawn, .. } if drawn == entity)
+            })
+            .expect("the view is drawn");
+        tree.elements[ix].bounds
+    };
+    let child = view.read_with(cx, |parent, _| parent.child.entity_id());
+    let (outer, inner) = (view_bounds(view.entity_id()), view_bounds(child));
+    assert_ne!(outer, inner);
+
+    let quads = FlashQuads::of(cx);
+    assert_eq!(quads.outlines.len(), 2, "{quads:?}");
+    assert!(quads.outline_at(outer).is_some() && quads.outline_at(inner).is_some());
+    // Under both flashes, the app shows through all but the faint fill.
+    let center = inner.center();
+    let covering: Vec<f32> = quads
+        .fills
+        .iter()
+        .filter(|(bounds, _)| bounds.contains(&center))
+        .map(|(_, color)| color.alpha)
+        .collect();
+    assert_eq!(covering.len(), 1, "{quads:?}");
+    assert!(covering.iter().sum::<f32>() <= flash::FLASH_FILL_ALPHA + 1e-6);
+}
+
+#[gpui::test]
+fn a_cached_view_that_did_not_render_does_not_flash(cx: &mut TestAppContext) {
+    let (view, cx) = parent(cx, true);
+    open(cx);
+    flash_on(cx);
+    view.update(cx, |_, cx| cx.notify());
+    let tree = latest_tree(cx);
+    let parent_bounds = record(&tree, "parent").bounds;
+    let quads = FlashQuads::of(cx);
+    assert_eq!(
+        quads.outlines.len(),
+        1,
+        "only the parent rendered: {quads:?}"
+    );
+    assert!(quads.outline_at(parent_bounds).is_some());
+}
+
+#[gpui::test]
+fn flashes_are_colored_by_render_rate_and_hot_views_labeled(cx: &mut TestAppContext) {
+    let (view, cx) = parent(cx, true);
+    open(cx);
+    flash_on(cx);
+    let child = view.read_with(cx, |parent, _| parent.child.clone());
+    let labels = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .painted_text()
+                .iter()
+                .map(|line| line.text.to_string())
+                .filter(|text| text.contains(" ×") && text.ends_with("/s"))
+                .collect::<Vec<_>>()
+        })
+    };
+
+    // A one-off render, long after anything else rendered: a teal blink.
+    cx.executor().advance_clock(Duration::from_secs(2));
+    child.update(cx, |_, cx| cx.notify());
+    let tree = latest_tree(cx);
+    let child_bounds = record(&tree, "leaf-root").bounds;
+    let blink = FlashQuads::of(cx)
+        .outline_at(child_bounds)
+        .expect("the child flashed");
+    assert!((hue(blink) - 180.).abs() < 1., "teal: {}", hue(blink));
+    assert!(labels(cx).is_empty());
+
+    // The parent renders every frame for a second: it glows red, labeled.
+    for _ in 0..60 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        view.update(cx, |_, cx| cx.notify());
+    }
+    let parent_bounds = record(&latest_tree(cx), "parent").bounds;
+    let glow = FlashQuads::of(cx)
+        .outline_at(parent_bounds)
+        .expect("the parent flashed");
+    assert!(hue(glow) < 1. || hue(glow) > 359., "red: {}", hue(glow));
+    let labels = labels(cx);
+    assert_eq!(labels.len(), 1, "{labels:?}");
+    let rate: u32 = labels[0]
+        .trim_start_matches("Parent ×")
+        .trim_end_matches("/s")
+        .parse()
+        .unwrap_or_else(|_| panic!("{labels:?}"));
+    assert!(rate >= HOT_RENDERS_PER_SECOND, "{rate}");
 }
 
 /// Draws the frame a fading paint flash asks for: the inspector's alone.

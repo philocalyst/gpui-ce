@@ -29,8 +29,10 @@ pub const DOMINANT_VIEW_SHARE: f64 = 0.5;
 /// Rates ("per second", "in the last second") are measured over this window,
 /// ending at the latest app frame.
 pub const RECENT_WINDOW: Duration = Duration::from_secs(1);
-/// A view rendering at least this often within [`RECENT_WINDOW`] is a hot spot.
-pub const HOT_VIEW_RENDERS: u32 = 30;
+/// A view rendering at least this often within [`RECENT_WINDOW`] is a hot
+/// spot: the engine's threshold, which the paint flash also colors and
+/// labels by.
+pub const HOT_VIEW_RENDERS: u32 = gpui::inspector::HOT_RENDERS_PER_SECOND;
 /// An entity notifying at least this many times per second is storming.
 pub const NOTIFY_STORM_PER_SECOND: u64 = 60;
 /// Main-thread work before a frame at least this share of the budget is "long".

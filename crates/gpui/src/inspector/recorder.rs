@@ -177,16 +177,6 @@ struct Splice {
     global_id: GlobalElementId,
 }
 
-/// A view that re-rendered recently; the overlay flashes its bounds.
-pub(crate) struct Flash {
-    pub(crate) bounds: Bounds<Pixels>,
-    /// When the view rendered, on the capture's clock.
-    pub(crate) started: Instant,
-}
-
-/// How long a paint flash takes to fade out.
-pub(crate) const FLASH_DURATION: Duration = Duration::from_millis(300);
-
 /// Engine-side state of an [`super::InspectorCapture`]: the frame being
 /// recorded plus what carries over between frames.
 pub(crate) struct Recorder {
@@ -236,7 +226,7 @@ pub(crate) struct Recorder {
     pub(crate) inspector_entities: FxHashSet<EntityId>,
     element_labels: FxHashMap<ElementId, SharedString>,
     pub(crate) live_tree: Option<Arc<ElementTree>>,
-    pub(crate) flashes: Vec<Flash>,
+    pub(crate) flashes: Vec<super::flash::Flash>,
     pub(crate) last_viewport: Option<Size<Pixels>>,
     pub(crate) last_input_seq: u64,
     pub(crate) notify_bucket: u64,
@@ -885,12 +875,12 @@ impl Recorder {
         self.element_count
     }
 
-    /// The records of the views that rendered this frame.
-    pub(crate) fn views_rendered(&self) -> impl Iterator<Item = ElementIndex> + '_ {
+    /// The views that rendered this frame, with their records.
+    pub(crate) fn views_rendered(&self) -> impl Iterator<Item = (&ViewSpan, ElementIndex)> + '_ {
         self.views
             .iter()
             .filter(|view| view.outcome == ViewOutcome::Rendered)
-            .filter_map(|view| view.element)
+            .filter_map(|view| Some((view, view.element?)))
     }
 
     /// Whether the last frame that rendered the app recorded all this frame

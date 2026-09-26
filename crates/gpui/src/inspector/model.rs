@@ -334,6 +334,11 @@ pub struct ViewSpan {
     pub outcome: ViewOutcome,
 }
 
+/// A view rendering at least this often per second is a render hot spot:
+/// the paint flash colors it hottest and labels it, and Loupe's insights
+/// and audit flag it.
+pub const HOT_RENDERS_PER_SECOND: u32 = 30;
+
 /// Whether a view produced a new element tree this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewOutcome {

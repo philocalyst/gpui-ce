@@ -11,7 +11,8 @@ use crate::inspector::{
     CaptureClock, CaptureLevel, CauseKind, ElementDetails, ElementFlags, ElementKey, FrameRecord,
     InspectorCapture, InspectorEvent, OverlayModes, SceneStats, SelectedStyle, ViewOutcome,
     causes::{self, CauseLog},
-    recorder::{FLASH_DURATION, Flash, Phase, RecordMode, RecordSlot},
+    flash::{self, Flash},
+    recorder::{Phase, RecordMode, RecordSlot},
 };
 use crate::inspector::{ForcedStates, user_span::recording as spans};
 use crate::{InspectorElementId, InspectorElementPath, StyleRefinement};
@@ -226,26 +227,34 @@ impl Window {
         }
         let frame = capture.next_frame_id;
         let tree = capture.recorder.finish_tree(frame);
-        let flashing = capture.overlay.modes.contains(OverlayModes::PAINT_FLASH);
-        let now = capture.clock.instant();
         let recorder = &mut capture.recorder;
-        recorder.flashes.retain(|flash| {
-            flashing && now.saturating_duration_since(flash.started) < FLASH_DURATION
-        });
-        if flashing
-            && !recorder.inspector_only
-            && let Some(tree) = tree
-        {
-            let rendered = recorder
-                .views_rendered()
-                .filter_map(|element| tree.get(element))
-                .map(|record| Flash {
-                    bounds: record.bounds,
-                    started: now,
-                })
-                .collect::<Vec<_>>();
-            recorder.flashes.extend(rendered);
+        if !capture.overlay.modes.contains(OverlayModes::PAINT_FLASH) {
+            recorder.flashes.clear();
+            return;
         }
+        let now = capture.clock.instant();
+        let fresh = match tree.filter(|_| !recorder.inspector_only) {
+            Some(tree) => {
+                // This frame is not recorded yet: its renders count on top.
+                let counts = flash::render_counts(&capture.frames, capture.clock.offset(now));
+                recorder
+                    .views_rendered()
+                    .filter_map(|(view, element)| {
+                        let record = tree.get(element)?;
+                        Some(Flash {
+                            entity: view.entity,
+                            type_name: view.type_name,
+                            bounds: record.bounds,
+                            depth: record.depth,
+                            rate: counts.get(&view.entity).copied().unwrap_or(0) + 1,
+                            started: now,
+                        })
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        flash::update(&mut recorder.flashes, now, fresh);
     }
 
     /// Completes the frame's record and appends it to the capture.

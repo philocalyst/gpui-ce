@@ -27,6 +27,8 @@ pub(crate) mod describe;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod entities;
 #[cfg(any(feature = "inspector", debug_assertions))]
+pub(crate) mod flash;
+#[cfg(any(feature = "inspector", debug_assertions))]
 mod input;
 #[cfg(any(feature = "inspector", debug_assertions))]
 mod keys;

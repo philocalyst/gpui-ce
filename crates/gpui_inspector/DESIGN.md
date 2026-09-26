@@ -216,9 +216,16 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
 ### Overlays (painted by the engine from `OverlayState`)
 
 Box model on hover/selection with a label chip (`div#close 24×24 ·
-issue_detail.rs:97`), outlines by depth, paint flashing for re-rendered views
-(fades over ~300 ms), hitboxes, slow-frame border, overflow stripes, and
-UI-requested highlights (e.g. hovering a flame span highlights its element).
+issue_detail.rs:97`), outlines by depth, paint flashing, hitboxes, slow-frame
+border, overflow stripes, and UI-requested highlights (e.g. hovering a flame
+span highlights its element).
+
+Paint flashing outlines every view that rendered (not cached, not replayed)
+for ~300 ms, fading on the executor clock, colored by how often it rendered
+in the last second: a one-off render blinks teal, rising through amber to red
+at `HOT_RENDERS_PER_SECOND` (30/s, the render hot-spot threshold). Only views
+no other flash encloses get a faint fill (≤ 12%), so the app stays legible;
+the hottest views (at most three) get a chip, `IssueList ×32/s`.
 
 ### Visual language
 

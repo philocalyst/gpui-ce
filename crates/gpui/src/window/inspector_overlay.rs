@@ -7,9 +7,10 @@ use super::*;
 use crate::inspector::{
     CauseKind, ElementFlags, ElementKey, ElementRecord, ElementTree, InspectorCapture,
     OverlayHighlight, OverlayModes,
-    recorder::{FLASH_DURATION, RecordMode},
+    flash::{self, FLASH_FILL_ALPHA},
+    recorder::RecordMode,
 };
-use crate::{PathBuilder, TextAlign, hsla, rgba};
+use crate::{PathBuilder, Rgba, ShapedLine, TextAlign, hsla, rgba};
 
 /// Web inspector conventions, translucent so the app shows through.
 const MARGIN_COLOR: u32 = 0xf6b26ba8;
@@ -25,6 +26,13 @@ const CHIP_FONT_SIZE: Pixels = px(11.);
 const CHIP_LINE_HEIGHT: Pixels = px(16.);
 const CHIP_PADDING: Point<Pixels> = point(px(6.), px(2.));
 const CHIP_GAP: Pixels = px(2.);
+const CHIP_SWATCH: Pixels = px(8.);
+const CHIP_SWATCH_GAP: Pixels = px(4.);
+/// A paint flash's outline, drawn inside the view's bounds...
+const FLASH_OUTLINE: Pixels = px(2.);
+/// ...with a dark halo just outside, so it reads over light and dark apps.
+const FLASH_HALO: Pixels = px(1.);
+const FLASH_HALO_ALPHA: f32 = 0.5;
 const SLOW_FRAME_BORDER: Pixels = px(3.);
 const STRIPE_SPACING: f32 = 6.;
 
@@ -42,9 +50,22 @@ struct OverlayPass {
     tree: Option<Arc<ElementTree>>,
     targets: SmallVec<[BoxTarget; 2]>,
     highlights: Vec<OverlayHighlight>,
-    flashes: Vec<(Bounds<Pixels>, f32)>,
+    flashes: Vec<FlashPaint>,
     hitboxes: Vec<(Hitbox, bool)>,
     slow_frame: bool,
+}
+
+/// A paint flash, as this pass draws it.
+struct FlashPaint {
+    bounds: Bounds<Pixels>,
+    /// How often the view renders ([`flash::heat_color`]).
+    color: Hsla,
+    /// How far it has faded: 1 when it starts, 0 once over.
+    strength: f32,
+    /// Whether it also gets the faint fill (nothing else flashing encloses it).
+    filled: bool,
+    /// `IssueList ×32/s`, for the hottest views.
+    label: Option<SharedString>,
 }
 
 /// A hovered or selected element, drawn with its box model and a label.
@@ -89,9 +110,7 @@ impl Window {
         for (hitbox, listening) in &pass.hitboxes {
             self.paint_hitbox(hitbox, *listening);
         }
-        for &(bounds, alpha) in &pass.flashes {
-            self.paint_quad(fill(bounds, hsla(0.83, 0.9, 0.6, alpha)));
-        }
+        self.paint_flashes(&pass.flashes, app_bounds, cx);
         for highlight in &pass.highlights {
             let border = crate::Hsla {
                 alpha: 1.,
@@ -221,6 +240,52 @@ impl Window {
         self.paint_quad(fill(content_box, rgba(CONTENT_COLOR)));
     }
 
+    /// Paints the paint flashes: the faint fills first, then every outline
+    /// with its halo, then the labels of the hottest views, which never
+    /// cover each other.
+    fn paint_flashes(&mut self, flashes: &[FlashPaint], area: Bounds<Pixels>, cx: &mut App) {
+        for flash in flashes.iter().filter(|flash| flash.filled) {
+            let color = Hsla {
+                alpha: FLASH_FILL_ALPHA * flash.strength,
+                ..flash.color
+            };
+            self.paint_quad(fill(flash.bounds, color));
+        }
+        for flash in flashes {
+            let halo = hsla(0., 0., 0., FLASH_HALO_ALPHA * flash.strength);
+            self.paint_quad(quad(
+                flash.bounds.dilate(FLASH_HALO),
+                px(0.),
+                transparent_black(),
+                FLASH_HALO,
+                halo,
+                BorderStyle::Solid,
+            ));
+            self.paint_quad(quad(
+                flash.bounds,
+                px(0.),
+                transparent_black(),
+                FLASH_OUTLINE,
+                Hsla {
+                    alpha: flash.strength,
+                    ..flash.color
+                },
+                BorderStyle::Solid,
+            ));
+        }
+        let mut placed = Vec::new();
+        for flash in flashes {
+            let Some(label) = &flash.label else {
+                continue;
+            };
+            let chip = self.shape_chip(label.clone(), Some(flash.color), flash.strength);
+            if let Some(origin) = chip_origin_clear_of(flash.bounds, chip.size, area, &placed) {
+                self.paint_chip(&chip, origin, flash.strength, cx);
+                placed.push(Bounds::new(origin, chip.size));
+            }
+        }
+    }
+
     /// Paints `text` in a chip next to `anchor`, kept inside `area`.
     fn paint_label_chip(
         &mut self,
@@ -229,30 +294,70 @@ impl Window {
         area: Bounds<Pixels>,
         cx: &mut App,
     ) {
+        let chip = self.shape_chip(text, None, 1.);
+        let origin = chip_origin(anchor, chip.size, area);
+        self.paint_chip(&chip, origin, 1., cx);
+    }
+
+    /// Shapes a chip's text, `opacity` opaque, after a `swatch` of color.
+    fn shape_chip(&mut self, text: SharedString, swatch: Option<Hsla>, opacity: f32) -> Chip {
         let mut text_style = self.text_style();
-        text_style.color = hsla(0., 0., 0.95, 1.);
+        text_style.color = hsla(0., 0., 0.95, opacity);
         let run = text_style.to_run(text.len());
         let line = self
             .text_system()
             .shape_line(text, CHIP_FONT_SIZE, &[run], None);
-        let chip_size = size(
-            line.width + CHIP_PADDING.x * 2.,
+        let swatch_width = if swatch.is_some() {
+            CHIP_SWATCH + CHIP_SWATCH_GAP
+        } else {
+            px(0.)
+        };
+        let size = size(
+            swatch_width + line.width + CHIP_PADDING.x * 2.,
             CHIP_LINE_HEIGHT + CHIP_PADDING.y * 2.,
         );
-        let origin = chip_origin(anchor, chip_size, area);
-        self.paint_quad(
-            fill(Bounds::new(origin, chip_size), rgba(CHIP_BACKGROUND)).corner_radii(px(3.)),
-        );
-        line.paint(
-            origin + CHIP_PADDING,
-            CHIP_LINE_HEIGHT,
-            TextAlign::Left,
-            None,
-            self,
-            cx,
-        )
-        .log_err();
+        Chip { line, swatch, size }
     }
+
+    /// Paints a shaped chip at `origin`, `opacity` opaque.
+    fn paint_chip(&mut self, chip: &Chip, origin: Point<Pixels>, opacity: f32, cx: &mut App) {
+        let background = rgba(CHIP_BACKGROUND);
+        let background = Rgba {
+            alpha: background.alpha * opacity,
+            ..background
+        };
+        self.paint_quad(fill(Bounds::new(origin, chip.size), background).corner_radii(px(3.)));
+        let mut text_origin = origin + CHIP_PADDING;
+        if let Some(swatch) = chip.swatch {
+            let top = origin.y + (chip.size.height - CHIP_SWATCH) / 2.;
+            let dot = Bounds::new(point(text_origin.x, top), size(CHIP_SWATCH, CHIP_SWATCH));
+            let swatch = Hsla {
+                alpha: opacity,
+                ..swatch
+            };
+            self.paint_quad(fill(dot, swatch).corner_radii(CHIP_SWATCH / 2.));
+            text_origin.x += CHIP_SWATCH + CHIP_SWATCH_GAP;
+        }
+        chip.line
+            .paint(
+                text_origin,
+                CHIP_LINE_HEIGHT,
+                TextAlign::Left,
+                None,
+                self,
+                cx,
+            )
+            .log_err();
+    }
+}
+
+/// A label chip, shaped and measured: light text on a dark rounded
+/// rectangle, legible over light and dark apps, with an optional swatch of
+/// color before the text.
+struct Chip {
+    line: ShapedLine,
+    swatch: Option<Hsla>,
+    size: Size<Pixels>,
 }
 
 impl OverlayPass {
@@ -281,16 +386,6 @@ impl OverlayPass {
                 add_target(overlay.hovered, false);
             }
         }
-        let now = capture.clock.instant();
-        let flashes = recorder
-            .flashes
-            .iter()
-            .map(|flash| {
-                let progress = now.saturating_duration_since(flash.started).as_secs_f32()
-                    / FLASH_DURATION.as_secs_f32();
-                (flash.bounds, 0.45 * (1. - progress).clamp(0., 1.))
-            })
-            .collect();
         OverlayPass {
             modes,
             highlights: overlay.highlights.clone(),
@@ -305,9 +400,41 @@ impl OverlayPass {
                     .is_some_and(|frame| frame.timings.app_total() > capture.config().budget),
             tree,
             targets,
-            flashes,
+            flashes: flash_paints(capture),
         }
     }
+}
+
+/// The paint flashes still fading, with their fills and labels chosen among
+/// them (an inner view's flash gets the fill once the outer one is over),
+/// labeled ones first, hottest first.
+fn flash_paints(capture: &InspectorCapture) -> Vec<FlashPaint> {
+    let now = capture.clock.instant();
+    let live: Vec<flash::Flash> = capture
+        .recorder
+        .flashes
+        .iter()
+        .filter(|flash| flash.strength(now) > 0.)
+        .cloned()
+        .collect();
+    let filled = flash::filled(&live);
+    let hot = flash::hot(&live);
+    let order = hot
+        .iter()
+        .copied()
+        .chain((0..live.len()).filter(|ix| !hot.contains(ix)));
+    order
+        .map(|ix| {
+            let flash = &live[ix];
+            FlashPaint {
+                bounds: flash.bounds,
+                color: flash::heat_color(flash.rate),
+                strength: flash.strength(now),
+                filled: filled[ix],
+                label: hot.contains(&ix).then(|| flash.label().into()),
+            }
+        })
+        .collect()
 }
 
 /// The app's hitboxes (not the dock's), each with whether its owner listens
@@ -363,6 +490,28 @@ fn format_pixels(pixels: Pixels) -> String {
     } else {
         format!("{value:.1}")
     }
+}
+
+/// Where a chip for `anchor` goes (see [`chip_origin`]) without covering
+/// the chips already `placed`: moved down past any it would overlap, or
+/// `None` once it no longer fits in `area`.
+fn chip_origin_clear_of(
+    anchor: Bounds<Pixels>,
+    chip: Size<Pixels>,
+    area: Bounds<Pixels>,
+    placed: &[Bounds<Pixels>],
+) -> Option<Point<Pixels>> {
+    let mut origin = chip_origin(anchor, chip, area);
+    while let Some(covered) = placed
+        .iter()
+        .find(|placed| placed.intersects(&Bounds::new(origin, chip)))
+    {
+        origin.y = covered.bottom() + CHIP_GAP;
+        if origin.y + chip.height > area.bottom() {
+            return None;
+        }
+    }
+    Some(origin)
 }
 
 /// Where a label chip for `anchor` goes: above it, else below it, else
@@ -431,6 +580,36 @@ mod tests {
         // Filling the area: inside its top edge.
         let chip_origin = chip_origin(area, chip, area);
         assert_eq!(chip_origin, point(px(0.), px(0.)));
+    }
+
+    #[test]
+    fn chips_move_down_past_the_ones_already_placed() {
+        let area = Bounds::new(point(px(0.), px(0.)), size(px(200.), px(100.)));
+        let chip = size(px(80.), px(20.));
+        let anchor = Bounds::new(point(px(10.), px(50.)), size(px(20.), px(20.)));
+        let first = Bounds::new(point(px(10.), px(28.)), chip);
+        assert_eq!(
+            chip_origin_clear_of(anchor, chip, area, &[]),
+            Some(first.origin)
+        );
+
+        // Its spot is taken: just below that chip, then below the next one.
+        let second = chip_origin_clear_of(anchor, chip, area, &[first]).unwrap();
+        assert_eq!(second, point(px(10.), px(50.)));
+        let placed = [first, Bounds::new(second, chip)];
+        let third = chip_origin_clear_of(anchor, chip, area, &placed).unwrap();
+        assert_eq!(third, point(px(10.), px(72.)));
+
+        // A chip that touches nothing placed stays where it goes.
+        let elsewhere = Bounds::new(point(px(150.), px(28.)), size(px(40.), px(20.)));
+        assert_eq!(
+            chip_origin_clear_of(anchor, chip, area, &[elsewhere]),
+            Some(first.origin)
+        );
+
+        // No room left below: no chip.
+        let full = [first, Bounds::new(second, chip), Bounds::new(third, chip)];
+        assert_eq!(chip_origin_clear_of(anchor, chip, area, &full), None);
     }
 
     #[test]
