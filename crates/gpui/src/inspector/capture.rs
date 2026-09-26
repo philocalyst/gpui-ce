@@ -4,7 +4,7 @@
 //! every recording hook costs a single `Option` check when it is closed.
 
 use super::model::*;
-use crate::{Bounds, Hsla, Pixels, SharedString, Size, StyleRefinement, px};
+use crate::{Bounds, EntityId, Hsla, Pixels, SharedString, Size, StyleRefinement, px};
 use collections::FxHashMap;
 use scheduler::Instant;
 use std::{collections::VecDeque, panic::Location, rc::Rc, sync::Arc, time::Duration};
@@ -103,8 +103,9 @@ bitflags::bitflags! {
     }
 }
 
-/// A UI-requested highlight, painted by the overlay pass.
-#[derive(Clone, Debug)]
+/// A UI-requested highlight, painted by the overlay pass. Highlights belong
+/// to an owner (see [`OverlayState::set_highlights`]).
+#[derive(Clone, Debug, PartialEq)]
 pub struct OverlayHighlight {
     /// Region, in window coordinates.
     pub bounds: Bounds<Pixels>,
@@ -123,8 +124,9 @@ pub struct OverlayState {
     pub hovered: Option<ElementKey>,
     /// The selected element; its outline persists after picking.
     pub selected: Option<ElementKey>,
-    /// Extra highlights requested by the UI (findings, flame hover...).
-    pub highlights: Vec<OverlayHighlight>,
+    /// Extra highlights requested by the UI (findings, flame hover...), by
+    /// owner, in the order the owners first set theirs.
+    highlights: Vec<(EntityId, Vec<OverlayHighlight>)>,
 }
 
 impl Default for OverlayState {
@@ -135,6 +137,47 @@ impl Default for OverlayState {
             selected: None,
             highlights: Vec::new(),
         }
+    }
+}
+
+impl OverlayState {
+    /// Replaces the highlights of `owner` (typically the entity of the view
+    /// asking for them), leaving everyone else's alone; an empty list clears
+    /// them. Returns whether anything changed: the window paints the change
+    /// on its next frame, so the caller asks for one (by notifying its view).
+    pub fn set_highlights(&mut self, owner: EntityId, highlights: Vec<OverlayHighlight>) -> bool {
+        let slot = self
+            .highlights
+            .iter()
+            .position(|(existing, _)| *existing == owner);
+        match slot {
+            Some(ix) if highlights.is_empty() => {
+                self.highlights.remove(ix);
+                true
+            }
+            Some(ix) if self.highlights[ix].1 == highlights => false,
+            Some(ix) => {
+                self.highlights[ix].1 = highlights;
+                true
+            }
+            None if highlights.is_empty() => false,
+            None => {
+                self.highlights.push((owner, highlights));
+                true
+            }
+        }
+    }
+
+    /// Removes the highlights of `owner`. Returns whether it had any.
+    pub fn clear_highlights(&mut self, owner: EntityId) -> bool {
+        self.set_highlights(owner, Vec::new())
+    }
+
+    /// Every highlight, in the order they are painted.
+    pub fn highlights(&self) -> impl Iterator<Item = &OverlayHighlight> {
+        self.highlights
+            .iter()
+            .flat_map(|(_, highlights)| highlights)
     }
 }
 

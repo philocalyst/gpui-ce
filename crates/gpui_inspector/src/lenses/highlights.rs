@@ -1,36 +1,38 @@
 //! Highlights a lens paints on the app through the capture's overlay.
 //!
-//! Several lenses want to point at elements in the app (a hovered flame bar,
-//! a selected audit finding), but the overlay has one list of highlights.
-//! [`LensHighlights`] gives each lens its own: a pinned set (a selection)
-//! and a transient hover set that wins while it lasts. Only the lens on
-//! screen shows its highlights; hiding a lens withdraws what it applied,
-//! unless another lens has replaced it meanwhile.
+//! Several lenses point at elements in the app (a hovered flame bar, a
+//! selected audit finding). The overlay keeps each owner's highlights apart,
+//! so a lens sets and clears its own without touching another's.
+//! [`LensHighlights`] holds a lens' pinned set (a selection) and a transient
+//! hover set that wins while it lasts, and shows them only while the lens is
+//! on screen.
 
 use crate::state::Lens;
 use gpui::{
-    Hsla, SharedString, Window,
+    EntityId, Hsla, SharedString, Window,
     inspector::{ElementKey, ElementTree, OverlayHighlight},
 };
 
 /// One lens' highlights on the app.
 pub(crate) struct LensHighlights {
     lens: Lens,
+    /// Whose highlights they are in the overlay: the lens' entity.
+    owner: EntityId,
     shown: bool,
     pinned: Vec<OverlayHighlight>,
     hover: Option<Vec<OverlayHighlight>>,
-    applied: Vec<OverlayHighlight>,
 }
 
 impl LensHighlights {
-    /// Highlights owned by `lens`, hidden until [`Self::sync`] shows them.
-    pub fn new(lens: Lens) -> Self {
+    /// Highlights of `lens`, set in the overlay as `owner`'s (the lens'
+    /// entity), hidden until [`Self::sync`] shows them.
+    pub fn new(lens: Lens, owner: EntityId) -> Self {
         Self {
             lens,
+            owner,
             shown: false,
             pinned: Vec::new(),
             hover: None,
-            applied: Vec::new(),
         }
     }
 
@@ -75,31 +77,13 @@ impl LensHighlights {
         let Some(capture) = window.inspector_capture_mut() else {
             return false;
         };
-        let overlay = capture.overlay_mut();
-        let desired = if self.shown {
-            self.hover.as_ref().unwrap_or(&self.pinned).clone()
-        } else if same(&overlay.highlights, &self.applied) {
-            Vec::new()
-        } else {
-            // Another lens has taken over the overlay; leave it alone.
-            self.applied.clear();
-            return false;
+        let shown = match (self.shown, &self.hover) {
+            (false, _) => Vec::new(),
+            (true, Some(hover)) => hover.clone(),
+            (true, None) => self.pinned.clone(),
         };
-        if same(&overlay.highlights, &desired) {
-            self.applied = desired;
-            return false;
-        }
-        overlay.highlights = desired.clone();
-        self.applied = desired;
-        true
+        capture.overlay_mut().set_highlights(self.owner, shown)
     }
-}
-
-fn same(a: &[OverlayHighlight], b: &[OverlayHighlight]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(a, b)| a.bounds == b.bounds && a.color == b.color && a.label == b.label)
 }
 
 /// A highlight over the element `key` in `tree`, if it is there.
@@ -135,9 +119,11 @@ mod tests {
         }
     }
 
-    fn bounds_of(highlights: &[OverlayHighlight]) -> Vec<Bounds<Pixels>> {
+    fn bounds_of<'a>(
+        highlights: impl IntoIterator<Item = &'a OverlayHighlight>,
+    ) -> Vec<Bounds<Pixels>> {
         highlights
-            .iter()
+            .into_iter()
             .map(|highlight| highlight.bounds)
             .collect()
     }
@@ -151,7 +137,7 @@ mod tests {
     }
 
     fn overlay(cx: &mut VisualTestContext) -> Vec<Bounds<Pixels>> {
-        cx.update(|window, _| bounds_of(&window.inspector_capture().unwrap().overlay().highlights))
+        cx.update(|window, _| bounds_of(window.inspector_capture().unwrap().overlay().highlights()))
     }
 
     #[gpui::test]
@@ -161,8 +147,8 @@ mod tests {
             window.toggle_inspector(cx);
             window.replace_inspector_capture_for_test(fixtures::steady_frames(1, 4.));
         });
-        let mut frames = LensHighlights::new(Lens::Frames);
-        let mut audit = LensHighlights::new(Lens::Audit);
+        let mut frames = LensHighlights::new(Lens::Frames, EntityId::from(1u64));
+        let mut audit = LensHighlights::new(Lens::Audit, EntityId::from(2u64));
 
         cx.update(|window, _| {
             assert!(
@@ -191,6 +177,13 @@ mod tests {
             audit.pin(vec![highlight(3.)], window);
             audit.sync(Lens::Audit, window);
             frames.sync(Lens::Audit, window);
+        });
+        assert_eq!(overlay(cx), bounds_of(&[highlight(3.)]));
+
+        // Frames can't touch Audit's highlights while hidden, whatever it pins.
+        cx.update(|window, _| {
+            assert!(!frames.pin(vec![highlight(4.)], window));
+            assert!(!frames.hover(None, window));
         });
         assert_eq!(overlay(cx), bounds_of(&[highlight(3.)]));
 

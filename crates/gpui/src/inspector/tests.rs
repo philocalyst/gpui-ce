@@ -1395,11 +1395,14 @@ fn overlays_paint_inside_the_app_only(cx: &mut TestAppContext) {
         let overlay = capture.overlay_mut();
         overlay.modes = OverlayModes::all();
         overlay.selected = Some(key);
-        overlay.highlights.push(OverlayHighlight {
-            bounds: bounds(1200., 0., 600., 100.),
-            color: blue(),
-            label: Some("highlight".into()),
-        });
+        overlay.set_highlights(
+            EntityId::from(1u64),
+            vec![OverlayHighlight {
+                bounds: bounds(1200., 0., 600., 100.),
+                color: blue(),
+                label: Some("highlight".into()),
+            }],
+        );
     });
     redraw(cx);
     let quads_after = cx.update(|window, _| window.painted_quads().len());
@@ -1649,6 +1652,62 @@ fn redraw_inspector_only(cx: &mut VisualTestContext) {
     assert!(cx.update(|window, _| window.invalidator.is_dirty()));
     cx.update(|_, _| {});
     assert!(latest_frame(cx).inspector_only);
+}
+
+#[gpui::test]
+fn highlights_are_set_and_cleared_per_owner(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| Nested::new());
+    open(cx);
+    let (frames, audit) = (EntityId::from(1u64), EntityId::from(2u64));
+    let highlight = |x: f32| OverlayHighlight {
+        bounds: bounds(x, 300., 10., 10.),
+        color: blue(),
+        label: None,
+    };
+    let painted = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            [1., 50., 80.]
+                .into_iter()
+                .filter(|&x| {
+                    let bounds = bounds(x, 300., 10., 10.).scale(scale);
+                    window
+                        .painted_quads()
+                        .iter()
+                        .any(|quad| quad.bounds == bounds)
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+
+    write(cx, |capture| {
+        let overlay = capture.overlay_mut();
+        assert!(overlay.set_highlights(frames, vec![highlight(1.)]));
+        assert!(overlay.set_highlights(audit, vec![highlight(50.), highlight(80.)]));
+        assert!(
+            !overlay.set_highlights(frames, vec![highlight(1.)]),
+            "the same highlights change nothing"
+        );
+        assert_eq!(overlay.highlights().count(), 3);
+    });
+    redraw(cx);
+    assert_eq!(painted(cx), [1., 50., 80.]);
+
+    // One owner clearing its highlights leaves the other's alone.
+    write(cx, |capture| {
+        let overlay = capture.overlay_mut();
+        assert!(overlay.clear_highlights(frames));
+        assert!(!overlay.clear_highlights(frames), "already clear");
+        assert_eq!(overlay.highlights().count(), 2);
+    });
+    redraw(cx);
+    assert_eq!(painted(cx), [50., 80.]);
+    write(cx, |capture| {
+        assert!(capture.overlay_mut().set_highlights(audit, Vec::new()));
+        assert_eq!(capture.overlay().highlights().count(), 0);
+    });
+    redraw(cx);
+    assert!(painted(cx).is_empty());
 }
 
 // Lifetime, freezing, dock.

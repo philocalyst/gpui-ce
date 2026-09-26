@@ -126,8 +126,7 @@ fn highlights(harness: &mut LoupeHarness) -> Vec<Bounds<Pixels>> {
     harness.capture(|capture| {
         capture
             .overlay()
-            .highlights
-            .iter()
+            .highlights()
             .map(|highlight| highlight.bounds)
             .collect()
     })

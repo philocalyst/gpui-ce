@@ -137,7 +137,7 @@ impl AuditLens {
             overhead: Memo::default(),
             filter: Filter::All,
             selected: None,
-            highlights: LensHighlights::new(Lens::Audit),
+            highlights: LensHighlights::new(Lens::Audit, cx.entity_id()),
             notice: None,
             _subscriptions: subscriptions,
         }

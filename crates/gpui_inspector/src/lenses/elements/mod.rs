@@ -248,8 +248,6 @@ pub(crate) struct ElementsLens {
     style_editors: StyleEditors,
     edit_error: Option<SharedString>,
     collapsed: HashSet<Section>,
-    /// The highlight Loupe added for a hovered row without a key.
-    hover_highlight: Option<OverlayHighlight>,
     split: Option<Pixels>,
     badge: Option<RailBadge>,
     expanded_once: bool,
@@ -302,7 +300,6 @@ impl ElementsLens {
             style_editors: StyleEditors::default(),
             edit_error: None,
             collapsed: HashSet::new(),
-            hover_highlight: None,
             split: None,
             badge: None,
             expanded_once: false,
@@ -614,24 +611,18 @@ impl ElementsLens {
                     label: Some(index.info(ix)?.label.clone()),
                 })
             });
+        let owner = cx.entity_id();
         let Some(capture) = window.inspector_capture_mut() else {
             return;
         };
+        let hovered = node.and_then(NodeKey::element);
         let overlay = capture.overlay_mut();
-        overlay.hovered = node.and_then(NodeKey::element);
-        if let Some(previous) = self.hover_highlight.take()
-            && let Some(position) = overlay.highlights.iter().position(|highlight| {
-                highlight.bounds == previous.bounds && highlight.label == previous.label
-            })
-        {
-            overlay.highlights.remove(position);
+        let moved = overlay.hovered != hovered;
+        overlay.hovered = hovered;
+        if overlay.set_highlights(owner, highlight.into_iter().collect()) || moved {
+            // The overlay is painted with the next frame.
+            cx.notify();
         }
-        if let Some(highlight) = highlight {
-            overlay.highlights.push(highlight.clone());
-            self.hover_highlight = Some(highlight);
-        }
-        // The overlay is painted with the next frame.
-        cx.notify();
     }
 
     fn toggle_your_code(&mut self, window: &mut Window, cx: &mut Context<Self>) {

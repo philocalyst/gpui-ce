@@ -388,7 +388,7 @@ impl OverlayPass {
         }
         OverlayPass {
             modes,
-            highlights: overlay.highlights.clone(),
+            highlights: overlay.highlights().cloned().collect(),
             hitboxes: if modes.contains(OverlayModes::HITBOXES) {
                 app_hitboxes(capture, hitboxes)
             } else {

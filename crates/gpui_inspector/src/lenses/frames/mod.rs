@@ -209,7 +209,7 @@ impl FramesLens {
             table,
             table_rows: None,
             table_wide: false,
-            highlights: LensHighlights::new(Lens::Frames),
+            highlights: LensHighlights::new(Lens::Frames, cx.entity_id()),
             notice: None,
             stats: Memo::default(),
             flame_data: Memo::default(),
