@@ -299,6 +299,21 @@ fn the_detail_tells_where_a_fixture_click_went() {
     harness.assert_text_visible("HIT PATH");
     harness.shot("events-detail-click");
 
+    // The summary says how long ago it happened, and the age ticks.
+    let summary = |harness: &mut LoupeHarness| {
+        harness
+            .painted_text()
+            .into_iter()
+            .map(|line| line.text.to_string())
+            .find(|text| text.ends_with(&format!(" ago · input #{}", click.seq)))
+            .expect("the event's age")
+    };
+    harness.advance(Duration::from_secs(2));
+    let before = summary(&mut harness);
+    assert!(before.starts_with("mouse down · "), "{before}");
+    harness.advance(Duration::from_secs(1));
+    assert_ne!(summary(&mut harness), before, "its age ticks");
+
     // Hovering a hit-path row highlights it in the app; clicking selects it.
     let hit = harness.bounds_of("events-hit-0");
     harness.hover(hit.center());

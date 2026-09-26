@@ -13,6 +13,7 @@ use crate::{
     },
     state::Lens,
     theme::{MONO_FONT, Theme},
+    time_labels::TimeLabels,
     widgets::{
         Button, ButtonStyle, EmptyState, Icon, IconName, Kbd, Pill, Prose, SectionHeader, Segment,
         Segmented, Tone, Tooltip,
@@ -104,7 +105,7 @@ impl EventsLens {
             .collect();
         let target = hits.first().map(|hit| hit.name.as_str());
         let sentence = record_sentence(record, target);
-        let meta = event_meta(record, theme);
+        let meta = event_meta(record, &self.time_labels, theme);
         let frame = self.render_frame_link(record, capture, theme, cx);
         let contexts: Vec<String> = record.context_stack.iter().map(context_label).collect();
         let actions: Vec<ActionRecord> = record.actions.iter().cloned().collect();
@@ -359,13 +360,18 @@ impl EventsLens {
     }
 }
 
-/// `⌨ key down · 12.480 s · #184` with pills for Loupe's own and coalesced input.
-fn event_meta(record: &InputRecord, theme: &Theme) -> impl IntoElement + use<> {
+/// `⌨ mouse up · 2.1 s ago · input #2` with pills for Loupe's own and
+/// coalesced input.
+fn event_meta(
+    record: &InputRecord,
+    time_labels: &TimeLabels,
+    theme: &Theme,
+) -> impl IntoElement + use<> {
     let colors = &theme.colors;
     let when = SharedString::from(format!(
-        "{} · {} s · input #{}",
+        "{} · {} · input #{}",
         kind_label(record.kind),
-        crate::analysis::events::clock(record.at),
+        time_labels.ago(record.at),
         record.seq
     ));
     div()

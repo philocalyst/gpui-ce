@@ -27,6 +27,7 @@ use crate::{
     },
     state::{LensLayout, LoupeState},
     theme::{Theme, UI_FONT},
+    time_labels::TimeLabels,
     widgets::{IconName, Segment, Segmented, Split, TextField, text_field_state},
 };
 use gpui::{
@@ -39,7 +40,7 @@ use gpui::{
 use gpui_elements::editable_text::{EditableTextState, TextChanged};
 use key_tester::{KeyTester, KeyTesterEvent};
 use log::EventLog;
-use std::cell::Cell;
+use std::{cell::Cell, time::Duration};
 
 /// What the lower (or right) pane shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -65,6 +66,8 @@ pub(crate) struct EventsLens {
     /// something else (a link from Frames, the palette) selected a record.
     shown_input: Option<u64>,
     badge: Cell<Option<(BadgeKey, usize)>>,
+    /// The shown event's age, as the latest render read it.
+    time_labels: TimeLabels,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -117,6 +120,7 @@ impl EventsLens {
             split: None,
             shown_input,
             badge: Cell::new(None),
+            time_labels: TimeLabels::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -256,7 +260,10 @@ impl Render for EventsLens {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(window, cx);
         let layout = LensLayout::of(window);
-        if let Some(capture) = window.inspector_capture() {
+        let capture = window.inspector_capture();
+        self.time_labels
+            .begin(capture.map_or(Duration::ZERO, |capture| capture.now()));
+        if let Some(capture) = capture {
             self.log.refresh(capture, &self.filter, theme.metrics.row);
         }
         let split_size = self.split_size(layout, theme, window);
@@ -323,5 +330,9 @@ impl LensView for EventsLens {
             }
         };
         (count > 0).then(|| RailBadge::count(format::count(count as u64)))
+    }
+
+    fn time_labels(&self) -> Option<&TimeLabels> {
+        Some(&self.time_labels)
     }
 }
