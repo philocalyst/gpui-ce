@@ -167,7 +167,11 @@ impl ElementsLens {
                     .min_w_0()
                     .truncate()
                     .text_color(colors.text)
-                    .child(format!("Frame #{} · {}", past.frame, past.ago)),
+                    .child(format!(
+                        "Frame #{} · {}",
+                        past.frame,
+                        self.time_labels.ago(past.start)
+                    )),
             )
             .child(
                 Button::new("elements-back-to-live")

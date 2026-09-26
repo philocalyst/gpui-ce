@@ -34,6 +34,7 @@ use crate::{
     shell::pulse::cause_summary,
     state::{LensLayout, LoupeState},
     theme::Theme,
+    time_labels::TimeLabels,
     widgets::{EmptyState, IconName, Split, TreeEvent, TreeState, text_field_state},
 };
 use box_model::BoxFields;
@@ -55,6 +56,7 @@ use std::{
     panic::Location,
     rc::Rc,
     sync::Arc,
+    time::Duration,
 };
 use style::{StyleEditors, StyleModel};
 
@@ -82,8 +84,8 @@ struct Shown {
 struct PastFrame {
     /// Its id.
     pub frame: u64,
-    /// How long before the latest frame it was drawn: `2.1 s ago`.
-    pub ago: String,
+    /// When it started, on the capture's clock.
+    pub start: Duration,
 }
 
 /// The tree for the frame selected in the pulse strip, if that frame kept
@@ -99,19 +101,14 @@ fn shown_tree(capture: &InspectorCapture, selected_frame: Option<u64>) -> Option
         .and_then(|frame| Some((frame, frame.tree.as_ref()?)))
         .filter(|(_, tree)| !Arc::ptr_eq(tree, latest));
     Some(match past {
-        Some((frame, tree)) => {
-            let now = capture
-                .latest_frame()
-                .map_or(frame.start, |latest| latest.start);
-            Shown {
-                tree: tree.clone(),
+        Some((frame, tree)) => Shown {
+            tree: tree.clone(),
+            frame: frame.id,
+            past: Some(PastFrame {
                 frame: frame.id,
-                past: Some(PastFrame {
-                    frame: frame.id,
-                    ago: format::relative_time(now, frame.start),
-                }),
-            }
-        }
+                start: frame.start,
+            }),
+        },
         None => Shown {
             tree: latest.clone(),
             frame: latest_frame,
@@ -221,8 +218,8 @@ struct ViewCost {
     /// App frames recorded.
     pub frames: usize,
     /// Why its latest render happened, and when: `IssueStore notified`,
-    /// frame id and `1.2 s ago`.
-    pub last: Option<(String, u64, String)>,
+    /// the frame's id and start.
+    pub last: Option<(String, u64, Duration)>,
 }
 
 /// The Elements lens.
@@ -250,6 +247,8 @@ pub(crate) struct ElementsLens {
     collapsed: HashSet<Section>,
     split: Option<Pixels>,
     badge: Option<RailBadge>,
+    /// `2.1 s ago`, as the latest render read it.
+    time_labels: TimeLabels,
     expanded_once: bool,
     #[cfg(test)]
     opened_urls: Vec<String>,
@@ -302,6 +301,7 @@ impl ElementsLens {
             collapsed: HashSet::new(),
             split: None,
             badge: None,
+            time_labels: TimeLabels::default(),
             expanded_once: false,
             #[cfg(test)]
             opened_urls: Vec::new(),
@@ -859,7 +859,7 @@ fn selection_model(
 fn last_render(
     capture: &InspectorCapture,
     stats: Option<&ViewStats>,
-) -> Option<(String, u64, String)> {
+) -> Option<(String, u64, Duration)> {
     let frame = capture.frame(stats?.last_rendered?)?;
     let cause = frame
         .causes
@@ -867,18 +867,16 @@ fn last_render(
         .find(|cause| !cause.from_inspector)
         .map(|cause| cause_summary(&cause.kind))
         .unwrap_or_else(|| "no recorded cause".into());
-    let now = capture
-        .latest_frame()
-        .map_or(frame.start, |latest| latest.start);
-    Some((cause, frame.id, format::relative_time(now, frame.start)))
+    Some((cause, frame.id, frame.start))
 }
 
 impl Render for ElementsLens {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(window, cx);
-        let holding = window
-            .inspector_capture()
-            .is_some_and(|capture| capture.is_holding());
+        let capture = window.inspector_capture();
+        let holding = capture.is_some_and(|capture| capture.is_holding());
+        self.time_labels
+            .begin(capture.map_or(Duration::ZERO, |capture| capture.now()));
         if self.shown.is_none() {
             return div()
                 .size_full()
@@ -947,6 +945,10 @@ impl LensView for ElementsLens {
     fn rail_badge(&self, _: &Window, _: &App) -> Option<RailBadge> {
         self.badge.clone()
     }
+
+    fn time_labels(&self) -> Option<&TimeLabels> {
+        Some(&self.time_labels)
+    }
 }
 
 #[cfg(test)]
@@ -969,7 +971,7 @@ mod tests {
         let past = shown_tree(&capture, Some(spike.id)).unwrap();
         let frame = past.past.expect("an older frame with a tree");
         assert_eq!(frame.frame, spike.id);
-        assert!(frame.ago.ends_with("ago"), "{}", frame.ago);
+        assert_eq!(frame.start, spike.start);
         assert_eq!(past.tree.frame, spike.tree.as_ref().unwrap().frame);
 
         let treeless = capture

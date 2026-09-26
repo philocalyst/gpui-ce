@@ -110,6 +110,11 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
 * A frame is `inspector_only` when every cause is `from_inspector`.
   `generation` is bumped only by app frames and app input (and by frames where
   the inspector restyled the app), so Loupe's refresh loop cannot feed itself.
+* Labels read against the capture's clock (`2.1 s ago`, `idle`) are drawn
+  through a view's `TimeLabels`. About once a second the refresh loop asks the
+  shell and the lens on screen whether one would read differently now, and
+  re-renders only those: an age in minutes wakes Loupe once a minute, and a
+  screen without such labels never does.
 * **The app is not perturbed.** App-code `window.refresh()` re-renders the app
   alone; only resizes, window-state changes and inspector changes re-render
   the inspector's cached views. Frames drawn only for the inspector replay the
@@ -151,7 +156,8 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
   a dot; the selected frame is outlined; a dashed budget line; hover shows
   `#18372 · 23.4 ms · render 14.1 · IssueStore notified`. Click selects the
   frame (and switches to Frames); the selection also drives Elements'
-  time-travel. Right side: live fps and p95.
+  time-travel. Right side: live fps (`idle` once the app has not drawn for a
+  second) and p95.
 * **Rail** tabs carry live counts, so the rail itself is a dashboard.
 * **Status bar**: selection breadcrumb (clickable), app ms, Loupe's own ms,
   retained memory, `FROZEN` / `HELD` pills.

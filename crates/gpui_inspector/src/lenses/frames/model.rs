@@ -6,10 +6,9 @@
 use crate::{
     analysis::{
         format,
-        stats::{
-            self, FPS_WINDOW, Grade, GradeCounts, frame_stats, input_latencies, latency_percentiles,
-        },
+        stats::{self, Grade, GradeCounts, frame_stats, input_latencies, latency_percentiles},
     },
+    time_labels::TimeLabels,
     widgets::Tone,
 };
 use gpui::{
@@ -61,21 +60,6 @@ impl StatsLine {
         }
     }
 
-    /// How long until the app counts as idle at `now` (no app frame in
-    /// the last second), or `None` if it already is.
-    pub fn idle_in(&self, now: Duration) -> Option<Duration> {
-        let since = now.saturating_sub(self.latest_app_start?);
-        FPS_WINDOW.checked_sub(since).filter(|left| !left.is_zero())
-    }
-
-    /// `118`, or `idle` when the app has not drawn in the last second.
-    pub fn fps_text(&self, now: Duration) -> String {
-        match self.idle_in(now) {
-            Some(_) => format!("{:.0}", self.fps),
-            None => "idle".to_string(),
-        }
-    }
-
     /// `7 over budget`, or `all within budget`.
     pub fn over_budget_text(&self) -> String {
         match self.grades.over_budget() {
@@ -123,12 +107,12 @@ pub(crate) fn grade_pill(app_total: Duration, budget: Duration) -> (Tone, String
 }
 
 /// `#18372 · 23.4 ms · 2.1 s ago`.
-pub(crate) fn frame_title(frame: &FrameRecord, now: Duration) -> String {
+pub(crate) fn frame_title(frame: &FrameRecord, labels: &TimeLabels) -> String {
     format!(
         "#{} · {} · {}",
         frame.id,
         format::duration(frame.timings.app_total()),
-        format::relative_time(now, frame.start)
+        labels.ago(frame.start)
     )
 }
 
@@ -409,7 +393,12 @@ mod tests {
     fn stats_line_reads_fps_percentiles_and_overhead() {
         let capture = steady_frames(120, 4.0);
         let line = StatsLine::of(&capture);
-        assert_eq!(line.fps_text(capture.now()), "60");
+        let labels = TimeLabels::default();
+        labels.begin(capture.now());
+        assert_eq!(
+            labels.fps(line.fps, line.latest_app_start).as_deref(),
+            Some("60")
+        );
         assert_eq!(line.p95, ms(4.0));
         assert_eq!(line.over_budget_text(), "all within budget");
         assert_eq!(line.grade_shares(), [1.0, 0.0, 0.0]);
@@ -423,13 +412,16 @@ mod tests {
         let capture = steady_frames(10, 4.0);
         let last = stats::latest_app_start(capture.frames()).unwrap();
         let line = StatsLine::of(&capture);
-        assert_eq!(line.fps_text(last + ms(999.0)), "60");
-        let left = line.idle_in(last + ms(990.0)).unwrap();
-        assert!((left.as_secs_f64() - 0.010).abs() < 1e-6, "{left:?}");
-        assert_eq!(line.fps_text(last + ms(1_001.0)), "idle");
-        assert_eq!(line.idle_in(last + ms(1_001.0)), None);
+        assert_eq!(line.latest_app_start, Some(last));
+        let fps_at = |now| {
+            let labels = TimeLabels::default();
+            labels.begin(now);
+            labels.fps(line.fps, line.latest_app_start)
+        };
+        assert_eq!(fps_at(last + ms(999.0)).as_deref(), Some("60"));
+        assert_eq!(fps_at(last + ms(1_001.0)), None, "idle");
         let empty = StatsLine::of(&InspectorCapture::new_for_test());
-        assert_eq!(empty.fps_text(Duration::ZERO), "idle");
+        assert_eq!(empty.latest_app_start, None);
         assert_eq!(empty.over_budget_text(), "no app frames");
     }
 
@@ -478,10 +470,10 @@ mod tests {
     fn frame_titles_read_id_time_and_age() {
         let capture = steady_frames(3, 23.4);
         let frame = capture.frame(1).unwrap();
-        assert_eq!(
-            frame_title(frame, frame.start + ms(2_100.0)),
-            "#1 · 23.4 ms · 2.1 s ago"
-        );
+        let labels = TimeLabels::default();
+        labels.begin(frame.start + ms(2_100.0));
+        assert_eq!(frame_title(frame, &labels), "#1 · 23.4 ms · 2.1 s ago");
+        assert!(labels.stale(frame.start + ms(3_100.0)), "the age ticks");
     }
 
     #[test]

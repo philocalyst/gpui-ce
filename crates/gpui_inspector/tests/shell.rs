@@ -390,6 +390,9 @@ fn dragging_the_dock_edge_resizes_the_dock() {
 #[test]
 fn the_refresh_loop_stays_idle_until_the_app_records_new_data() {
     let (mut harness, _) = inbox_harness(1280., 800.);
+    // The recording ends as Loupe opens it: a second on, the pulse strip
+    // re-renders once to say the app is idle.
+    harness.advance(Duration::from_secs(2));
     let loupe = harness.loupe();
     let renders = |harness: &mut LoupeHarness| harness.app(|cx| loupe.read(cx).render_count());
     let before = renders(&mut harness);

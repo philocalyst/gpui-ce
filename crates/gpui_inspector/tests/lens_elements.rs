@@ -382,6 +382,22 @@ fn time_travel_shows_an_earlier_frame_until_back_to_live() {
     select(&mut harness, elements.row_3);
     harness.update_state(|state, cx| state.select_frame(Some(spike), cx));
     harness.assert_text_visible(&format!("Frame #{spike} · "));
+    // The banner tells the frame's age, and it ticks with the clock.
+    let banner = |harness: &mut LoupeHarness| {
+        harness
+            .painted_text()
+            .into_iter()
+            .map(|line| line.text.to_string())
+            .find(|text| text.starts_with(&format!("Frame #{spike} · ")))
+            .expect("the time travel banner")
+    };
+    // Past the second after which the pulse strip reads idle (which redraws
+    // the shell, and the lens with it), only the lens' own tick updates it.
+    harness.advance(Duration::from_secs(2));
+    let before = banner(&mut harness);
+    assert!(before.ends_with(" ago"), "{before}");
+    harness.advance(Duration::from_secs(1));
+    assert_ne!(banner(&mut harness), before, "its age ticks");
     harness.assert_text_visible("Back to live");
     // The earlier tree has no layout facts for row 3: the detail says so
     // instead of borrowing the live frame's.

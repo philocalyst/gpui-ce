@@ -52,12 +52,13 @@ use crate::{
     },
     state::{Lens, LensLayout, LoupeState},
     theme::Theme,
+    time_labels::TimeLabels,
     widgets::{IconName, TableEvent, TableState, Tone},
 };
 use gpui::{
     App, AppContext as _, ClipboardItem, ColorExt as _, Context, Entity, FocusHandle, Hsla,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    ScrollWheelEvent, SharedString, Subscription, Task, Window, actions,
+    ScrollWheelEvent, SharedString, Subscription, Window, actions,
     inspector::{ElementKey, ElementKind, InspectorCapture, OverlayHighlight},
     px,
 };
@@ -175,7 +176,8 @@ pub(crate) struct FramesLens {
     rows: Memo<(u64, u64, Scope), Vec<BottomUpRow>>,
     insights: Memo<(u64, Option<u64>, Duration), Vec<Insight>>,
     badge: RefCell<Memo<(u64, Duration), Option<RailBadge>>>,
-    idle_check: Option<(u64, Task<()>)>,
+    /// `2.1 s ago` and `idle`, as the latest render read them.
+    time_labels: TimeLabels,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -216,7 +218,7 @@ impl FramesLens {
             rows: Memo::default(),
             insights: Memo::default(),
             badge: RefCell::default(),
-            idle_check: None,
+            time_labels: TimeLabels::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -526,35 +528,6 @@ impl FramesLens {
             Tone::Ok,
             cx,
         );
-    }
-
-    /// Re-renders once the app has been quiet for a second, so the stats
-    /// line can say `idle` (new frames re-render the lens anyway).
-    fn schedule_idle_check(
-        &mut self,
-        generation: u64,
-        idle_in: Option<Duration>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(idle_in) = idle_in else {
-            self.idle_check = None;
-            return;
-        };
-        if self
-            .idle_check
-            .as_ref()
-            .is_some_and(|(scheduled, _)| *scheduled == generation)
-        {
-            return;
-        }
-        let task = cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor()
-                .timer(idle_in + Duration::from_millis(50))
-                .await;
-            this.update(cx, |_, cx| cx.notify()).ok();
-        });
-        self.idle_check = Some((generation, task));
     }
 }
 

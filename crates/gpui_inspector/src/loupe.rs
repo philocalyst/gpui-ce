@@ -13,9 +13,15 @@
 //! capture's generation with the one it last saw and notifies the shared
 //! [`LoupeState`] only when the app recorded something new; frames that only
 //! Loupe caused do not move the generation, so there is no redraw loop.
+//! About once a second, the timer also re-renders the shell or the lens on
+//! screen if a label it drew against the capture's clock (`2.1 s ago`,
+//! `idle`) would read differently ([`crate::time_labels`]).
 
 use crate::{
-    analysis::{format, stats::frame_stats},
+    analysis::{
+        format,
+        stats::{frame_stats, latest_app_start},
+    },
     commands::{Command, DockSide, keys},
     lenses::{Lenses, entity_label, entity_names},
     palette::{Palette, PaletteEvent, PaletteGlyph, PaletteItem, PaletteTarget},
@@ -29,6 +35,7 @@ use crate::{
     },
     state::{Lens, LoupeState},
     theme::{MONO_FONT, Theme, UI_FONT},
+    time_labels::{TICK, TimeLabels},
     widgets::{self, RailTab, SplitDrag, SplitHandle, TabRail, clamp_split, floating_surface},
 };
 use gpui::{
@@ -101,6 +108,10 @@ pub struct Loupe {
     bottom_height: Pixels,
     /// Counts down to holding the app ("Hold the app in 3 seconds").
     hold_timer: Option<Task<()>>,
+    /// The pulse strip's `idle`, as the latest render read it.
+    time_labels: TimeLabels,
+    /// When, on the capture's clock, to re-read the labels on screen next.
+    next_tick: Duration,
     #[cfg(any(test, feature = "test-support"))]
     renders: usize,
     _refresh: Task<()>,
@@ -151,6 +162,8 @@ impl Loupe {
             right_width,
             bottom_height,
             hold_timer: None,
+            time_labels: TimeLabels::default(),
+            next_tick: Duration::ZERO,
             #[cfg(any(test, feature = "test-support"))]
             renders: 0,
             _refresh: Self::spawn_refresh(window, cx),
@@ -216,16 +229,25 @@ impl Loupe {
         })
     }
 
-    /// Catches up with the capture: notifies only if the app recorded new data.
+    /// Catches up with the capture: notifies only if the app recorded new
+    /// data, or, once a [`TICK`], if a label drawn against the capture's clock
+    /// reads differently.
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(generation) = window
+        let Some((generation, now)) = window
             .inspector_capture()
-            .map(|capture| capture.generation())
+            .map(|capture| (capture.generation(), capture.now()))
         else {
             return;
         };
         self.state
             .update(cx, |state, cx| state.catch_up(generation, cx));
+        if now >= self.next_tick {
+            self.next_tick = now + TICK;
+            if self.time_labels.stale(now) {
+                cx.notify();
+            }
+            self.lenses.tick(now, cx);
+        }
     }
 
     /// Re-renders everything after the theme changed.
@@ -582,11 +604,14 @@ impl Loupe {
         let selected = self.state.read(cx).selected_frame();
         let hovered = self.pulse_hover;
         let bounds_cell = self.pulse_bounds.clone();
-        let stats = window
-            .inspector_capture()
+        let capture = window.inspector_capture();
+        let stats = capture
             .map(|capture| frame_stats(capture.frames(), capture.config().budget))
             .filter(|stats| stats.app_frames > 0);
-        let fps = stats.as_ref().map(|stats| format!("{:.0}", stats.fps));
+        let latest_app_start = capture.and_then(|capture| latest_app_start(capture.frames()));
+        let fps = stats
+            .as_ref()
+            .map(|stats| self.time_labels.fps(stats.fps, latest_app_start));
         let p95 = stats
             .as_ref()
             .map(|stats| format::millis(stats.app_total.p95));
@@ -653,7 +678,11 @@ impl Loupe {
                     .items_center()
                     .gap(px(6.))
                     .text_size(theme.metrics.text_small)
-                    .child(stat(fps.unwrap_or_else(|| format::NO_VALUE.into()), "fps"))
+                    .child(match fps {
+                        Some(Some(fps)) => stat(fps, "fps"),
+                        Some(None) => div().text_color(colors.text_faint).child("idle"),
+                        None => stat(format::NO_VALUE.into(), "fps"),
+                    })
                     .child(div().text_color(colors.text_faint).child("·"))
                     .child(div().text_color(colors.text_faint).child("p95"))
                     .child(stat(p95.unwrap_or_else(|| format::NO_VALUE.into()), "ms")),
@@ -845,6 +874,7 @@ impl Render for Loupe {
         let Some(capture) = window.inspector_capture() else {
             return div().size_full().bg(colors.bg).into_any_element();
         };
+        self.time_labels.begin(capture.now());
         let dock = capture.dock();
         let toolbar = Toolbar {
             picking: capture.pick().active,

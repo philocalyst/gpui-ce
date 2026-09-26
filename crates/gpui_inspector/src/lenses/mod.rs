@@ -36,12 +36,13 @@ pub(crate) use frames::FramesLens;
 use crate::{
     analysis::Severity,
     state::{Lens, LoupeState},
+    time_labels::TimeLabels,
     widgets::{IconName, Tone},
 };
 use gpui::{
     AnyView, App, AppContext as _, Context, Entity, KeyBinding, Render, SharedString, Window,
 };
-use std::mem;
+use std::{mem, time::Duration};
 
 /// The lenses with keys of their own, and the key context those apply in.
 pub(crate) const KEY_CONTEXTS: [(Lens, &str); 2] = [
@@ -71,6 +72,18 @@ pub(crate) fn severity_glyph(severity: Severity) -> (IconName, Tone) {
 /// observes the state it depends on.
 pub(crate) fn observe_state<T: 'static>(state: &Entity<LoupeState>, cx: &mut Context<T>) {
     cx.observe(state, |_, _, cx| cx.notify()).detach();
+}
+
+/// Re-renders `lens` if a label it drew against the capture's clock reads
+/// differently at `now`.
+fn tick<V: LensView>(lens: &Entity<V>, now: Duration, cx: &mut App) {
+    let stale = lens
+        .read(cx)
+        .time_labels()
+        .is_some_and(|labels| labels.stale(now));
+    if stale {
+        lens.update(cx, |_, cx| cx.notify());
+    }
 }
 
 /// A lens' live count in the rail.
@@ -115,6 +128,13 @@ pub(crate) trait LensView: Render {
     /// The rail's live count for this lens. Called whenever the shell
     /// renders, so it must be cheap (memoize on `LoupeState::generation`).
     fn rail_badge(&self, window: &Window, cx: &App) -> Option<RailBadge>;
+
+    /// The labels the lens drew against the capture's clock (`2.1 s ago`,
+    /// `idle`), which Loupe re-reads about once a second while the lens is
+    /// shown, if it draws any.
+    fn time_labels(&self) -> Option<&TimeLabels> {
+        None
+    }
 }
 
 /// The five lens entities, and which one is on screen.
@@ -163,6 +183,18 @@ impl Lenses {
             Lens::Events => self.events.clone().into(),
             Lens::Entities => self.entities.clone().into(),
             Lens::Audit => self.audit.clone().into(),
+        }
+    }
+
+    /// Re-renders the lens on screen if a label it drew against the
+    /// capture's clock reads differently at `now`.
+    pub fn tick(&self, now: Duration, cx: &mut App) {
+        match self.shown {
+            Lens::Elements => tick(&self.elements, now, cx),
+            Lens::Frames => tick(&self.frames, now, cx),
+            Lens::Events => tick(&self.events, now, cx),
+            Lens::Entities => tick(&self.entities, now, cx),
+            Lens::Audit => tick(&self.audit, now, cx),
         }
     }
 

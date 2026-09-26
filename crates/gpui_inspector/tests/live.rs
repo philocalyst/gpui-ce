@@ -47,7 +47,9 @@ fn loupe_reports_real_frames_and_never_keeps_the_window_busy() {
         |_, cx| cx.new(|_| Counter { count: 0, renders })
     });
     harness.open_loupe();
-    harness.advance(Duration::from_secs(1));
+    // The app has not drawn for a second: the pulse strip says it is idle.
+    harness.advance(Duration::from_secs(2));
+    harness.assert_text_visible("idle");
     let loupe = harness.loupe();
     let loupe_renders =
         |harness: &mut LoupeHarness| harness.app(|cx| loupe.read(cx).render_count());
@@ -136,13 +138,62 @@ fn loupe_reports_real_frames_and_never_keeps_the_window_busy() {
     assert!(latest.id > click_frame.id);
     assert!(latest.inspector_only);
 
-    // And then everything is quiet again: no feedback loop.
+    // A second later the pulse strip says the app is idle again (one more
+    // render of Loupe's shell), and then everything is quiet: no feedback
+    // loop.
+    harness.advance(Duration::from_secs(1));
+    harness.assert_text_visible("idle");
+    assert_eq!(loupe_renders(&mut harness), settled_loupe + 2);
     let frames_after = harness.capture(frames);
     harness.advance(Duration::from_secs(3));
     assert_eq!(harness.capture(frames), frames_after);
-    assert_eq!(loupe_renders(&mut harness), settled_loupe + 1);
+    assert_eq!(loupe_renders(&mut harness), settled_loupe + 2);
     assert_eq!(app_renders.get(), app_renders_after_click);
     harness.screenshot("live-counter");
+}
+
+#[test]
+fn ages_tick_about_once_a_second_and_only_when_they_read_differently() {
+    let mut harness = LoupeHarness::new(size(px(1100.), px(700.)), |_, cx| {
+        cx.new(|_| Counter {
+            count: 0,
+            renders: Rc::default(),
+        })
+    });
+    harness.open_loupe();
+    harness.advance(Duration::from_secs(2));
+    harness.update_state(|state, cx| state.set_lens(Lens::Frames, cx));
+    let age = |harness: &mut LoupeHarness| {
+        harness
+            .painted_text()
+            .into_iter()
+            .map(|line| line.text.to_string())
+            .find(|text| text.starts_with('#') && text.ends_with(" ago"))
+            .expect("the frame title tells the frame's age")
+    };
+
+    // The latest app frame's age reads against the clock, second by second.
+    let first = age(&mut harness);
+    harness.advance(Duration::from_secs(1));
+    let second = age(&mut harness);
+    assert_ne!(first, second);
+
+    // Once it reads in minutes, the ticks in between draw nothing.
+    harness.advance(Duration::from_secs(61));
+    assert!(age(&mut harness).ends_with(" · 1 min ago"));
+    let drawn = harness.capture(frames);
+    for _ in 0..5 {
+        harness.advance(Duration::from_secs(1));
+    }
+    assert_eq!(harness.capture(frames), drawn, "nothing on screen changed");
+
+    // A lens without such labels never ticks.
+    harness.update_state(|state, cx| state.set_lens(Lens::Entities, cx));
+    let drawn = harness.capture(frames);
+    for _ in 0..5 {
+        harness.advance(Duration::from_secs(60));
+    }
+    assert_eq!(harness.capture(frames), drawn);
 }
 
 #[test]

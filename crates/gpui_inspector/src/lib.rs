@@ -32,6 +32,7 @@ pub mod settings;
 mod shell;
 mod state;
 pub mod theme;
+mod time_labels;
 pub mod widgets;
 
 #[cfg(any(test, feature = "test-support"))]

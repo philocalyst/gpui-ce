@@ -13,6 +13,7 @@ use crate::{
     settings::LoupeSettings,
     state::Lens,
     theme::{MONO_FONT, Theme},
+    time_labels::TimeLabels,
     widgets::{
         Button, ButtonSize, ButtonStyle, EmptyState, Icon, IconName, Kbd, Pill, SectionHeader,
         Tone, Tooltip,
@@ -261,8 +262,8 @@ impl ElementsLens {
             .view
             .as_ref()
             .map(|view| format!("×{}", view.stats.rendered));
-        let cost = self.section(Section::Cost, cost_detail, theme, cx, |_, _| {
-            render_cost(&selection, theme)
+        let cost = self.section(Section::Cost, cost_detail, theme, cx, |this, _| {
+            render_cost(&selection, &this.time_labels, theme)
         });
 
         let column = || div().flex_1().min_w_0().flex().flex_col();
@@ -822,7 +823,7 @@ fn render_details(
         .into_any_element()
 }
 
-fn render_cost(selection: &Selection, theme: &Theme) -> AnyElement {
+fn render_cost(selection: &Selection, time_labels: &TimeLabels, theme: &Theme) -> AnyElement {
     let colors = &theme.colors;
     let cost = &selection.cost;
     let line = |label: &'static str, value: String| {
@@ -869,7 +870,9 @@ fn render_cost(selection: &Selection, theme: &Theme) -> AnyElement {
         lines.push(line(
             "Last render",
             match &view.last {
-                Some((cause, frame, ago)) => format!("{cause} · #{frame} · {ago}"),
+                Some((cause, frame, start)) => {
+                    format!("{cause} · #{frame} · {}", time_labels.ago(*start))
+                }
                 None => "Not in the recorded frames".into(),
             },
         ));

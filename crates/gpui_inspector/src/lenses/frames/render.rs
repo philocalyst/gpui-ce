@@ -24,6 +24,7 @@ use crate::{
     settings::FrameBudget,
     state::Lens,
     theme::{MONO_FONT, Theme, UI_FONT},
+    time_labels::TimeLabels,
     widgets::{
         Button, ButtonSize, ButtonStyle, EmptyState, Icon, IconName, Pill, SectionHeader, Segment,
         Segmented, Table, Tone, Tooltip, floating_surface,
@@ -44,7 +45,6 @@ struct Shown<'a> {
     capture: &'a InspectorCapture,
     frame: &'a FrameRecord,
     pinned: bool,
-    now: Duration,
     budget: Duration,
     stats: Rc<StatsLine>,
     rows: Rc<Vec<BottomUpRow>>,
@@ -90,12 +90,15 @@ impl Render for FramesLens {
             .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| this.zoom(None, cx)));
 
         let window_ref: &Window = window;
+        let now = window_ref
+            .inspector_capture()
+            .map_or(Duration::ZERO, |capture| capture.now());
+        self.time_labels.begin(now);
         let layout = Columns::of(window_ref);
         let Some(shown) = window_ref
             .inspector_capture()
             .and_then(|capture| self.derive(capture, window_ref, layout, cx))
         else {
-            self.idle_check = None;
             return root.child(
                 EmptyState::new("No app frames recorded yet")
                     .icon(IconName::Clock)
@@ -106,8 +109,6 @@ impl Render for FramesLens {
                     )),
             );
         };
-        let generation = shown.capture.generation();
-        let idle_in = shown.stats.idle_in(shown.now);
         let navigate = self.navigator(cx);
         let tooltip = self.render_tooltip(&shown, theme);
 
@@ -174,7 +175,6 @@ impl Render for FramesLens {
                     .child(export),
             )
         };
-        self.schedule_idle_check(generation, idle_in, window, cx);
         root.child(body).children(tooltip)
     }
 }
@@ -188,6 +188,10 @@ impl LensView for FramesLens {
             .get(key, || over_budget_badge(capture))
             .as_ref()
             .clone()
+    }
+
+    fn time_labels(&self) -> Option<&TimeLabels> {
+        Some(&self.time_labels)
     }
 }
 
@@ -233,7 +237,6 @@ impl FramesLens {
             capture,
             frame,
             pinned,
-            now: capture.now(),
             budget,
             stats,
             rows,
@@ -275,8 +278,8 @@ impl FramesLens {
                 .text_color(colors.text)
                 .child(text)
         };
-        let fps = stats.fps_text(shown.now);
-        let idle = fps == "idle";
+        let fps = self.time_labels.fps(stats.fps, stats.latest_app_start);
+        let idle = fps.is_none();
         let over_tone = if stats.grades.crit > 0 {
             Tone::Crit
         } else if stats.grades.warn > 0 {
@@ -320,7 +323,7 @@ impl FramesLens {
                                     .font_family(MONO_FONT)
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(if idle { colors.text_muted } else { colors.text })
-                                    .child(fps),
+                                    .child(fps.unwrap_or_else(|| "idle".into())),
                             )
                             .when(!idle, |this| this.child(label("fps"))),
                     )
@@ -451,7 +454,7 @@ impl FramesLens {
                     .font_family(MONO_FONT)
                     .text_color(colors.text)
                     .font_weight(FontWeight::BOLD)
-                    .child(frame_title(frame, shown.now)),
+                    .child(frame_title(frame, &self.time_labels)),
             )
             .child(Pill::new(grade).tone(tone))
             .when(frame.inspector_only, |this| {
