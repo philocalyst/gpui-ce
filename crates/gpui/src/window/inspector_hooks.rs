@@ -326,6 +326,7 @@ impl Window {
     pub(super) fn note_refresh_reason(&self, reason: RefreshReason, scope: RefreshScope) {
         let (kind, site) = match reason {
             RefreshReason::Code(site) => (CauseKind::Refresh, Some(site)),
+            RefreshReason::Focus { site, .. } => (CauseKind::Focus, Some(site)),
             RefreshReason::Resize => (CauseKind::Resize, None),
             RefreshReason::WindowState => (CauseKind::WindowState, None),
             RefreshReason::Inspector => return,

@@ -398,6 +398,8 @@ pub enum CauseKind {
     },
     /// `window.refresh()`.
     Refresh,
+    /// `window.focus()` or `window.blur()` moved the focus between elements.
+    Focus,
     /// The window was resized or its scale factor changed.
     Resize,
     /// Window appearance, activation or focus changed.

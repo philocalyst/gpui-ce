@@ -171,7 +171,13 @@ impl Window {
     }
 
     fn inspector_has_focus(&self) -> bool {
-        let (Some(focus), Some(inspector)) = (self.focus, self.inspector.as_ref()) else {
+        self.focus.is_some_and(|focus| self.is_in_inspector(focus))
+    }
+
+    /// Whether `focus` belongs to an element the latest frame drew inside
+    /// the inspector.
+    fn is_in_inspector(&self, focus: FocusId) -> bool {
+        let Some(inspector) = self.inspector.as_ref() else {
             return false;
         };
         let dispatch_tree = &self.rendered_frame.dispatch_tree;
@@ -192,18 +198,36 @@ impl Window {
     /// The app's own `refresh()` re-renders the app alone, so the inspector's
     /// cached UI is not disturbed. A refresh asked for while the inspector's
     /// own input is dispatched (an element's active state on a click in the
-    /// dock, a focus change to Loupe's root...) re-renders the inspector
-    /// alone, so the app is not disturbed either: the frame replays it. Only
-    /// the blanket refresh is the inspector's; an app entity notified while
-    /// handling that input still renders its views, and so do the app
-    /// changes the inspector makes on purpose (style overrides, forced
-    /// states, holds). When the focus moves from the app into the inspector
-    /// this way, the replayed app keeps drawing its element as focused until
-    /// the app next renders: inspecting the app does not perturb it.
+    /// dock...) re-renders the inspector alone, so the app is not disturbed
+    /// either: the frame replays it. Only the blanket refresh is the
+    /// inspector's; an app entity notified while handling that input still
+    /// renders its views, and so do the app changes the inspector makes on
+    /// purpose (style overrides, forced states, holds).
+    ///
+    /// A focus move re-renders the side it left and the side it reached:
+    /// the app, the inspector, or both when it crosses between them. Focus
+    /// on an element the latest frame did not draw counts as the app's. The
+    /// one exception is the inspector's own input taking the focus from the
+    /// app (a click in the dock): the replayed app keeps drawing its element
+    /// as focused until the app next renders, so inspecting the app does not
+    /// perturb it.
     pub(super) fn refresh_scope(&self, reason: RefreshReason) -> RefreshScope {
         match reason {
             RefreshReason::Code(_) if self.dispatching_inspector_input => RefreshScope::Inspector,
             RefreshReason::Code(_) => RefreshScope::App,
+            RefreshReason::Focus { from, .. } => {
+                let in_inspector =
+                    |focus: Option<FocusId>| focus.map(|focus| self.is_in_inspector(focus));
+                let (from, to) = (in_inspector(from), in_inspector(self.focus));
+                let inspector = from == Some(true) || to == Some(true);
+                let app =
+                    to == Some(false) || (from == Some(false) && !self.dispatching_inspector_input);
+                match (app, inspector) {
+                    (true, true) => RefreshScope::Everything,
+                    (true, false) => RefreshScope::App,
+                    (false, _) => RefreshScope::Inspector,
+                }
+            }
             RefreshReason::Resize | RefreshReason::WindowState | RefreshReason::Inspector => {
                 RefreshScope::Everything
             }

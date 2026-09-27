@@ -3101,3 +3101,122 @@ fn check_replays(cx: &mut TestAppContext, steps: Vec<Step>) {
         assert_eq!(painted, shown.text(), "after {step:?}");
     }
 }
+
+// Focus.
+
+/// Two focusable boxes, painted by whether they have the focus, counting
+/// renders: the app's root, or the inspector's own (cached) UI.
+struct Focusables {
+    first: FocusHandle,
+    second: FocusHandle,
+    renders: usize,
+}
+
+impl Focusables {
+    fn new(cx: &mut App) -> Self {
+        Self {
+            first: cx.focus_handle(),
+            second: cx.focus_handle(),
+            renders: 0,
+        }
+    }
+}
+
+impl Render for Focusables {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.renders += 1;
+        let focusable = |handle: &FocusHandle| {
+            div()
+                .track_focus(handle)
+                .w(px(20.))
+                .h(px(20.))
+                .bg(if handle.is_focused(window) {
+                    red()
+                } else {
+                    blue()
+                })
+        };
+        div()
+            .size_full()
+            .child(focusable(&self.first))
+            .child(focusable(&self.second))
+    }
+}
+
+/// Draws the inspector's UI as a cached view, as Loupe does.
+fn focusables_dock(cx: &mut VisualTestContext) -> Rc<RefCell<Option<Entity<Focusables>>>> {
+    let dock = Rc::new(RefCell::new(None));
+    let slot = dock.clone();
+    cx.update(|_, cx| {
+        cx.set_inspector_renderer(Box::new(move |inspector, _, cx| {
+            let view = inspector
+                .ui_state(|| cx.new(|cx| Focusables::new(cx)))
+                .clone();
+            *slot.borrow_mut() = Some(view.clone());
+            AnyView::from(view)
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element()
+        }))
+    });
+    dock
+}
+
+#[gpui::test]
+fn focus_moving_into_out_of_or_within_the_inspector_redraws_it(cx: &mut TestAppContext) {
+    let (app, cx) = cx.add_window_view(|_, cx| Focusables::new(cx));
+    let dock = focusables_dock(cx);
+    open(cx);
+    let dock = dock.borrow().clone().expect("the dock rendered");
+    let handles = |view: &Entity<Focusables>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, _| (view.first.clone(), view.second.clone()))
+    };
+    let (app_first, app_second) = handles(&app, cx);
+    let (dock_first, dock_second) = handles(&dock, cx);
+    let renders = |cx: &mut VisualTestContext| {
+        (
+            app.read_with(cx, |app, _| app.renders),
+            dock.read_with(cx, |dock, _| dock.renders),
+        )
+    };
+    let focus = |handle: &FocusHandle, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.focus(handle, cx))
+    };
+    let (app_renders, dock_renders) = renders(cx);
+
+    // Within the app: the inspector's cached UI is reused.
+    focus(&app_first, cx);
+    assert_eq!(renders(cx), (app_renders + 1, dock_renders));
+
+    // Into the inspector, from code: both redraw.
+    focus(&dock_first, cx);
+    assert_eq!(renders(cx), (app_renders + 2, dock_renders + 1));
+    assert!(!latest_frame(cx).inspector_only);
+
+    // Within the inspector: it redraws alone, and the app is replayed. The
+    // frame says the focus moved, and where it was moved from.
+    focus(&dock_second, cx);
+    assert_eq!(renders(cx), (app_renders + 2, dock_renders + 2));
+    let frame = latest_frame(cx);
+    assert!(frame.inspector_only, "{:?}", frame.causes);
+    assert!(frame.replayed_app());
+    assert!(frame.causes.iter().any(|cause| {
+        cause.kind == CauseKind::Focus
+            && cause
+                .site
+                .is_some_and(|site| site.file().ends_with("tests.rs"))
+    }));
+
+    // Out of the inspector to nothing: again the inspector alone.
+    cx.update(|window, cx| window.blur(cx));
+    assert_eq!(renders(cx), (app_renders + 2, dock_renders + 3));
+
+    // From nothing into the app: the app alone.
+    focus(&app_second, cx);
+    assert_eq!(renders(cx), (app_renders + 3, dock_renders + 3));
+
+    // Into the inspector and back out to the app: both, each time.
+    focus(&dock_first, cx);
+    focus(&app_first, cx);
+    assert_eq!(renders(cx), (app_renders + 5, dock_renders + 5));
+    assert!(cx.update(|window, _| app_first.is_focused(window)));
+}

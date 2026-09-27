@@ -1392,6 +1392,13 @@ enum InputModality {
 pub(crate) enum RefreshReason {
     /// `Window::refresh` called from code.
     Code(&'static std::panic::Location<'static>),
+    /// `Window::focus` or `Window::blur`, called from `site`, moved the focus
+    /// away from `from`. When the move involves the inspector's subtree, its
+    /// cached views redraw too (see `Window::refresh_scope`).
+    Focus {
+        site: &'static std::panic::Location<'static>,
+        from: Option<FocusId>,
+    },
     /// The viewport or scale factor changed.
     Resize,
     /// Activation, hover or position changed.
@@ -1499,9 +1506,10 @@ pub struct Window {
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector_input: Option<Box<crate::inspector::InputInFlight>>,
     /// Whether this frame re-renders the inspector's views: resizes, window
-    /// state changes, toggling and refreshes asked for while the inspector's
-    /// own input is dispatched do; the app's own `refresh()` calls re-render
-    /// the app alone (see [`RefreshScope`]).
+    /// state changes, toggling, focus moves that touch the inspector, and
+    /// refreshes asked for while the inspector's own input is dispatched do;
+    /// the app's own `refresh()` calls re-render the app alone (see
+    /// [`RefreshScope`]).
     #[cfg(any(feature = "inspector", debug_assertions))]
     refresh_reaches_inspector: bool,
     /// Whether the event being dispatched is the inspector's own: a
@@ -2404,11 +2412,14 @@ impl Window {
             return;
         }
 
-        self.focus = Some(handle.id);
+        let from = self.focus.replace(handle.id);
         self.focus_generation = self.focus_generation.wrapping_add(1);
         self.clear_pending_keystrokes(cx);
 
-        self.refresh();
+        self.refresh_for(RefreshReason::Focus {
+            site: std::panic::Location::caller(),
+            from,
+        });
     }
 
     /// Remove focus from all elements within this context's window.
@@ -2423,8 +2434,11 @@ impl Window {
         if self.focus.is_some() {
             self.focus_generation = self.focus_generation.wrapping_add(1);
         }
-        self.focus = None;
-        self.refresh();
+        let from = self.focus.take();
+        self.refresh_for(RefreshReason::Focus {
+            site: std::panic::Location::caller(),
+            from,
+        });
     }
 
     /// Blur the window and don't allow anything in it to be focused again.
@@ -3385,7 +3399,10 @@ impl Window {
         // schedule another frame here to render the new focus state and dispatch the
         // resulting focus events.
         if self.focus != focus_before_listeners {
-            self.refresh();
+            self.refresh_for(RefreshReason::Focus {
+                site: std::panic::Location::caller(),
+                from: focus_before_listeners,
+            });
         }
         self.needs_present.set(true);
 
