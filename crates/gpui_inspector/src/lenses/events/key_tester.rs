@@ -37,7 +37,7 @@ pub(super) struct KeyTester {
     focus: FocusHandle,
     app_focus: Option<WeakFocusHandle>,
     sequence: KeySequence,
-    _subscriptions: [Subscription; 3],
+    _intercept: Subscription,
 }
 
 impl EventEmitter<KeyTesterEvent> for KeyTester {}
@@ -54,29 +54,17 @@ impl KeyTester {
     /// A tester that notes the app's focus now, then intercepts keys while
     /// its capture box has the focus.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus = cx.focus_handle();
         let tester = cx.entity().downgrade();
-        let subscriptions = [
-            cx.intercept_keystrokes(move |event, window, cx| {
-                tester
-                    .update(cx, |tester, cx| tester.intercept(event, window, cx))
-                    .ok();
-            }),
-            // Programmatic focus changes. Focus listeners run while the window
-            // draws, when a notify can't schedule another frame, so re-render
-            // once the draw is over. (Clicks re-render directly: see the box.)
-            cx.on_focus(&focus, window, |_, window, cx| {
-                cx.defer_in(window, |_, _, cx| cx.notify())
-            }),
-            cx.on_blur(&focus, window, |_, window, cx| {
-                cx.defer_in(window, |_, _, cx| cx.notify())
-            }),
-        ];
+        let intercept = cx.intercept_keystrokes(move |event, window, cx| {
+            tester
+                .update(cx, |tester, cx| tester.intercept(event, window, cx))
+                .ok();
+        });
         let mut tester = Self {
-            focus,
+            focus: cx.focus_handle(),
             app_focus: None,
             sequence: KeySequence::default(),
-            _subscriptions: subscriptions,
+            _intercept: intercept,
         };
         tester.note_app_focus(window, cx);
         tester
@@ -157,14 +145,10 @@ impl KeyTester {
                 colors.surface
             })
             .cursor_pointer()
-            // Runs before the click moves the focus here: note where it was,
-            // and re-render with the new focus once the click is handled.
+            // Runs before the click moves the focus here: note where it was.
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.note_app_focus(window, cx);
-                    cx.notify();
-                }),
+                cx.listener(|this, _, window, cx| this.note_app_focus(window, cx)),
             )
             // A click anywhere else stops listening, even on something that
             // takes no focus (a lens tab that hides the tester, say): drop the
@@ -172,7 +156,6 @@ impl KeyTester {
             .on_mouse_down_out(cx.listener(|this, _, window, cx| {
                 if this.focus.is_focused(window) {
                     window.blur(cx);
-                    cx.notify();
                 }
             }))
             .child(Icon::new(IconName::Keyboard).color(if listening {

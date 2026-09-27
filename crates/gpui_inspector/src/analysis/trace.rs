@@ -262,6 +262,7 @@ fn cause_name(cause: &RenderCause) -> String {
         } => format!("notify {}", format::type_name(type_name)),
         CauseKind::Notify { entity, .. } => format!("notify entity {entity}"),
         CauseKind::Refresh => "refresh".to_string(),
+        CauseKind::Focus => "focus".to_string(),
         CauseKind::Resize => "resize".to_string(),
         CauseKind::WindowState => "window state".to_string(),
         CauseKind::Input { event } => format!("input {event}"),

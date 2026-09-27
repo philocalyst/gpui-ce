@@ -916,11 +916,6 @@ impl Render for ElementsLens {
         let detail = self.render_detail_pane(holding, wide, theme, cx);
         div()
             .size_full()
-            // Loupe's views are cached and app refreshes skip them, so a
-            // click that moves focus (into a text field, out of the tree)
-            // must re-render the lens for the change to show and for a
-            // newly focused field to receive typed text.
-            .capture_any_mouse_down(cx.listener(|_, _, _, cx| cx.notify()))
             .on_action(cx.listener(|this, _: &Cancel, _, cx| {
                 if this.filtering() {
                     this.clear_filter(cx);

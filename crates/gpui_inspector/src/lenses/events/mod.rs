@@ -88,8 +88,9 @@ impl EventsLens {
                 this.reveal_selection(window, cx);
                 cx.notify();
             }),
-            // This view is cached: re-render when the field's caret, selection
-            // or focus changes, not only its text.
+            // This view is cached: re-render when the field's caret or
+            // selection moves, not only when its text changes. (The window
+            // re-renders Loupe when the focus comes or goes.)
             cx.observe(&filter_field, |_, _, cx| cx.notify()),
             cx.subscribe(&filter_field, |this, field, _: &TextChanged, cx| {
                 let text = field.read(cx).as_str().to_string();

@@ -173,6 +173,7 @@ pub(crate) fn cause_summary(kind: &CauseKind) -> String {
         } => format!("{} notified", format::type_name(type_name)),
         CauseKind::Notify { entity, .. } => format!("entity {entity:?} notified"),
         CauseKind::Refresh => "window.refresh()".into(),
+        CauseKind::Focus => "focus moved".into(),
         CauseKind::Resize => "resized".into(),
         CauseKind::WindowState => "window state".into(),
         CauseKind::Input { event } => (*event).into(),

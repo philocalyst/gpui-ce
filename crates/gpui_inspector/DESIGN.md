@@ -117,7 +117,10 @@ behind `cfg(any(feature = "inspector", debug_assertions))`.
   screen without such labels never does.
 * **The app is not perturbed.** App-code `window.refresh()` re-renders the app
   alone; only resizes, window-state changes and inspector changes re-render
-  the inspector's cached views. Frames drawn only for the inspector replay the
+  the inspector's cached views. A focus move re-renders the side it left and
+  the side it reached (both when it crosses between the app and the
+  inspector), except that the inspector's own input taking the focus from the
+  app leaves the app replayed. Frames drawn only for the inspector replay the
   app's previous frame instead of rendering it ("hold app"), and holding the
   app keeps it still while you inspect a hover menu. Such a frame reports the
   app's views as `ViewOutcome::Replayed`, never `Cached`: `Cached` is a real
