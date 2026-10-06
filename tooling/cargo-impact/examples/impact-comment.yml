@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   authorize:
-    if: github.event.issue.pull_request && github.event.comment.body == '@cargo-impact check'
+    if: github.event.issue.pull_request && (github.event.comment.body == '@cargo-impact check' || github.event.comment.body == '/cargo-impact check')
     runs-on: ubuntu-latest
     permissions:
       contents: read

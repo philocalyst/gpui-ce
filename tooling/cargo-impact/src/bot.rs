@@ -71,10 +71,13 @@ pub fn plan(
     if event.repository.full_name != repository || !safe_repository(repository) {
         return Err(BotError::RepositoryMismatch);
     }
-    let expected = format!("@{bot_name} check");
+    let mention_command = format!("@{bot_name} check");
+    let slash_command = format!("/{bot_name} check");
     if event.action != "created"
         || event.issue.pull_request.is_none()
-        || event.comment.body.trim() != expected
+        || ![mention_command, slash_command]
+            .iter()
+            .any(|command| event.comment.body.trim() == command)
         || event.comment.user.kind != "User"
         || !safe_login(&event.comment.user.login)
     {

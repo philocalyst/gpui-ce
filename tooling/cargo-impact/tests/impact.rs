@@ -88,6 +88,14 @@ fn classifies_real_downstream_builds_against_both_library_versions() {
         report.downstreams[3].classification,
         Classification::HarnessFailure
     );
+    let markdown = report.markdown();
+    let duplicate = report.downstreams[0].candidate.diagnostics[0].clone();
+    report.downstreams[0].candidate.diagnostics.push(duplicate);
+    assert_eq!(
+        report.markdown(),
+        markdown,
+        "duplicate target errors should stay out of the human report"
+    );
 
     // The same evidence can generate immutable forge links and survive report persistence.
     let sha = "a".repeat(40);

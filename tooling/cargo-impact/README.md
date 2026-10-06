@@ -62,7 +62,8 @@ published crate, hosted service, or GitHub App registration is required. Add
 `.cargo-impact/` and `impact-report/` to the library repository's `.gitignore`.
 
 The PR workflow produces an artifact and a job summary. The comment workflow
-accepts exactly `@cargo-impact check` on an open PR. Before reacting with 👀,
+accepts exactly `@cargo-impact check` or `/cargo-impact check` on an open PR.
+The slash command avoids mentioning a GitHub account. Before reacting with 👀,
 it queries the commenter's **current write, maintain, or admin permission**;
 author-association fields and account badges do not grant access. Enable the
 repository's Actions setting that permits the workflow's requested comment

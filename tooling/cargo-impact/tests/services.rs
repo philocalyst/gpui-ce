@@ -331,7 +331,7 @@ fn bot_rechecks_current_permission_before_reacting() {
     let server = Server::new(vec![(200, json!({"permission":"read"}), vec![])]);
     let error = bot::plan(
         &server.api(),
-        &event("@cargo-impact check"),
+        &event("/cargo-impact check"),
         "org/lib",
         "cargo-impact",
     )
@@ -340,6 +340,28 @@ fn bot_rechecks_current_permission_before_reacting() {
     let requests = server.finish();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].contains("collaborators/maintainer/permission"));
+}
+
+#[test]
+fn authorized_slash_command_does_not_require_an_account_mention() {
+    let server = Server::new(vec![
+        (200, json!({"permission":"admin"}), vec![]),
+        (
+            200,
+            json!({"state":"open","base":{"sha":"a".repeat(40),"repo":{"full_name":"org/lib"}},"head":{"sha":"b".repeat(40),"repo":{"full_name":"org/lib"}}}),
+            vec![],
+        ),
+    ]);
+    let plan = bot::plan(
+        &server.api(),
+        &event("/cargo-impact check"),
+        "org/lib",
+        "cargo-impact",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(plan.requested_by, "maintainer");
+    assert_eq!(server.finish().len(), 2);
 }
 
 #[test]
@@ -379,6 +401,8 @@ fn bot_ignores_quotes_arguments_and_edited_comments() {
         "> @cargo-impact check",
         "@cargo-impact check --shell rm",
         "@cargo-impact check\nmore",
+        "/cargo-impact check --shell rm",
+        "> /cargo-impact check",
     ] {
         assert!(
             bot::plan(&api, &event(body), "org/lib", "cargo-impact")

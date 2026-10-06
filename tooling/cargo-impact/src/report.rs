@@ -134,10 +134,24 @@ impl ImpactReport {
 }
 
 fn render_diagnostics(output: &mut String, result: &DownstreamResult, build: &BuildResult) {
+    let mut seen = std::collections::BTreeSet::new();
     for diagnostic in build
         .diagnostics
         .iter()
         .filter(|d| matches!(d.level, cargo_metadata::diagnostic::DiagnosticLevel::Error))
+        // --all-targets can emit the same error for both the library and its test target.
+        // Preserve both in JSON, but show the source problem once in the concise report.
+        .filter(|d| {
+            seen.insert((
+                d.package_id.as_str(),
+                d.code.as_ref().map(|c| c.code.as_str()),
+                d.message.as_str(),
+                d.spans
+                    .iter()
+                    .find(|s| s.is_primary)
+                    .map(|s| (s.file_name.as_str(), s.line_start, s.column_start)),
+            ))
+        })
         .take(8)
     {
         let code = diagnostic
