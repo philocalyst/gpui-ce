@@ -5,8 +5,9 @@ use super::WgpuSurfaceConfig;
 /// Configuration and lifecycle state shared by window, canvas, and headless targets.
 pub(super) struct RenderTarget {
     config: wgpu::SurfaceConfiguration,
-    transparent_alpha_mode: wgpu::CompositeAlphaMode,
+    transparent_alpha_mode: Option<wgpu::CompositeAlphaMode>,
     opaque_alpha_mode: wgpu::CompositeAlphaMode,
+    transparent: bool,
     maximum_dimension: u32,
     configured: bool,
     needs_redraw: bool,
@@ -60,7 +61,7 @@ impl RenderTarget {
                 // Native desktop swapchains are BGRA; matching that keeps snapshots comparable.
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
-                    wgpu::CompositeAlphaMode::PreMultiplied,
+                    Some(wgpu::CompositeAlphaMode::PreMultiplied),
                     wgpu::CompositeAlphaMode::Opaque,
                     wgpu::PresentMode::Fifo,
                 )
@@ -68,7 +69,12 @@ impl RenderTarget {
         let maximum_dimension = device.limits().max_texture_dimension_2d;
         let (width, height) = clamped_size(requested.size, maximum_dimension);
         let alpha_mode = if requested.transparent {
-            transparent_alpha_mode
+            transparent_alpha_mode.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "surface does not support a compatible transparent alpha mode for adapter {:?}",
+                    adapter.get_info().name
+                )
+            })?
         } else {
             opaque_alpha_mode
         };
@@ -85,6 +91,7 @@ impl RenderTarget {
             },
             transparent_alpha_mode,
             opaque_alpha_mode,
+            transparent: requested.transparent,
             maximum_dimension,
             configured: surface.is_some(),
             needs_redraw: false,
@@ -107,18 +114,19 @@ impl RenderTarget {
     }
 
     /// Returns whether blend pipelines must be rebuilt.
-    pub(super) fn set_transparent(&mut self, transparent: bool) -> bool {
-        self.clear_color = clear_color(transparent);
+    pub(super) fn set_transparent(&mut self, transparent: bool) -> anyhow::Result<bool> {
         let alpha_mode = if transparent {
-            self.transparent_alpha_mode
+            self.transparent_alpha_mode.ok_or_else(|| {
+                anyhow::anyhow!("surface does not support a compatible transparent alpha mode")
+            })?
         } else {
             self.opaque_alpha_mode
         };
-        if alpha_mode == self.config.alpha_mode {
-            return false;
-        }
+        let rebuild_pipelines = alpha_mode != self.config.alpha_mode;
         self.config.alpha_mode = alpha_mode;
-        true
+        self.transparent = transparent;
+        self.clear_color = clear_color(transparent);
+        Ok(rebuild_pipelines)
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -126,7 +134,16 @@ impl RenderTarget {
         &mut self,
         requested: WgpuSurfaceConfig,
         supported_present_modes: &[wgpu::PresentMode],
-    ) -> bool {
+        supported_alpha_modes: &[wgpu::CompositeAlphaMode],
+    ) -> anyhow::Result<bool> {
+        let (transparent_alpha_mode, opaque_alpha_mode) = select_alpha_modes(supported_alpha_modes)
+            .ok_or_else(|| anyhow::anyhow!("replacement surface reports no alpha modes"))?;
+        anyhow::ensure!(
+            !requested.transparent || transparent_alpha_mode.is_some(),
+            "replacement surface does not support a compatible transparent alpha mode"
+        );
+        self.transparent_alpha_mode = transparent_alpha_mode;
+        self.opaque_alpha_mode = opaque_alpha_mode;
         self.resize(requested.size);
         self.config.present_mode = select_present_mode(
             requested.preferred_present_mode,
@@ -140,7 +157,7 @@ impl RenderTarget {
     pub(super) fn recovery_config(&self) -> WgpuSurfaceConfig {
         WgpuSurfaceConfig {
             size: self.viewport_size(),
-            transparent: self.config.alpha_mode != wgpu::CompositeAlphaMode::Opaque,
+            transparent: self.transparent,
             preferred_present_mode: Some(self.config.present_mode),
         }
     }
@@ -229,10 +246,13 @@ fn clamped_size(size: Size<DevicePixels>, maximum: u32) -> (u32, u32) {
     (width, height)
 }
 
-/// The supported alpha modes for transparent and opaque windows, in that order.
+/// Chooses a compatible transparent mode (when one exists) and an opaque-capable mode.
+///
+/// Opaque mode can fall back to any supported mode. Transparent mode cannot: silently choosing
+/// `Opaque` would hide every GPUI overlay behind the external content it is meant to cover.
 fn select_alpha_modes(
     supported: &[wgpu::CompositeAlphaMode],
-) -> Option<(wgpu::CompositeAlphaMode, wgpu::CompositeAlphaMode)> {
+) -> Option<(Option<wgpu::CompositeAlphaMode>, wgpu::CompositeAlphaMode)> {
     // A non-opaque CAMetalLayer, which WGPU's Metal backend reports as
     // PostMultiplied, composites what gpui draws there as it does with Metal.
     #[cfg(target_os = "macos")]
@@ -250,14 +270,16 @@ fn select_alpha_modes(
         wgpu::CompositeAlphaMode::Opaque,
         wgpu::CompositeAlphaMode::Inherit,
     ];
-    let pick = |preferences: &[wgpu::CompositeAlphaMode]| {
-        preferences
-            .iter()
-            .find(|mode| supported.contains(mode))
-            .or_else(|| supported.first())
-            .copied()
-    };
-    Some((pick(TRANSPARENT)?, pick(OPAQUE)?))
+    let transparent = TRANSPARENT
+        .iter()
+        .find(|mode| supported.contains(mode))
+        .copied();
+    let opaque = OPAQUE
+        .iter()
+        .find(|mode| supported.contains(mode))
+        .or_else(|| supported.first())
+        .copied()?;
+    Some((transparent, opaque))
 }
 
 fn clear_color(transparent: bool) -> wgpu::Color {
