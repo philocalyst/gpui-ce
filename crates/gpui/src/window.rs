@@ -8274,16 +8274,17 @@ mod tests {
 
     use crate::{
         AnyWindowHandle, AppContext as _, Background, Bounds, BoxShadow, ColorExt as _, Context,
-        DevicePixels, DispatchPhase, DragMoveEvent, Empty, ExternalDragPayload, ExternalPaths,
-        FileDragPaths, FileDropEvent, FocusHandle, Font, FontId, FontMetrics, GlyphId, ImageSource,
-        InlineLayout, InlineLayoutRequest, InputEvent as _, InteractiveElement as _, IntoElement,
-        LineLayout, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
-        Pixels, PlatformTextSystem, Point, RasterizedGlyph, RasterizedGlyphFormat, Render,
-        RenderGlyphParams, RenderImage, RequestFrameOptions, SUBPIXEL_VARIANTS_X,
-        SUBPIXEL_VARIANTS_Y, ScaledPixels, ShaderBool, Size, StatefulInteractiveElement as _,
-        Styled, TestApp, TestAppContext, TestTextSystem, TextLayoutRequest, TouchDragEvent,
-        TouchEvent, TouchId, TouchPhase, Window, WindowAppearance, WindowOptions, canvas, div,
-        hsla, img, linear_color_stop, linear_gradient, point, px, size, white,
+        DevicePixels, DispatchPhase, DragMoveEvent, Empty, Entity, ExternalDragPayload,
+        ExternalPaths, FileDragPaths, FileDropEvent, FocusHandle, Font, FontId, FontMetrics,
+        GlyphId, ImageSource, InlineLayout, InlineLayoutRequest, InputEvent as _,
+        InteractiveElement as _, IntoElement, LineLayout, LongPressEvent, MouseButton,
+        MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, PlatformTextSystem, Point,
+        RasterizedGlyph, RasterizedGlyphFormat, Render, RenderGlyphParams, RenderImage,
+        RequestFrameOptions, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, ShaderBool,
+        Size, StatefulInteractiveElement as _, StyleRefinement, Styled, TestApp, TestAppContext,
+        TestTextSystem, TextLayoutRequest, TouchDragEvent, TouchEvent, TouchId, TouchPhase, Window,
+        WindowAppearance, WindowOptions, anchored, canvas, deferred, div, hsla, img,
+        linear_color_stop, linear_gradient, point, px, size, white,
     };
     use image::{Frame as ImageFrame, ImageBuffer, Rgba};
     use smallvec::smallvec;
@@ -8932,6 +8933,83 @@ mod tests {
 
         let regions = test_window.composition_hit_regions();
         let regions = regions.last().expect("composition frame was presented");
+        assert!(regions.iter().any(|region| region.surface == base));
+        assert!(regions.iter().any(|region| region.surface == overlay));
+    }
+
+    struct CachedCompositionChild {
+        render_count: Rc<Cell<usize>>,
+    }
+
+    impl Render for CachedCompositionChild {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            self.render_count.set(self.render_count.get() + 1);
+            div()
+                .size_full()
+                .bg(white())
+                .on_mouse_down(MouseButton::Left, |_, _, _| {})
+                .child(deferred(
+                    anchored().position(point(px(20.), px(20.))).child(
+                        div()
+                            .w(px(80.))
+                            .h(px(60.))
+                            .bg(white())
+                            .on_mouse_down(MouseButton::Left, |_, _, _| {}),
+                    ),
+                ))
+        }
+    }
+
+    struct CachedCompositionParent {
+        child: Entity<CachedCompositionChild>,
+    }
+
+    impl Render for CachedCompositionParent {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                self.child
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn enabling_composition_replays_cached_paint_to_base_and_overlay(cx: &mut TestAppContext) {
+        let render_count = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let render_count = render_count.clone();
+            move |_, cx| CachedCompositionParent {
+                child: cx.new(|_| CachedCompositionChild { render_count }),
+            }
+        });
+        let test_window = cx.test_window(window.into());
+
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(render_count.get(), 1);
+
+        let (base, overlay) = window
+            .update(cx, |_, window, _| {
+                let composition = window.enable_window_composition().unwrap();
+                (composition.base_surface(), composition.overlay_surface())
+            })
+            .unwrap();
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+
+        assert_eq!(render_count.get(), 1, "the cached child was reused");
+        let layers = test_window.composition_layer_presence();
+        let layers = layers.last().expect("composed frame was presented");
+        assert!(
+            layers.contains(&(base, true)),
+            "cached main paint targets base"
+        );
+        assert!(
+            layers.contains(&(overlay, true)),
+            "cached deferred paint targets overlay"
+        );
+
+        let regions = test_window.composition_hit_regions();
+        let regions = regions.last().expect("composed hit regions were presented");
         assert!(regions.iter().any(|region| region.surface == base));
         assert!(regions.iter().any(|region| region.surface == overlay));
     }
