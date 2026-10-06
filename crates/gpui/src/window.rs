@@ -3712,10 +3712,27 @@ impl Window {
 
         // Now actually paint the elements.
         self.invalidator.set_phase(DrawPhase::Paint);
+        let composition_planes = self.composition.get().map(|composition| {
+            let composition = composition.borrow();
+            (composition.base(), composition.overlay())
+        });
+        if let Some((base, _)) = composition_planes {
+            self.next_frame
+                .scene
+                .set_composition_target(base)
+                .expect("the base surface starts outside any scene scope");
+        }
         root_element.paint(self, cx);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.paint_inspector(inspector_element, cx);
+
+        if let Some((_, overlay)) = composition_planes {
+            self.next_frame
+                .scene
+                .set_composition_target(overlay)
+                .expect("the main scene ends outside a content-filter group");
+        }
 
         self.paint_deferred_draws(cx);
 
