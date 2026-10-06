@@ -1029,4 +1029,98 @@ mod tests {
         assert_eq!(tree.surfaces[2].depth, 1);
     }
 
+    #[test]
+    fn foreign_stale_and_cycle_edits_fail_before_changing_order() {
+        let mut tree = CompositionTree::new();
+        let root = insert_gpui(&mut tree, None);
+        let child = insert_gpui(&mut tree, Some(root.into()));
+        let other_window = CompositionTree::new();
+        let foreign = Id::Gpui(other_window.base());
+        let previous = order(&tree);
+
+        assert!(tree.reparent(root.into(), Some(child.into())).is_err());
+        assert!(tree.reparent(root.into(), Some(foreign)).is_err());
+        assert!(tree.place_relative(root.into(), foreign, true).is_err());
+        assert_eq!(order(&tree), previous);
+        tree.remove(child.into()).unwrap();
+        assert!(tree.parent_of(child.into()).is_err());
+        assert_eq!(
+            order(&tree),
+            [Id::Gpui(tree.base()), root.into(), Id::Gpui(tree.overlay())]
+        );
+    }
+
+    #[test]
+    fn fixed_gpui_planes_can_parent_children_without_changing_root_order() {
+        let mut tree = CompositionTree::new();
+        let base = tree.base();
+        let overlay = tree.overlay();
+        let base_child = insert_gpui(&mut tree, Some(base.into()));
+        let overlay_child = insert_gpui(&mut tree, Some(overlay.into()));
+
+        assert_eq!(
+            tree.parent_of(base_child.into()).unwrap(),
+            Some(base.into())
+        );
+        assert_eq!(
+            tree.parent_of(overlay_child.into()).unwrap(),
+            Some(overlay.into())
+        );
+        assert_eq!(
+            tree.children_of(None).unwrap(),
+            [base.into(), overlay.into()]
+        );
+    }
+
+    #[test]
+    fn bounds_reject_negative_sizes_and_overflow_but_allow_empty_or_clipped_surfaces() {
+        let mut tree = CompositionTree::new();
+        let invalid_size = Bounds {
+            origin: point(DevicePixels(0), DevicePixels(0)),
+            size: size(DevicePixels(-1), DevicePixels(20)),
+        };
+        let overflow = Bounds {
+            origin: point(DevicePixels(i32::MAX), DevicePixels(0)),
+            size: size(DevicePixels(1), DevicePixels(0)),
+        };
+        let empty = Bounds {
+            origin: point(DevicePixels(-10), DevicePixels(0)),
+            size: size(DevicePixels(0), DevicePixels(0)),
+        };
+
+        assert!(CompositionTree::validate_bounds(invalid_size).is_err());
+        assert!(CompositionTree::validate_bounds(overflow).is_err());
+        assert!(CompositionTree::validate_bounds(empty).is_ok());
+        let previous = order(&tree);
+        assert!(tree.set_bounds(tree.base().into(), invalid_size).is_err());
+        assert_eq!(order(&tree), previous);
+    }
+
+    #[test]
+    fn native_bounds_are_absolute_and_noop_updates_are_detected() {
+        let mut tree = CompositionTree::new();
+        let parent = insert_gpui(&mut tree, None);
+        let child = NativeSurfaceId::fresh();
+        let child_bounds = bounds(70, 60);
+        tree.insert_native(
+            child,
+            child_bounds,
+            Rc::new(NoPlatformHandle),
+            Some(parent.into()),
+        )
+        .unwrap();
+
+        assert!(!tree.set_bounds(child.into(), child_bounds).unwrap());
+        assert!(tree.set_bounds(child.into(), bounds(71, 60)).unwrap());
+        tree.remove(parent.into()).unwrap();
+
+        let promoted = tree
+            .surfaces()
+            .iter()
+            .find(|surface| surface.id() == child.into())
+            .unwrap();
+        assert_eq!(promoted.parent, None);
+        assert_eq!(promoted.bounds(), Some(bounds(71, 60)));
+    }
+
 }
