@@ -16,7 +16,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/cargo-impact
@@ -28,12 +28,12 @@ jobs:
     timeout-minutes: 60
     steps:
       # Always install the scanner and read recipes from trusted base code.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           path: baseline
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -42,7 +42,7 @@ jobs:
       - uses: ./baseline/.github/cargo-impact
         with:
           source: baseline/.github/cargo-impact
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/impact-work
           key: impact-untrusted-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-${{ github.run_id }}
@@ -54,7 +54,7 @@ jobs:
           "$RUNNER_TEMP/impact/bin/cargo-impact" check
           --baseline baseline --candidate candidate --config baseline/impact.toml
           --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: downstream-impact
@@ -62,7 +62,7 @@ jobs:
       - name: Add report to job summary
         if: always()
         run: if test -f impact-report/report.md; then cat impact-report/report.md >> "$GITHUB_STEP_SUMMARY"; fi
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: always()
         with:
           path: ${{ runner.temp }}/impact-work

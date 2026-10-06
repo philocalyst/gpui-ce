@@ -73,6 +73,11 @@ binary cache immediately, so a later regression failure still preserves the
 installation for the next attempt. Its key includes source, embedded templates,
 lockfile, toolchain, host OS, and architecture.
 
+The generated workflows pin official Actions to reviewed release commits and
+use their Node.js 24 runtimes. They target GitHub.com and current hosted runners;
+self-hosted runners need Actions Runner 2.327.1 or newer. GitHub Enterprise
+Server requires an alternative artifact transport before using the comment bot.
+
 The PR workflow produces an artifact and a job summary. The comment workflow
 accepts exactly `@cargo-impact check` or `/cargo-impact check` on an open PR.
 The slash command avoids mentioning a GitHub account. Before reacting with 👀,
