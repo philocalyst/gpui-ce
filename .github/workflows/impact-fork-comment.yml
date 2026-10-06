@@ -21,7 +21,7 @@ jobs:
       baseline: ${{ steps.plan.outputs.baseline }}
       candidate: ${{ steps.plan.outputs.candidate }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: philocalyst/gpui-ce
           persist-credentials: false
@@ -43,7 +43,7 @@ jobs:
             echo 'requested=true' >> "$GITHUB_OUTPUT"
             jq -r '"baseline=" + .baseline_sha, "candidate=" + .candidate_sha' plan.json >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.plan.outputs.requested == 'true'
         with:
           name: impact-scanner
@@ -56,19 +56,19 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: philocalyst/gpui-ce
           ref: ${{ needs.authorize.outputs.baseline }}
           path: baseline
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: philocalyst/gpui-ce
           ref: ${{ needs.authorize.outputs.candidate }}
           path: candidate
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: impact-scanner
           path: ${{ runner.temp }}/impact/bin
@@ -78,7 +78,7 @@ jobs:
         run: >-
           python3 baseline/tooling/cargo-impact/experiments/fork/prepare.py
           --baseline baseline --candidate candidate --output "$RUNNER_TEMP/impact-inputs"
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/impact-work
           key: impact-fork-work-${{ runner.os }}-${{ github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -89,7 +89,7 @@ jobs:
           --baseline "$RUNNER_TEMP/impact-inputs/baseline" --candidate "$RUNNER_TEMP/impact-inputs/candidate"
           --config "$RUNNER_TEMP/impact-inputs/impact.toml" --no-discovery
           --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: downstream-impact
@@ -106,17 +106,17 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: philocalyst/gpui-ce
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: impact-scanner
           path: ${{ runner.temp }}/impact/bin
       - name: Make scanner executable
         run: chmod +x "$RUNNER_TEMP/impact/bin/cargo-impact"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: downstream-impact
           path: impact-report
