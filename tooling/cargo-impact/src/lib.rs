@@ -17,6 +17,7 @@ pub mod runner;
 
 pub use engine::{ImpactError, analyze, analyze_with_discovery};
 pub use model::{
-    BuildResult, Classification, CompilerDiagnostic, DownstreamResult, DownstreamSource,
-    DownstreamSpec, GateResult, HarnessFailure, ImpactReport, ImpactRequest, SemverBump,
+    BuildResult, Classification, CompilerDiagnostic, DiagnosticOrigin, DiagnosticPackage,
+    DownstreamResult, DownstreamSource, DownstreamSpec, GateResult, HarnessFailure, ImpactReport,
+    ImpactRequest, SemverBump,
 };

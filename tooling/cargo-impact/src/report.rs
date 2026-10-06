@@ -165,6 +165,14 @@ fn render_diagnostics(output: &mut String, result: &DownstreamResult, build: &Bu
             escape(code),
             escape(&diagnostic.message)
         );
+        if let Some(package) = &diagnostic.package {
+            let _ = writeln!(
+                output,
+                "Package: {} ({:?})\n",
+                escape(&package.name),
+                package.origin
+            );
+        }
         if let Some(span) = diagnostic.spans.iter().find(|s| s.is_primary) {
             let label = format!(
                 "{}:{}:{}",
@@ -173,11 +181,14 @@ fn render_diagnostics(output: &mut String, result: &DownstreamResult, build: &Bu
                 span.column_start
             );
             let link = match (&result.source, &result.revision) {
-                (DownstreamSource::Git { url, forge, .. }, Some(revision)) => {
-                    Repository::parse(url, *forge).ok().and_then(|repo| {
-                        repo.source_link(revision, &span.file_name, span.line_start)
-                    })
-                }
+                (DownstreamSource::Git { url, forge, .. }, Some(revision)) => diagnostic
+                    .source_files
+                    .get(&span.file_name)
+                    .and_then(|path| {
+                        Repository::parse(url, *forge).ok().and_then(|repo| {
+                            repo.source_link(revision, path.to_str()?, span.line_start)
+                        })
+                    }),
                 _ => None,
             };
             if let Some(link) = link {
