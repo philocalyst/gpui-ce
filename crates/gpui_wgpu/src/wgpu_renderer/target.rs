@@ -296,7 +296,75 @@ fn clear_color(transparent: bool) -> wgpu::Color {
 
 #[cfg(test)]
 mod tests {
-    use super::{select_alpha_modes, select_present_mode};
+    use super::{RenderTarget, select_alpha_modes, select_present_mode};
+    use crate::WgpuSurfaceConfig;
+    use gpui::DevicePixels;
+
+    fn opaque_only_target() -> RenderTarget {
+        RenderTarget {
+            config: wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: wgpu::TextureFormat::Bgra8Unorm,
+                width: 64,
+                height: 48,
+                present_mode: wgpu::PresentMode::Fifo,
+                desired_maximum_frame_latency: 2,
+                alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                view_formats: Vec::new(),
+            },
+            transparent_alpha_mode: None,
+            opaque_alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            transparent: false,
+            maximum_dimension: 4096,
+            configured: true,
+            needs_redraw: false,
+            clear_color: super::clear_color(false),
+        }
+    }
+
+    #[test]
+    fn unsupported_transparency_is_rejected_without_mutating_the_target() {
+        let mut target = opaque_only_target();
+        let requested = WgpuSurfaceConfig {
+            size: gpui::size(DevicePixels(128), DevicePixels(96)),
+            transparent: true,
+            preferred_present_mode: Some(wgpu::PresentMode::Immediate),
+        };
+
+        assert!(
+            target
+                .apply(
+                    requested,
+                    &[wgpu::PresentMode::Immediate],
+                    &[wgpu::CompositeAlphaMode::Opaque],
+                )
+                .is_err()
+        );
+        assert!(target.set_transparent(true).is_err());
+        assert_eq!(target.config.width, 64);
+        assert_eq!(target.config.height, 48);
+        assert_eq!(target.config.present_mode, wgpu::PresentMode::Fifo);
+        assert_eq!(target.config.alpha_mode, wgpu::CompositeAlphaMode::Opaque);
+        assert!(!target.transparent);
+        assert_eq!(target.clear_color.a, 1.0);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn recovery_preserves_transparency_when_the_alpha_mode_is_inherited() {
+        let mut target = opaque_only_target();
+        target.transparent_alpha_mode = Some(wgpu::CompositeAlphaMode::Inherit);
+        target.opaque_alpha_mode = wgpu::CompositeAlphaMode::Inherit;
+        target.config.alpha_mode = wgpu::CompositeAlphaMode::Inherit;
+        target.transparent = true;
+        target.clear_color = super::clear_color(true);
+
+        assert!(target.recovery_config().transparent);
+
+        target.transparent = false;
+        target.clear_color = super::clear_color(false);
+        assert!(!target.recovery_config().transparent);
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -309,26 +377,41 @@ mod tests {
         assert_eq!(
             select_alpha_modes(&metal),
             Some((
-                wgpu::CompositeAlphaMode::PostMultiplied,
+                Some(wgpu::CompositeAlphaMode::PostMultiplied),
                 wgpu::CompositeAlphaMode::Opaque,
             )),
         );
     }
 
     #[test]
-    fn alpha_modes_follow_preference_then_the_first_supported() {
+    fn alpha_modes_keep_transparency_strict_and_opaque_selection_resilient() {
         use wgpu::CompositeAlphaMode::{Inherit, Opaque, PostMultiplied, PreMultiplied};
 
         assert_eq!(
             select_alpha_modes(&[PostMultiplied, Opaque, PreMultiplied]),
-            Some((PreMultiplied, Opaque)),
+            Some((Some(PreMultiplied), Opaque)),
         );
-        assert_eq!(select_alpha_modes(&[Inherit]), Some((Inherit, Inherit)));
+        assert_eq!(
+            select_alpha_modes(&[Inherit]),
+            Some((Some(Inherit), Inherit))
+        );
         // Neither opaque preference is offered, so opaque windows take the
         // first mode the surface supports.
         assert_eq!(
             select_alpha_modes(&[PostMultiplied]),
-            Some((PostMultiplied, PostMultiplied)),
+            Some((
+                if cfg!(target_os = "macos") {
+                    Some(PostMultiplied)
+                } else {
+                    None
+                },
+                PostMultiplied,
+            )),
+        );
+        assert_eq!(
+            select_alpha_modes(&[Opaque]),
+            Some((None, Opaque)),
+            "opaque surfaces must not be treated as transparent-capable"
         );
     }
 
