@@ -58,6 +58,22 @@ impl MacWgpuRenderer {
         Ok(Self { renderer, layer })
     }
 
+    /// Creates a transparent output layer sharing the window renderer's GPU context and atlas.
+    pub fn new_composition_surface(
+        base: &Self,
+        layer: MetalLayer,
+        size: Size<DevicePixels>,
+    ) -> anyhow::Result<Self> {
+        let config = WgpuSurfaceConfig {
+            size,
+            transparent: true,
+            preferred_present_mode: None,
+        };
+        let renderer =
+            WgpuRenderer::new_composition_metal_layer_surface(&base.renderer, &layer, config)?;
+        Ok(Self { renderer, layer })
+    }
+
     pub fn layer(&self) -> Option<&MetalLayerRef> {
         Some(&self.layer)
     }
@@ -81,8 +97,8 @@ impl MacWgpuRenderer {
 
     /// The surface's alpha mode sets the layer's opacity whenever WGPU
     /// configures it, so it must not be set on the layer directly.
-    pub fn update_transparency(&mut self, transparent: bool) {
-        self.renderer.update_transparency(transparent);
+    pub fn update_transparency(&mut self, transparent: bool) -> anyhow::Result<()> {
+        self.renderer.update_transparency(transparent)
     }
 
     pub fn destroy(&mut self) {
@@ -141,12 +157,12 @@ mod tests {
             MacWgpuRenderer::new(Context::default(), gpui::size(64.0, 64.0), false).unwrap();
         assert!(renderer.layer.is_opaque());
 
-        renderer.update_transparency(true);
+        renderer.update_transparency(true).unwrap();
         assert!(!renderer.layer.is_opaque());
         renderer.update_drawable_size(gpui::size(DevicePixels(128), DevicePixels(96)));
         assert!(!renderer.layer.is_opaque());
 
-        renderer.update_transparency(false);
+        renderer.update_transparency(false).unwrap();
         renderer.update_drawable_size(gpui::size(DevicePixels(64), DevicePixels(64)));
         assert!(renderer.layer.is_opaque());
     }
