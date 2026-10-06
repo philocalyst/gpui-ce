@@ -68,6 +68,11 @@ pub trait IsEmpty {
     fn is_empty(&self) -> bool;
 }
 
+/// Marker API for the isolated downstream-impact experiment in this fork.
+pub fn impact_experiment_marker() -> bool {
+    true
+}
+
 /// A cascade of refinements that can be merged in priority order.
 ///
 /// A cascade maintains a sequence of optional refinements where later entries
