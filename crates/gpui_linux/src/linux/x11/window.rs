@@ -3,10 +3,11 @@ use x11rb::connection::RequestConnection;
 
 use crate::linux::X11ClientStatePtr;
 use gpui::{
-    AnyWindowHandle, Bounds, Decorations, DevicePixels, ForegroundExecutor, GpuSpecs, Modifiers,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, ScaledPixels, Scene, Size,
-    Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    AnyWindowHandle, Bounds, CompositionFrame, Decorations, DevicePixels, ForegroundExecutor,
+    GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformSurfaceAttachment, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, ResizeEdge, ScaledPixels, Scene, Size, Tiling,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
     WindowDecorations, WindowKind, WindowParams, popup::PopupNotSupportedError, px,
 };
 use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig};
@@ -29,9 +30,16 @@ use x11rb::{
 };
 
 use std::{
-    cell::RefCell, ffi::c_void, fmt::Display, num::NonZeroU32, ptr::NonNull, rc::Rc, sync::Arc,
+    cell::{Cell, RefCell},
+    ffi::c_void,
+    fmt::Display,
+    num::NonZeroU32,
+    ptr::NonNull,
+    rc::Rc,
+    sync::Arc,
 };
 
+use super::composition::{CompositionRawWindow, X11ChildConfig, X11Composition};
 use super::{X11Display, XINPUT_ALL_DEVICE_GROUPS, XINPUT_ALL_DEVICES};
 
 x11rb::atom_manager! {
@@ -264,6 +272,11 @@ pub struct X11WindowState {
     x_root_window: xproto::Window,
     x_screen_index: usize,
     visual_id: u32,
+    visual_depth: u8,
+    colormap: xproto::Colormap,
+    transparent_visual: bool,
+    window_alive: Rc<Cell<bool>>,
+    composition: X11Composition,
     pub(crate) counter_id: sync::Counter,
     pub(crate) last_sync_counter: Option<sync::Int64>,
     bounds: Bounds<Pixels>,
@@ -829,6 +842,11 @@ impl X11WindowState {
                 x_root_window: visual_set.root,
                 x_screen_index,
                 visual_id: visual.id,
+                visual_depth: visual.depth,
+                colormap,
+                transparent_visual: visual_set.transparent.is_some(),
+                window_alive: Rc::new(Cell::new(true)),
+                composition: X11Composition::default(),
                 bounds: bounds.to_pixels(scale_factor),
                 scale_factor,
                 renderer,
@@ -882,6 +900,10 @@ impl Drop for X11Window {
             parent.state.borrow_mut().children.remove(&self.0.x_window);
         }
 
+        state.composition.detach_native_surfaces();
+        let client = state.client.clone();
+        state.composition.destroy(&client);
+        state.window_alive.set(false);
         state.renderer.destroy();
 
         let destroy_x_window = maybe!({
@@ -1308,6 +1330,7 @@ impl X11WindowStatePtr {
 
             let gpu_size = query_render_extent(&self.xcb, self.x_window)?;
             state.renderer.update_drawable_size(gpu_size);
+            state.composition.resize(gpu_size);
             let result = (is_resize, state.content_size(), state.scale_factor);
             if let Some(value) = state.last_sync_counter.take() {
                 check_reply(
@@ -1353,8 +1376,9 @@ impl X11WindowStatePtr {
         let mut state = self.state.borrow_mut();
         state.appearance = appearance;
         let is_transparent = state.is_transparent();
-        state.renderer.update_transparency(is_transparent);
-        state.appearance = appearance;
+        if let Err(error) = state.renderer.update_transparency(is_transparent) {
+            log::error!("failed to update X11 renderer transparency: {error:#}");
+        }
         drop(state);
         let callback = self.callbacks.borrow_mut().appearance_changed.take();
         if let Some(mut fun) = callback {
@@ -1614,9 +1638,13 @@ impl PlatformWindow for X11Window {
 
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut state = self.0.state.borrow_mut();
+        let previous = state.background_appearance;
         state.background_appearance = background_appearance;
         let transparent = state.is_transparent();
-        state.renderer.update_transparency(transparent);
+        if let Err(error) = state.renderer.update_transparency(transparent) {
+            state.background_appearance = previous;
+            log::error!("failed to update X11 renderer transparency: {error:#}");
+        }
     }
 
     fn background_appearance(&self) -> WindowBackgroundAppearance {
@@ -1758,6 +1786,67 @@ impl PlatformWindow for X11Window {
         self.0.callbacks.borrow_mut().button_layout_changed = Some(callback);
     }
 
+    fn enable_composition(&self) -> anyhow::Result<()> {
+        let mut state = self.0.state.borrow_mut();
+        let xcb = self.0.xcb.clone();
+        let screen_id = state.x_screen_index;
+        let config = X11ChildConfig::new(
+            xcb.clone(),
+            self.0.x_window,
+            state.x_root_window,
+            screen_id,
+            state.visual_id,
+            state.visual_depth,
+            state.transparent_visual,
+            state.colormap,
+            xcb.setup().roots[screen_id].black_pixel,
+            state.window_alive.clone(),
+        );
+        let size = state.bounds.size.to_device_pixels(state.scale_factor);
+        let client = state.client.clone();
+        let X11WindowState {
+            composition,
+            renderer,
+            ..
+        } = &mut *state;
+        composition.enable(config, &client, renderer, size)
+    }
+
+    fn create_composition_surface(&self) -> anyhow::Result<Rc<dyn PlatformSurfaceAttachment>> {
+        let mut state = self.0.state.borrow_mut();
+        state.composition.create_surface()
+    }
+
+    fn present_composition(&self, frame: CompositionFrame<'_>) -> anyhow::Result<()> {
+        let mut state = self.0.state.borrow_mut();
+        let raw_window = CompositionRawWindow::new(
+            &self.0.xcb,
+            state.x_screen_index,
+            self.0.x_window,
+            state.visual_id,
+        );
+        let size = state.bounds.size.to_device_pixels(state.scale_factor);
+        let client = state.client.clone();
+        let owner_state = self.0.clone();
+        let scale_factor = state.scale_factor;
+        let X11WindowState {
+            composition,
+            renderer,
+            force_render_after_recovery,
+            ..
+        } = &mut *state;
+        composition.present(
+            frame,
+            &client,
+            &owner_state,
+            size,
+            renderer,
+            &raw_window,
+            scale_factor,
+            force_render_after_recovery,
+        )
+    }
+
     fn draw(&self, scene: &Scene) {
         let mut inner = self.0.state.borrow_mut();
 
@@ -1771,7 +1860,7 @@ impl PlatformWindow for X11Window {
                 visual_id: inner.visual_id,
             };
             match inner.renderer.recover(&raw_window) {
-                Ok(()) => {}
+                Ok(()) => inner.composition.mark_device_recovered(),
                 Err(err) => {
                     log::warn!("GPU recovery failed, will retry on next frame: {err}");
                 }
@@ -1955,12 +2044,16 @@ impl PlatformWindow for X11Window {
             WindowDecorations::Server => {
                 state.decorations = WindowDecorations::Server;
                 let is_transparent = state.is_transparent();
-                state.renderer.update_transparency(is_transparent);
+                if let Err(error) = state.renderer.update_transparency(is_transparent) {
+                    log::error!("failed to update X11 renderer transparency: {error:#}");
+                }
             }
             WindowDecorations::Client => {
                 state.decorations = WindowDecorations::Client;
                 let is_transparent = state.is_transparent();
-                state.renderer.update_transparency(is_transparent);
+                if let Err(error) = state.renderer.update_transparency(is_transparent) {
+                    log::error!("failed to update X11 renderer transparency: {error:#}");
+                }
             }
         }
 
