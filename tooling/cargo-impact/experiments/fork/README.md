@@ -15,9 +15,9 @@ procedural macro, semver gate, and downstream diagnostics.
 
 | Draft PR | Change to the real crate | Expected result |
 | --- | --- | --- |
-| Additive API | Add a public experiment marker function | Gate closes; no consumer builds; exit 0 |
-| Used API becomes private | Make `Cascade::reserve` crate-private | Gate opens; reserve-user gets E0624; base-user succeeds; exit 1 |
-| Unused API becomes private | Make `Cascade::set` crate-private | Gate opens; both consumers succeed; exit 0 |
+| [Additive API: PR 1](https://github.com/philocalyst/gpui-ce/pull/1) | Add a public experiment marker function | Gate closes; no consumer builds; exit 0 |
+| [Used API becomes private: PR 2](https://github.com/philocalyst/gpui-ce/pull/2) | Make `Cascade::reserve` crate-private | Gate opens; reserve-user gets E0624; base-user succeeds; exit 1 |
+| [Unused API becomes private: PR 3](https://github.com/philocalyst/gpui-ce/pull/3) | Make `Cascade::set` crate-private | Gate opens; both consumers succeed; exit 0 |
 
 The PR workflow also supports manual dispatch. Dispatch forces consumer builds
 against the selected branch to exercise Docker without requiring an API change.
@@ -52,8 +52,44 @@ reserve-user's source span while base-user succeeds; private `set` opens the
 gate but both consumers compile. The missing target produces E0463 and a
 harness-failure classification, and removing that recipe override recovers.
 Reports are retained in the ignored repository-local `.cargo-impact/` directory.
-Hosted Docker, reactions, permission checks, and report comments still require
-the GitHub runs.
+The hosted runs below exercise Docker, reactions, permission checks, and report
+comments with the same fixtures.
+
+## Hosted results
+
+The corrected Docker runs matched all three expected outcomes:
+[additive](https://github.com/philocalyst/gpui-ce/actions/runs/37517124744),
+[used API](https://github.com/philocalyst/gpui-ce/actions/runs/37517123762), and
+[unused API](https://github.com/philocalyst/gpui-ce/actions/runs/37517122444).
+The used-API job's failure is intentional: its JSON records a successful
+baseline, candidate E0624 at `src/lib.rs:10:25`, full secondary spans, the
+consumer's package/target, and a compatible base-user. Markdown deduplicates
+the library/test-target errors while retaining both records in JSON.
+
+[Missing-target dispatch](https://github.com/philocalyst/gpui-ce/actions/runs/37517134500)
+returned E0463 as `harness_failure` / `environment`; base-user still succeeded.
+[Recovery dispatch](https://github.com/philocalyst/gpui-ce/actions/runs/37517954062)
+compiled both consumers after removing the target override.
+
+[The comment run](https://github.com/philocalyst/gpui-ce/actions/runs/37517143302)
+verified the owner's current permission, reacted with eyes, and posted
+[a diagnostic report](https://github.com/philocalyst/gpui-ce/pull/2#issuecomment-6023820205)
+with the tested head and artifact link despite the build's intentional exit 1.
+The final reusable installation action pins the host toolchain and saves its
+binary before downstream work so compiler failures do not discard that cache.
+Hosted comment jobs revealed GitHub's read-only cache-token scope for
+`issue_comment`. The final bot therefore transfers its trusted scanner through
+an immutable same-run artifact; PR and dispatch events retain writable caches.
+The generic default-branch push job warms scanner installation, and the fork's
+scanner-only dispatch permits exercising that cache without running consumers.
+
+An additional anonymous Git checkout of this same fork pinned the full commit
+ID and compiled the nested reserve-user. It exposed an unrelated dangling
+`tooling/perf/LICENSE-APACHE` link, now safely preserved by snapshots. The retry
+returned the expected E0624 and a verified commit-pinned link to
+`tooling/cargo-impact/experiments/fork/consumers/reserve-user/src/lib.rs#L10`.
+Generated files, external dependency files, and upstream macro definitions
+remain unlinked; verified macro invocation spans can be linked separately.
 
 ```sh
 python3 tooling/cargo-impact/experiments/fork/prepare.py \

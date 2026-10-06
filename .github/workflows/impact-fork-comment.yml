@@ -43,6 +43,11 @@ jobs:
             echo 'requested=true' >> "$GITHUB_OUTPUT"
             jq -r '"baseline=" + .baseline_sha, "candidate=" + .candidate_sha' plan.json >> "$GITHUB_OUTPUT"
           fi
+      - uses: actions/upload-artifact@v4
+        if: steps.plan.outputs.requested == 'true'
+        with:
+          name: impact-scanner
+          path: ${{ runner.temp }}/impact/bin/cargo-impact
   build:
     needs: authorize
     if: needs.authorize.outputs.requested == 'true'
@@ -63,9 +68,12 @@ jobs:
           ref: ${{ needs.authorize.outputs.candidate }}
           path: candidate
           persist-credentials: false
-      - uses: ./baseline/tooling/cargo-impact
+      - uses: actions/download-artifact@v4
         with:
-          source: baseline/tooling/cargo-impact
+          name: impact-scanner
+          path: ${{ runner.temp }}/impact/bin
+      - name: Make scanner executable
+        run: chmod +x "$RUNNER_TEMP/impact/bin/cargo-impact"
       - name: Prepare consumers from this fork only
         run: >-
           python3 baseline/tooling/cargo-impact/experiments/fork/prepare.py
@@ -87,11 +95,6 @@ jobs:
           name: downstream-impact
           path: impact-report/
           if-no-files-found: error
-      - uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: ${{ runner.temp }}/impact-work
-          key: impact-fork-work-${{ runner.os }}-${{ github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}
   report:
     needs: [authorize, build]
     if: always() && needs.authorize.outputs.requested == 'true'
@@ -107,9 +110,12 @@ jobs:
         with:
           repository: philocalyst/gpui-ce
           persist-credentials: false
-      - uses: ./tooling/cargo-impact
+      - uses: actions/download-artifact@v4
         with:
-          source: tooling/cargo-impact
+          name: impact-scanner
+          path: ${{ runner.temp }}/impact/bin
+      - name: Make scanner executable
+        run: chmod +x "$RUNNER_TEMP/impact/bin/cargo-impact"
       - uses: actions/download-artifact@v4
         with:
           name: downstream-impact

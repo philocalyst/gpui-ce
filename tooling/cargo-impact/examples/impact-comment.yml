@@ -11,6 +11,7 @@ jobs:
   authorize:
     if: github.event.issue.pull_request && (github.event.comment.body == '@cargo-impact check' || github.event.comment.body == '/cargo-impact check')
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       issues: write
@@ -36,6 +37,11 @@ jobs:
             echo 'requested=true' >> "$GITHUB_OUTPUT"
             jq -r '"baseline=" + .baseline_sha, "candidate=" + .candidate_sha, "candidate_repository=" + .candidate_repository' plan.json >> "$GITHUB_OUTPUT"
           fi
+      - uses: actions/upload-artifact@v4
+        if: steps.plan.outputs.requested == 'true'
+        with:
+          name: impact-scanner
+          path: ${{ runner.temp }}/impact/bin/cargo-impact
   build:
     needs: authorize
     if: needs.authorize.outputs.requested == 'true'
@@ -55,9 +61,12 @@ jobs:
           ref: ${{ needs.authorize.outputs.candidate }}
           path: candidate
           persist-credentials: false
-      - uses: ./baseline/.github/cargo-impact
+      - uses: actions/download-artifact@v4
         with:
-          source: baseline/.github/cargo-impact
+          name: impact-scanner
+          path: ${{ runner.temp }}/impact/bin
+      - name: Make scanner executable
+        run: chmod +x "$RUNNER_TEMP/impact/bin/cargo-impact"
       - uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/impact-work
@@ -75,15 +84,11 @@ jobs:
         with:
           name: downstream-impact
           path: impact-report/
-      - uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: ${{ runner.temp }}/impact-work
-          key: impact-untrusted-${{ runner.os }}-${{ github.event.issue.number }}-${{ github.run_id }}
   report:
     needs: [authorize, build]
     if: always() && needs.authorize.outputs.requested == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       actions: read
@@ -93,9 +98,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: ./.github/cargo-impact
+      - uses: actions/download-artifact@v4
         with:
-          source: .github/cargo-impact
+          name: impact-scanner
+          path: ${{ runner.temp }}/impact/bin
+      - name: Make scanner executable
+        run: chmod +x "$RUNNER_TEMP/impact/bin/cargo-impact"
       - uses: actions/download-artifact@v4
         with:
           name: downstream-impact
