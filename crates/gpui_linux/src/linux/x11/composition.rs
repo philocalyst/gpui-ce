@@ -1150,7 +1150,95 @@ fn set_input_shape(
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    fn point(x: i32, y: i32) -> Point<DevicePixels> {
+        Point::new(DevicePixels(x), DevicePixels(y))
+    }
+
+    fn bounds(x: i32, y: i32, width: i32, height: i32) -> Bounds<DevicePixels> {
+        Bounds::new(
+            point(x, y),
+            Size::new(DevicePixels(width), DevicePixels(height)),
+        )
+    }
+
+    #[test]
+    fn shape_input_regions_clip_to_the_window_and_allow_empty_passthrough() {
+        assert_eq!(
+            shape_rectangles(
+                &[
+                    bounds(-10, 10, 30, 20),
+                    bounds(90, 70, 30, 30),
+                    bounds(120, 90, 10, 10),
+                ],
+                bounds(0, 0, 100, 80),
+            )
+            .unwrap(),
+            vec![(0, 10, 20, 20), (90, 70, 10, 10)]
+        );
+        assert!(
+            shape_rectangles(&[], bounds(0, 0, 100, 80))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn nested_composition_geometry_and_xinput_stay_in_window_coordinates() {
+        let nested_overlay = placement(
+            7,
+            Point::new(-40_i64, -20_i64),
+            Size::new(DevicePixels(100), DevicePixels(80)),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!((nested_overlay.x, nested_overlay.y), (-40, -20));
+
+        // XI coordinates on the child are relative to its own top-left. The child is shifted
+        // under the native ancestor, so its global origin remains (0, 0).
+        assert_eq!(
+            xinput_position(
+                point(0, 0).map(|pixel| px(pixel.0 as f32)),
+                64 * 65536,
+                48 * 65536,
+                2.0,
+            ),
+            point(32, 24).map(|pixel| px(pixel.0 as f32))
+        );
+    }
+
+    #[test]
+    fn empty_native_bounds_hide_and_x11_geometry_overflow_is_reported() {
+        let hidden = native_placement(1, Point::new(0_i64, 0_i64), bounds(20, 30, 0, 40)).unwrap();
+        assert!(!hidden.visible);
+        assert_eq!((hidden.width, hidden.height), (1, 1));
+
+        assert!(
+            placement(
+                1,
+                Point::new(32768_i64, 0_i64),
+                Size::new(DevicePixels(10), DevicePixels(10)),
+                None,
+                true,
+            )
+            .is_err()
+        );
+        assert!(
+            placement(
+                1,
+                Point::new(0_i64, 0_i64),
+                Size::new(DevicePixels(65536), DevicePixels(10)),
+                None,
+                true,
+            )
+            .is_err()
+        );
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct CompositionRawWindow {
