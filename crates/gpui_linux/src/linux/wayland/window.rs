@@ -1,17 +1,20 @@
 use core::mem;
 use std::{
+    any::Any,
     cell::{Cell, Ref, RefCell, RefMut},
     collections::BTreeSet,
     ffi::c_void,
     io::Write,
+    ops::{Deref, DerefMut},
     os::fd::AsFd,
     ptr::NonNull,
     rc::Rc,
     sync::Arc,
 };
 
+use anyhow::Context as _;
 use calloop::ping::Ping;
-use collections::{FxHashMap, HashMap};
+use collections::{FxHashMap, FxHashSet, HashMap};
 use filedescriptor::FileDescriptor;
 use futures::channel::oneshot::Receiver;
 
@@ -21,7 +24,7 @@ use wayland_backend::client::ObjectId;
 use wayland_client::WEnum;
 use wayland_client::{
     Proxy,
-    protocol::{wl_callback, wl_output, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_callback, wl_output, wl_seat, wl_shm, wl_subsurface, wl_surface},
 };
 use wayland_protocols::wp::viewporter::client::wp_viewport;
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
@@ -39,16 +42,826 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
 use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
 use crate::linux::{Globals, Output, WaylandClientStatePtr, get_window};
 use gpui::{
-    AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, ExternalDragPayload, GpuSpecs,
-    Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size,
-    Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowControls, WindowDecorations, WindowKind, WindowParams,
+    AnyWindowHandle, Bounds, Capslock, CompositionContent, CompositionFrame, CompositionHitRegion,
+    CompositionSurfaceId, Decorations, DevicePixels, ExternalDragPayload, GpuSpecs, GpuiSurfaceId,
+    GpuiSurfaceRole, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformSurfaceAttachment, PlatformSurfaceHandle, PlatformWindow, Point,
+    PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, Tiling,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls,
+    WindowDecorations, WindowKind, WindowParams,
     layer_shell::{Anchor, LayerShellNotSupportedError},
     popup::PopupOptions,
     px, size,
 };
 use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig, wgpu};
+
+struct WaylandSubsurface {
+    surface: wl_surface::WlSurface,
+    viewport: Option<wp_viewport::WpViewport>,
+    role: Option<wl_subsurface::WlSubsurface>,
+    parent: Option<ObjectId>,
+    destination: Option<(i32, i32)>,
+    buffer_scale: Option<i32>,
+    position: Option<(i32, i32)>,
+    synchronized: bool,
+}
+
+impl WaylandSubsurface {
+    fn new(globals: &Globals, synchronized: bool) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            globals.subcompositor.is_some(),
+            "wl_subcompositor is unavailable"
+        );
+        let surface = globals.compositor.create_surface(&globals.qh, ());
+        let viewport = globals
+            .viewporter
+            .as_ref()
+            .map(|viewporter| viewporter.get_viewport(&surface, &globals.qh, ()));
+        Ok(Self {
+            surface,
+            viewport,
+            role: None,
+            parent: None,
+            destination: None,
+            buffer_scale: None,
+            position: None,
+            synchronized,
+        })
+    }
+
+    fn attach(&mut self, globals: &Globals, parent: &wl_surface::WlSurface) -> bool {
+        if self.parent.as_ref() != Some(&parent.id()) {
+            self.detach();
+        }
+        if self.role.is_none() {
+            let role = globals
+                .subcompositor
+                .as_ref()
+                .expect("composition was enabled")
+                .get_subsurface(&self.surface, parent, &globals.qh, ());
+            if self.synchronized {
+                role.set_sync();
+            } else {
+                role.set_desync();
+            }
+            self.parent = Some(parent.id());
+            self.role = Some(role);
+            self.position = None;
+            return true;
+        }
+        false
+    }
+
+    fn detach(&mut self) -> bool {
+        if let Some(role) = self.role.take() {
+            role.destroy();
+            self.parent = None;
+            self.position = None;
+            return true;
+        }
+        self.parent = None;
+        false
+    }
+
+    fn set_size(&mut self, size: Size<DevicePixels>, scale: f32) {
+        if let Some(viewport) = &self.viewport {
+            let destination = (
+                ((size.width.0 as f32 / scale).round() as i32).max(1),
+                ((size.height.0 as f32 / scale).round() as i32).max(1),
+            );
+            if self.destination != Some(destination) {
+                viewport.set_destination(destination.0, destination.1);
+                self.destination = Some(destination);
+            }
+        } else {
+            let buffer_scale = scale.ceil().max(1.0) as i32;
+            if self.buffer_scale != Some(buffer_scale) {
+                self.surface.set_buffer_scale(buffer_scale);
+                self.buffer_scale = Some(buffer_scale);
+            }
+        }
+    }
+
+    fn set_position(&mut self, x: i32, y: i32) {
+        if self.position != Some((x, y)) {
+            self.role
+                .as_ref()
+                .expect("position requires an attached subsurface")
+                .set_position(x, y);
+            self.position = Some((x, y));
+        }
+    }
+
+    fn role(&self) -> Option<&wl_subsurface::WlSubsurface> {
+        self.role.as_ref()
+    }
+
+    fn input_scale(&self, scale: f32) -> f32 {
+        if self.viewport.is_some() {
+            1.0
+        } else {
+            scale / scale.ceil().max(1.0)
+        }
+    }
+
+    fn destroy(&mut self) {
+        self.detach();
+        if let Some(viewport) = self.viewport.take() {
+            viewport.destroy();
+        }
+        self.surface.destroy();
+    }
+}
+
+fn wayland_input_regions(
+    hit_regions: &[CompositionHitRegion],
+    surface: GpuiSurfaceId,
+    size: Size<DevicePixels>,
+    scale: f32,
+    input_scale: f32,
+) -> Vec<(i32, i32, i32, i32)> {
+    let logical_width = size.width.0 as f32 / scale * input_scale;
+    let logical_height = size.height.0 as f32 / scale * input_scale;
+    hit_regions
+        .iter()
+        .filter(|region| region.surface == surface)
+        .filter_map(|region| {
+            let left = (f32::from(region.bounds.origin.x) * input_scale)
+                .floor()
+                .max(0.0);
+            let top = (f32::from(region.bounds.origin.y) * input_scale)
+                .floor()
+                .max(0.0);
+            let right = ((f32::from(region.bounds.origin.x) + f32::from(region.bounds.size.width))
+                * input_scale)
+                .ceil()
+                .min(logical_width);
+            let bottom = ((f32::from(region.bounds.origin.y)
+                + f32::from(region.bounds.size.height))
+                * input_scale)
+                .ceil()
+                .min(logical_height);
+            (right > left && bottom > top).then_some((
+                left as i32,
+                top as i32,
+                (right - left) as i32,
+                (bottom - top) as i32,
+            ))
+        })
+        .collect()
+}
+
+fn wayland_subsurface_position(local_origin: Point<i64>, scale: f32) -> anyhow::Result<(i32, i32)> {
+    anyhow::ensure!(
+        scale.is_finite() && scale > 0.0,
+        "Wayland composition scale must be positive and finite"
+    );
+    let convert = |coordinate: i64| -> anyhow::Result<i32> {
+        let position = (coordinate as f64 / f64::from(scale)).round();
+        anyhow::ensure!(
+            position.is_finite() && (i32::MIN as f64..=i32::MAX as f64).contains(&position),
+            "Wayland composition surface position exceeds protocol range"
+        );
+        Ok(position as i32)
+    };
+    Ok((convert(local_origin.x)?, convert(local_origin.y)?))
+}
+
+#[cfg(test)]
+mod composition_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn child_positions_translate_absolute_window_bounds_to_parent_coordinates() {
+        assert_eq!(
+            wayland_subsurface_position(Point::new(-30_i64, -12_i64), 1.5).unwrap(),
+            (-20, -8),
+        );
+        assert_eq!(
+            wayland_subsurface_position(Point::new(45_i64, 30_i64), 1.5).unwrap(),
+            (30, 20),
+        );
+        assert!(wayland_subsurface_position(Point::new(i64::from(i32::MAX) + 1, 0), 1.0).is_err());
+    }
+}
+
+struct WaylandGpuiSurface {
+    child: WaylandSubsurface,
+    renderer: WgpuRenderer,
+    input_regions: Option<Vec<(i32, i32, i32, i32)>>,
+    input_registered: bool,
+}
+
+#[derive(Default)]
+struct StagedWaylandGpuiSurfaces(FxHashMap<GpuiSurfaceId, WaylandGpuiSurface>);
+
+impl Deref for StagedWaylandGpuiSurfaces {
+    type Target = FxHashMap<GpuiSurfaceId, WaylandGpuiSurface>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for StagedWaylandGpuiSurfaces {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for StagedWaylandGpuiSurfaces {
+    fn drop(&mut self) {
+        for surface in self.0.values_mut() {
+            surface.renderer.destroy();
+            surface.child.destroy();
+        }
+    }
+}
+
+struct WaylandNativeSurfaceState {
+    child: WaylandSubsurface,
+    bounds: Bounds<DevicePixels>,
+}
+
+struct WaylandNativeSurface {
+    state: Rc<RefCell<WaylandNativeSurfaceState>>,
+}
+
+unsafe impl PlatformSurfaceAttachment for WaylandNativeSurface {
+    fn platform_handle(&self) -> PlatformSurfaceHandle<'_> {
+        let state = self.state.borrow();
+        let pointer = NonNull::new(state.child.surface.id().as_ptr().cast::<c_void>())
+            .expect("Wayland surface proxy has a null pointer");
+        let handle = rwh::WaylandWindowHandle::new(pointer);
+        PlatformSurfaceHandle::Window(unsafe {
+            rwh::WindowHandle::borrow_raw(rwh::RawWindowHandle::Wayland(handle))
+        })
+    }
+}
+
+impl Drop for WaylandNativeSurfaceState {
+    fn drop(&mut self) {
+        self.child.destroy();
+    }
+}
+
+struct ResolvedWaylandSurface {
+    parent_index: Option<usize>,
+    origin: Point<DevicePixels>,
+    local_origin: Point<i64>,
+    size: Size<DevicePixels>,
+    surface: wl_surface::WlSurface,
+    content: ResolvedWaylandContent,
+}
+
+enum ResolvedWaylandContent {
+    Gpui {
+        id: GpuiSurfaceId,
+        role: GpuiSurfaceRole,
+    },
+    Native {
+        id: CompositionSurfaceId,
+        state: Rc<RefCell<WaylandNativeSurfaceState>>,
+    },
+}
+
+impl ResolvedWaylandContent {
+    fn id(&self) -> CompositionSurfaceId {
+        match self {
+            Self::Gpui { id, .. } => (*id).into(),
+            Self::Native { id, .. } => *id,
+        }
+    }
+}
+
+struct WaylandComposition {
+    globals: Globals,
+    client: WaylandClientStatePtr,
+    window_surface: wl_surface::WlSurface,
+    size: Size<DevicePixels>,
+    scale: f32,
+    enabled: bool,
+    pending_gpui: Option<WaylandGpuiSurface>,
+    gpui_surfaces: FxHashMap<GpuiSurfaceId, WaylandGpuiSurface>,
+    native_surfaces: FxHashMap<CompositionSurfaceId, Rc<RefCell<WaylandNativeSurfaceState>>>,
+    base_surface: Option<GpuiSurfaceId>,
+    last_tree: Vec<(CompositionSurfaceId, Option<usize>)>,
+    recreate_renderers: bool,
+}
+
+impl WaylandComposition {
+    fn enable(&mut self, renderer: &WgpuRenderer) -> anyhow::Result<()> {
+        if self.enabled {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            self.globals.subcompositor.is_some(),
+            "the Wayland compositor does not support wl_subcompositor"
+        );
+        // Probe the real subsurface target here so unsupported transparent alpha modes fail at
+        // enable time rather than on the first frame that tries to draw an overlay.
+        let pending = self.new_gpui_surface(renderer)?;
+        self.pending_gpui = Some(pending);
+        self.enabled = true;
+        Ok(())
+    }
+
+    fn raw_window(&self, surface: &wl_surface::WlSurface) -> anyhow::Result<RawWindow> {
+        Ok(RawWindow {
+            window: surface.id().as_ptr().cast::<c_void>(),
+            display: surface
+                .backend()
+                .upgrade()
+                .context("Wayland connection closed")?
+                .display_ptr()
+                .cast::<c_void>(),
+        })
+    }
+
+    fn native(
+        attachment: &Rc<dyn PlatformSurfaceAttachment>,
+    ) -> anyhow::Result<Rc<RefCell<WaylandNativeSurfaceState>>> {
+        let attachment: &dyn Any = attachment.as_ref();
+        attachment
+            .downcast_ref::<WaylandNativeSurface>()
+            .map(|surface| surface.state.clone())
+            .context("composition surface is not a Wayland native surface")
+    }
+
+    fn resolved_role(
+        &self,
+        surface: &ResolvedWaylandSurface,
+        added: &StagedWaylandGpuiSurfaces,
+        pending_id: Option<GpuiSurfaceId>,
+    ) -> Option<wl_subsurface::WlSubsurface> {
+        match &surface.content {
+            ResolvedWaylandContent::Gpui { id, .. } => self
+                .gpui_surfaces
+                .get(id)
+                .or_else(|| added.get(id))
+                .or_else(|| {
+                    (Some(*id) == pending_id)
+                        .then(|| self.pending_gpui.as_ref())
+                        .flatten()
+                })
+                .and_then(|gpui| gpui.child.role().cloned()),
+            ResolvedWaylandContent::Native { state, .. } => state.borrow().child.role().cloned(),
+        }
+    }
+
+    fn new_gpui_surface(&self, base: &WgpuRenderer) -> anyhow::Result<WaylandGpuiSurface> {
+        let mut child = WaylandSubsurface::new(&self.globals, true)?;
+        child.set_size(self.size, self.scale);
+        let raw_window = self.raw_window(&child.surface)?;
+        let renderer = match WgpuRenderer::new_composition_surface(
+            base,
+            &raw_window,
+            WgpuSurfaceConfig {
+                size: self.size,
+                transparent: true,
+                preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+            },
+        ) {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                child.destroy();
+                return Err(error);
+            }
+        };
+        Ok(WaylandGpuiSurface {
+            child,
+            renderer,
+            input_regions: None,
+            input_registered: false,
+        })
+    }
+
+    fn present(
+        &mut self,
+        frame: CompositionFrame<'_>,
+        renderer: &mut WgpuRenderer,
+        owner: WaylandWindowStatePtr,
+        redraw_requested: &mut bool,
+        pending_frame_callback: &mut Option<wl_callback::WlCallback>,
+        presentation: &mut PresentationState,
+        frame_loop: &Cell<FrameLoop>,
+    ) -> anyhow::Result<()> {
+        let mut desired_gpui = FxHashSet::default();
+        let mut desired_native = FxHashMap::default();
+        let mut pending_id = None;
+        let base = frame
+            .surfaces
+            .iter()
+            .next()
+            .expect("CompositionFrame always begins with a base GPUI surface");
+        let base_id = match base.content {
+            CompositionContent::Gpui {
+                id,
+                role: GpuiSurfaceRole::Base,
+            } => id,
+            _ => unreachable!("CompositionFrame always begins with a base GPUI surface"),
+        };
+        for surface in frame.surfaces {
+            match surface.content {
+                CompositionContent::Gpui { id, role } => {
+                    if role != GpuiSurfaceRole::Base {
+                        desired_gpui.insert(id);
+                        if pending_id.is_none()
+                            && self.pending_gpui.is_some()
+                            && !self.gpui_surfaces.contains_key(&id)
+                        {
+                            pending_id = Some(id);
+                        }
+                    }
+                }
+                CompositionContent::Native {
+                    id,
+                    bounds: _,
+                    attachment,
+                } => {
+                    let id = id.into();
+                    let state = Self::native(attachment)?;
+                    desired_native.insert(id, state.clone());
+                }
+                CompositionContent::ExternalGpu {
+                    id,
+                    bounds: _,
+                    attachment,
+                } => {
+                    let id = id.into();
+                    let state = Self::native(attachment)?;
+                    desired_native.insert(id, state.clone());
+                }
+            }
+        }
+        if renderer.device_lost() {
+            let raw_window = self.raw_window(&self.window_surface)?;
+            if let Err(error) = renderer.recover(&raw_window) {
+                log::warn!("GPU recovery failed, will retry on next frame: {error}");
+            } else {
+                self.recreate_renderers = true;
+            }
+            *redraw_requested = true;
+            return Ok(());
+        }
+
+        if self.recreate_renderers {
+            let mut replacements = FxHashMap::default();
+            for (id, surface) in &self.gpui_surfaces {
+                let raw_window = self.raw_window(&surface.child.surface)?;
+                match WgpuRenderer::new_composition_surface(
+                    renderer,
+                    &raw_window,
+                    WgpuSurfaceConfig {
+                        size: self.size,
+                        transparent: true,
+                        preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+                    },
+                ) {
+                    Ok(replacement) => {
+                        replacements.insert(*id, replacement);
+                    }
+                    Err(error) => {
+                        for (id, mut replacement) in replacements {
+                            replacement.destroy();
+                            let _ = id;
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+            let mut pending_replacement = if let Some(pending) = &self.pending_gpui {
+                let raw_window = self.raw_window(&pending.child.surface)?;
+                match WgpuRenderer::new_composition_surface(
+                    renderer,
+                    &raw_window,
+                    WgpuSurfaceConfig {
+                        size: self.size,
+                        transparent: true,
+                        preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+                    },
+                ) {
+                    Ok(replacement) => Some(replacement),
+                    Err(error) => {
+                        for mut replacement in replacements.into_values() {
+                            replacement.destroy();
+                        }
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            };
+            for (id, surface) in &mut self.gpui_surfaces {
+                let replacement = replacements
+                    .remove(id)
+                    .expect("every live Wayland composition renderer was staged");
+                surface.renderer.destroy();
+                surface.renderer = replacement;
+            }
+            if let (Some(pending), Some(replacement)) =
+                (&mut self.pending_gpui, pending_replacement.take())
+            {
+                pending.renderer.destroy();
+                pending.renderer = replacement;
+            }
+            self.recreate_renderers = false;
+        }
+
+        anyhow::ensure!(
+            self.enabled,
+            "enable Wayland composition before presenting a frame"
+        );
+        let mut added = StagedWaylandGpuiSurfaces::default();
+        for surface in frame.surfaces {
+            if let CompositionContent::Gpui { id, role } = surface.content
+                && role != GpuiSurfaceRole::Base
+                && !self.gpui_surfaces.contains_key(&id)
+                && Some(id) != pending_id
+            {
+                added.insert(id, self.new_gpui_surface(renderer)?);
+            }
+        }
+
+        let mut resolved = Vec::with_capacity(frame.surfaces.len());
+        let mut indices = FxHashMap::default();
+        for surface in frame.surfaces {
+            let id = surface.id();
+            let parent_index = surface.parent.map(|parent| indices[&parent]);
+            let local_origin = surface.local_origin();
+            let (surface_wl, origin, size, content) = match surface.content {
+                CompositionContent::Gpui { id, role } => {
+                    if role == GpuiSurfaceRole::Base {
+                        (
+                            self.window_surface.clone(),
+                            Point::default(),
+                            self.size,
+                            ResolvedWaylandContent::Gpui { id, role },
+                        )
+                    } else {
+                        let gpui = self
+                            .gpui_surfaces
+                            .get(&id)
+                            .or_else(|| added.get(&id))
+                            .or_else(|| {
+                                (Some(id) == pending_id)
+                                    .then(|| self.pending_gpui.as_ref())
+                                    .flatten()
+                            })
+                            .unwrap();
+                        (
+                            gpui.child.surface.clone(),
+                            Point::default(),
+                            self.size,
+                            ResolvedWaylandContent::Gpui { id, role },
+                        )
+                    }
+                }
+                CompositionContent::Native { id, bounds, .. } => {
+                    let id = id.into();
+                    let state = desired_native[&id].clone();
+                    let native_surface = state.borrow().child.surface.clone();
+                    (
+                        native_surface,
+                        bounds.origin,
+                        bounds.size,
+                        ResolvedWaylandContent::Native { id, state },
+                    )
+                }
+                CompositionContent::ExternalGpu { id, bounds, .. } => {
+                    let id = id.into();
+                    let state = desired_native[&id].clone();
+                    let native_surface = state.borrow().child.surface.clone();
+                    (
+                        native_surface,
+                        bounds.origin,
+                        bounds.size,
+                        ResolvedWaylandContent::Native { id, state },
+                    )
+                }
+            };
+            resolved.push(ResolvedWaylandSurface {
+                parent_index,
+                origin,
+                local_origin,
+                size,
+                surface: surface_wl,
+                content,
+            });
+            indices.insert(id, resolved.len() - 1);
+        }
+        let topology_changed = self.last_tree.len() != resolved.len()
+            || resolved.iter().enumerate().any(|(index, surface)| {
+                self.last_tree.get(index) != Some(&(surface.content.id(), surface.parent_index))
+            });
+        let mut reorder = topology_changed;
+        for index in 0..resolved.len() {
+            let parent_surface = resolved[index]
+                .parent_index
+                .map(|parent| resolved[parent].surface.clone())
+                .unwrap_or_else(|| self.window_surface.clone());
+            let surface = &mut resolved[index];
+            match &surface.content {
+                ResolvedWaylandContent::Gpui {
+                    role: GpuiSurfaceRole::Base,
+                    ..
+                } => continue,
+                ResolvedWaylandContent::Native { state: native, .. } => {
+                    let mut native = native.borrow_mut();
+                    native.bounds = Bounds::new(surface.origin, surface.size);
+                    if surface.size.width.0 <= 0 || surface.size.height.0 <= 0 {
+                        reorder |= native.child.detach();
+                        continue;
+                    }
+                    let position = wayland_subsurface_position(surface.local_origin, self.scale)?;
+                    native.child.set_size(surface.size, self.scale);
+                    reorder |= native.child.attach(&self.globals, &parent_surface);
+                    native.child.set_position(position.0, position.1);
+                }
+                ResolvedWaylandContent::Gpui { id, .. } => {
+                    let position = wayland_subsurface_position(surface.local_origin, self.scale)?;
+                    let gpui = self
+                        .gpui_surfaces
+                        .get_mut(id)
+                        .or_else(|| added.get_mut(id))
+                        .or_else(|| {
+                            (Some(*id) == pending_id)
+                                .then(|| self.pending_gpui.as_mut())
+                                .flatten()
+                        })
+                        .unwrap();
+                    gpui.child.set_size(surface.size, self.scale);
+                    reorder |= gpui.child.attach(&self.globals, &parent_surface);
+                    gpui.child.set_position(position.0, position.1);
+                }
+            }
+        }
+
+        if reorder {
+            let mut sibling = self.window_surface.clone();
+            for surface in resolved
+                .iter()
+                .skip(1)
+                .filter(|surface| surface.parent_index.is_none())
+            {
+                if let Some(role) = self.resolved_role(surface, &added, pending_id) {
+                    role.place_above(&sibling);
+                    sibling = surface.surface.clone();
+                }
+            }
+            let mut last_child = FxHashMap::default();
+            for surface in &resolved {
+                let Some(parent) = surface.parent_index else {
+                    continue;
+                };
+                let previous = last_child
+                    .get(&parent)
+                    .cloned()
+                    .unwrap_or_else(|| resolved[parent].surface.clone());
+                if let Some(role) = self.resolved_role(surface, &added, pending_id) {
+                    role.place_above(&previous);
+                    last_child.insert(parent, surface.surface.clone());
+                }
+            }
+            self.last_tree = resolved
+                .iter()
+                .map(|surface| (surface.content.id(), surface.parent_index))
+                .collect();
+        }
+
+        for (id, native) in std::mem::take(&mut self.native_surfaces) {
+            if !desired_native.contains_key(&id) {
+                native.borrow_mut().child.detach();
+            }
+        }
+        self.native_surfaces = desired_native;
+        if let Some(id) = pending_id {
+            self.gpui_surfaces.insert(
+                id,
+                self.pending_gpui
+                    .take()
+                    .expect("pending GPUI renderer has a target ID"),
+            );
+        }
+        for (id, surface) in mem::take(&mut added.0) {
+            self.gpui_surfaces.insert(id, surface);
+        }
+        let removed = self
+            .gpui_surfaces
+            .keys()
+            .filter(|id| !desired_gpui.contains(id))
+            .copied()
+            .collect::<Vec<_>>();
+        for id in removed {
+            if let Some(mut surface) = self.gpui_surfaces.remove(&id) {
+                self.client
+                    .unregister_composition_input_surface(&surface.child.surface.id());
+                surface.renderer.destroy();
+                surface.child.destroy();
+            }
+        }
+        self.base_surface = Some(base_id);
+
+        let mut empty_scene = Scene::default();
+        empty_scene.finish();
+        for surface in &resolved {
+            let (id, role) = match &surface.content {
+                ResolvedWaylandContent::Gpui { id, role } => (*id, *role),
+                ResolvedWaylandContent::Native { .. } => continue,
+            };
+            let scene = frame.scene.layer(id).unwrap_or(&empty_scene);
+            if role != GpuiSurfaceRole::Base {
+                let gpui = self.gpui_surfaces.get_mut(&id).unwrap();
+                let input_regions = wayland_input_regions(
+                    frame.hit_regions,
+                    id,
+                    self.size,
+                    self.scale,
+                    gpui.child.input_scale(self.scale),
+                );
+                if gpui.input_regions.as_ref() != Some(&input_regions) {
+                    let region = self.globals.compositor.create_region(&self.globals.qh, ());
+                    for &(x, y, width, height) in &input_regions {
+                        region.add(x, y, width, height);
+                    }
+                    gpui.child.surface.set_input_region(Some(&region));
+                    region.destroy();
+                    gpui.input_regions = Some(input_regions);
+                }
+                if !gpui.input_registered {
+                    let offset = surface.origin.map(|value| px(value.0 as f32 / self.scale));
+                    self.client.register_composition_input_surface(
+                        gpui.child.surface.id(),
+                        owner.clone(),
+                        offset,
+                    );
+                    gpui.input_registered = true;
+                }
+                gpui.renderer.draw(scene);
+                if gpui.renderer.needs_redraw() {
+                    *redraw_requested = true;
+                }
+            }
+        }
+        if pending_frame_callback.is_none() {
+            *pending_frame_callback = Some(
+                self.window_surface
+                    .frame(&self.globals.qh, self.window_surface.id()),
+            );
+        }
+        let base_scene = frame.scene.layer(base_id).unwrap_or(&empty_scene);
+        if renderer.draw(base_scene) {
+            *presentation = PresentationState::Presented;
+            frame_loop.set(FrameLoop::AwaitingCallback);
+        } else {
+            *presentation = presentation.failed();
+            frame_loop.set(FrameLoop::PresentationFailed);
+            *redraw_requested = true;
+        }
+        if renderer.needs_redraw() {
+            *redraw_requested = true;
+        }
+        Ok(())
+    }
+
+    fn resize(&mut self, size: Size<DevicePixels>, scale: f32) {
+        self.size = size;
+        self.scale = scale;
+        for surface in self.gpui_surfaces.values_mut() {
+            surface.renderer.update_drawable_size(size);
+            surface.child.set_size(size, scale);
+        }
+        if let Some(surface) = &mut self.pending_gpui {
+            surface.renderer.update_drawable_size(size);
+            surface.child.set_size(size, scale);
+        }
+        for surface in self.native_surfaces.values() {
+            let mut state = surface.borrow_mut();
+            let size = state.bounds.size;
+            state.child.set_size(size, scale);
+        }
+    }
+
+    fn destroy(&mut self) {
+        if let Some(mut surface) = self.pending_gpui.take() {
+            surface.renderer.destroy();
+            surface.child.destroy();
+        }
+        for (_, mut surface) in self.gpui_surfaces.drain() {
+            self.client
+                .unregister_composition_input_surface(&surface.child.surface.id());
+            surface.renderer.destroy();
+            surface.child.destroy();
+        }
+        for surface in self.native_surfaces.values() {
+            surface.borrow_mut().child.detach();
+        }
+        self.native_surfaces.clear();
+        self.base_surface = None;
+        self.last_tree.clear();
+        self.enabled = false;
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct Callbacks {
@@ -117,6 +930,7 @@ pub struct WaylandWindowState {
     display: Option<(ObjectId, Output)>,
     globals: Globals,
     renderer: WgpuRenderer,
+    composition: WaylandComposition,
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
@@ -618,6 +1432,24 @@ impl WaylandWindowState {
                 .set_max_size(max_texture_size, max_texture_size);
         }
 
+        let composition = WaylandComposition {
+            globals: globals.clone(),
+            client: client.clone(),
+            window_surface: surface.clone(),
+            size: Size {
+                width: DevicePixels(f32::from(options.bounds.size.width) as i32),
+                height: DevicePixels(f32::from(options.bounds.size.height) as i32),
+            },
+            scale: 1.0,
+            enabled: false,
+            pending_gpui: None,
+            gpui_surfaces: FxHashMap::default(),
+            native_surfaces: FxHashMap::default(),
+            base_surface: None,
+            last_tree: Vec::new(),
+            recreate_renderers: false,
+        };
+
         Ok(Self {
             surface_state,
             parent,
@@ -634,6 +1466,7 @@ impl WaylandWindowState {
             outputs: HashMap::default(),
             display: None,
             renderer,
+            composition,
             bounds: options.bounds,
             scale: 1.0,
             input_handler: None,
@@ -824,6 +1657,7 @@ impl Drop for WaylandWindow {
 
         let client = state.client.clone();
 
+        state.composition.destroy();
         state.renderer.destroy();
 
         // Destroy blur first, this has no dependencies.
@@ -1205,23 +2039,12 @@ impl WaylandWindowStatePtr {
 
     pub fn handle_toplevel_decoration_event(&self, event: zxdg_toplevel_decoration_v1::Event) {
         if let zxdg_toplevel_decoration_v1::Event::Configure { mode } = event {
-            match mode {
+            let decorations = match mode {
                 WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ServerSide) => {
-                    self.state.borrow_mut().decorations = WindowDecorations::Server;
-                    let callback = self.callbacks.borrow_mut().appearance_changed.take();
-                    if let Some(mut fun) = callback {
-                        fun();
-                        self.callbacks.borrow_mut().appearance_changed = Some(fun);
-                    }
+                    WindowDecorations::Server
                 }
                 WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ClientSide) => {
-                    self.state.borrow_mut().decorations = WindowDecorations::Client;
-                    // Update background to be transparent
-                    let callback = self.callbacks.borrow_mut().appearance_changed.take();
-                    if let Some(mut fun) = callback {
-                        fun();
-                        self.callbacks.borrow_mut().appearance_changed = Some(fun);
-                    }
+                    WindowDecorations::Client
                 }
                 WEnum::Value(_) => {
                     log::warn!("Unknown decoration mode");
@@ -1231,8 +2054,23 @@ impl WaylandWindowStatePtr {
                     log::warn!("Unknown decoration mode: {}", v);
                     return;
                 }
+            };
+            let previous = self.state.borrow().decorations;
+            self.state.borrow_mut().decorations = decorations;
+            if let Err(error) = update_window(self.state.borrow_mut()) {
+                let mut state = self.state.borrow_mut();
+                state.decorations = previous;
+                if let Some(decoration) = state.surface_state.decoration() {
+                    decoration.set_mode(previous.to_xdg());
+                }
+                log::error!("failed to update Wayland renderer transparency: {error:#}");
+                return;
             }
-            update_window(self.state.borrow_mut());
+            let callback = self.callbacks.borrow_mut().appearance_changed.take();
+            if let Some(mut fun) = callback {
+                fun();
+                self.callbacks.borrow_mut().appearance_changed = Some(fun);
+            }
             self.request_redraw();
         }
     }
@@ -1535,6 +2373,8 @@ impl WaylandWindowStatePtr {
             }
             let device_bounds = state.bounds.to_device_pixels(state.scale);
             state.renderer.update_drawable_size(device_bounds.size);
+            let scale = state.scale;
+            state.composition.resize(device_bounds.size, scale);
             (state.bounds.size, state.scale)
         };
 
@@ -1972,8 +2812,13 @@ impl PlatformWindow for WaylandWindow {
         if state.background_appearance == background_appearance {
             return;
         }
+        let previous = state.background_appearance;
         state.background_appearance = background_appearance;
-        update_window(state);
+        if let Err(error) = update_window(state) {
+            self.borrow_mut().background_appearance = previous;
+            log::error!("failed to update Wayland renderer transparency: {error:#}");
+            return;
+        }
         self.0.request_redraw();
     }
 
@@ -2110,7 +2955,7 @@ impl PlatformWindow for WaylandWindow {
                     .cast::<std::ffi::c_void>(),
             };
             match state.renderer.recover(&raw_window) {
-                Ok(()) => {}
+                Ok(()) => state.composition.recreate_renderers = true,
                 Err(err) => {
                     log::warn!("GPU recovery failed, will retry on next frame: {err}");
                 }
@@ -2137,6 +2982,54 @@ impl PlatformWindow for WaylandWindow {
         if state.renderer.needs_redraw() {
             state.redraw_requested = true;
         }
+    }
+
+    fn enable_composition(&self) -> anyhow::Result<()> {
+        let mut state = self.borrow_mut();
+        let WaylandWindowState {
+            composition,
+            renderer,
+            ..
+        } = &mut *state;
+        composition.enable(renderer)
+    }
+
+    fn create_composition_surface(&self) -> anyhow::Result<Rc<dyn PlatformSurfaceAttachment>> {
+        let state = self.borrow();
+        let child = WaylandSubsurface::new(&state.globals, false)?;
+        let surface = Rc::new(RefCell::new(WaylandNativeSurfaceState {
+            child,
+            bounds: Bounds::default(),
+        }));
+        Ok(Rc::new(WaylandNativeSurface { state: surface }))
+    }
+
+    fn present_composition(&self, frame: CompositionFrame<'_>) -> anyhow::Result<()> {
+        let owner = self.0.clone();
+        let frame_loop = self.0.frame_loop.clone();
+        let mut state = self.borrow_mut();
+        if !state.visible {
+            state.redraw_requested = true;
+            frame_loop.set(FrameLoop::Unconfigured);
+            return Ok(());
+        }
+        let WaylandWindowState {
+            renderer,
+            composition,
+            redraw_requested,
+            pending_frame_callback,
+            presentation,
+            ..
+        } = &mut *state;
+        composition.present(
+            frame,
+            renderer,
+            owner,
+            redraw_requested,
+            pending_frame_callback,
+            presentation,
+            &frame_loop,
+        )
     }
 
     fn schedule_frame(&self) {
@@ -2254,11 +3147,11 @@ impl PlatformWindow for WaylandWindow {
 
     fn request_decorations(&self, decorations: WindowDecorations) {
         let mut state = self.borrow_mut();
+        let previous = state.decorations;
         match state.surface_state.decoration().as_ref() {
             Some(decoration) => {
                 decoration.set_mode(decorations.to_xdg());
                 state.decorations = decorations;
-                update_window(state);
             }
             None => {
                 if matches!(decorations, WindowDecorations::Server) {
@@ -2267,8 +3160,16 @@ impl PlatformWindow for WaylandWindow {
                     );
                 }
                 state.decorations = WindowDecorations::Client;
-                update_window(state);
             }
+        }
+        if let Err(error) = update_window(state) {
+            let mut state = self.borrow_mut();
+            state.decorations = previous;
+            if let Some(decoration) = state.surface_state.decoration() {
+                decoration.set_mode(previous.to_xdg());
+            }
+            log::error!("failed to update Wayland renderer transparency: {error:#}");
+            return;
         }
         self.0.request_redraw();
     }
@@ -2280,8 +3181,13 @@ impl PlatformWindow for WaylandWindow {
     fn set_client_inset(&self, inset: Pixels) {
         let mut state = self.borrow_mut();
         if Some(inset) != state.client_inset {
+            let previous = state.client_inset;
             state.client_inset = Some(inset);
-            update_window(state);
+            if let Err(error) = update_window(state) {
+                self.borrow_mut().client_inset = previous;
+                log::error!("failed to update Wayland renderer transparency: {error:#}");
+                return;
+            }
             self.0.request_redraw();
         }
     }
@@ -2383,10 +3289,10 @@ impl accesskit::DeactivationHandler for TrivialDeactivationHandler {
     }
 }
 
-fn update_window(mut state: RefMut<WaylandWindowState>) {
+fn update_window(mut state: RefMut<WaylandWindowState>) -> anyhow::Result<()> {
     let opaque = !state.is_transparent();
 
-    state.renderer.update_transparency(!opaque);
+    state.renderer.update_transparency(!opaque)?;
     let opaque_area = state.window_bounds.map(|v| f32::from(v) as i32);
     opaque_area.inset(f32::from(state.inset()) as i32);
 
@@ -2429,6 +3335,7 @@ fn update_window(mut state: RefMut<WaylandWindowState>) {
     }
 
     region.destroy();
+    Ok(())
 }
 
 pub(crate) trait WindowDecorationsExt {
