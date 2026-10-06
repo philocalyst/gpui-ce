@@ -8822,6 +8822,83 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn composition_changes_and_failed_presents_are_retried(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let test_window = cx.test_window(window.into());
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+
+        window
+            .update(cx, |_, window, _| {
+                window.enable_window_composition().unwrap();
+            })
+            .unwrap();
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        let initial = test_window.composition_presentations();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].len(), 2);
+
+        let wake_count = test_window.frame_wake_count();
+        window
+            .update(cx, |_, window, _| {
+                window
+                    .enable_window_composition()
+                    .unwrap()
+                    .create_gpui_surface(None)
+                    .unwrap();
+            })
+            .unwrap();
+        assert!(test_window.frame_wake_count() > wake_count);
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        let updated = test_window.composition_presentations();
+        assert_eq!(updated.len(), 2);
+        assert_eq!(updated[1].len(), 3);
+
+        let (native, native_bounds) = window
+            .update(cx, |_, window, _| {
+                let bounds = Bounds::new(
+                    point(DevicePixels(16), DevicePixels(12)),
+                    size(DevicePixels(80), DevicePixels(60)),
+                );
+                let native = window
+                    .enable_window_composition()
+                    .unwrap()
+                    .create_native_surface(bounds, None)
+                    .unwrap();
+                (native.id(), bounds)
+            })
+            .unwrap();
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(
+            test_window
+                .composition_presentations()
+                .last()
+                .unwrap()
+                .len(),
+            4
+        );
+
+        let wake_count = test_window.frame_wake_count();
+        window
+            .update(cx, |_, window, _| {
+                window
+                    .enable_window_composition()
+                    .unwrap()
+                    .set_bounds(native, native_bounds)
+                    .unwrap();
+            })
+            .unwrap();
+        assert_eq!(test_window.frame_wake_count(), wake_count);
+
+        test_window.fail_next_composition_presentations(1);
+        window.update(cx, |_, window, _| window.refresh()).unwrap();
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(test_window.composition_presentations().len(), 3);
+
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(test_window.composition_presentations().len(), 4);
+    }
+
     /// A frame request that arrives while next-frame callbacks are pending
     /// must never strand them: either the frame runs them, or (when the
     /// inactive-window frame-rate throttle defers the frame) the waker fires
