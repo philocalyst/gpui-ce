@@ -42,6 +42,7 @@ impl WgpuRenderer {
             config,
             compositor_gpu,
             extra_requirements,
+            None,
         )
     }
 
@@ -61,6 +62,64 @@ impl WgpuRenderer {
             config,
             None,
             extra_requirements,
+            None,
+        )
+    }
+
+    /// Creates another Metal-layer renderer that shares this renderer's device and glyph atlas.
+    ///
+    /// Each renderer owns its own layer surface and render targets. Sharing the context and atlas
+    /// keeps composition outputs on the same GPU device and lets text glyphs uploaded by one layer
+    /// be reused by every other layer.
+    #[cfg(target_os = "macos")]
+    pub fn new_composition_metal_layer_surface(
+        base: &Self,
+        layer: &metal::MetalLayerRef,
+        config: WgpuSurfaceConfig,
+    ) -> anyhow::Result<Self> {
+        let gpu_context = base
+            .context
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("composition output requires a native GPU context"))?;
+        Self::new_for_target(
+            Rc::clone(gpu_context),
+            &|| None,
+            NativeSurfaceTarget::metal_layer(layer),
+            config,
+            base.compositor_gpu,
+            base.extra_requirements.clone(),
+            Some(Arc::clone(&base.atlas)),
+        )
+    }
+
+    /// Creates another window-surface renderer that shares this renderer's GPU context and atlas.
+    ///
+    /// This is intended for composition outputs such as Wayland subsurfaces. Each output owns its
+    /// swapchain and render targets while sharing device, queue, and glyph atlas state.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn new_composition_surface<W>(
+        base: &Self,
+        window: &W,
+        config: WgpuSurfaceConfig,
+    ) -> anyhow::Result<Self>
+    where
+        W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
+    {
+        let window_handle = window.window_handle().map_err(|error| {
+            anyhow::anyhow!("failed to get composition surface handle: {error}")
+        })?;
+        let gpu_context = base
+            .context
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("composition output requires a native GPU context"))?;
+        Self::new_for_target(
+            Rc::clone(gpu_context),
+            &|| Some(Box::new(window.clone())),
+            NativeSurfaceTarget::Window(window_handle.as_raw()),
+            config,
+            base.compositor_gpu,
+            base.extra_requirements.clone(),
+            Some(Arc::clone(&base.atlas)),
         )
     }
 
@@ -72,6 +131,7 @@ impl WgpuRenderer {
         config: WgpuSurfaceConfig,
         compositor_gpu: Option<CompositorGpuHint>,
         extra_requirements: Option<WgpuDeviceRequirements>,
+        shared_atlas: Option<Arc<WgpuAtlas>>,
     ) -> anyhow::Result<Self> {
         let mut context_slot = gpu_context.borrow_mut();
         let (context, surface) = match context_slot.as_mut() {
@@ -91,7 +151,7 @@ impl WgpuRenderer {
                 (context_slot.insert(context), surface)
             }
         };
-        let atlas = Arc::new(WgpuAtlas::from_context(context));
+        let atlas = shared_atlas.unwrap_or_else(|| Arc::new(WgpuAtlas::from_context(context)));
         Self::new_internal(
             Some(Rc::clone(&gpu_context)),
             context,
@@ -207,7 +267,7 @@ impl WgpuRenderer {
         // A replacement surface can expose different present modes (for example when a
         // window moves between displays or Wayland/X11 surfaces). Query the new surface,
         // rather than reusing capabilities from the old target.
-        let supported_present_modes = {
+        let (supported_present_modes, supported_alpha_modes) = {
             let context_slot = self.context.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("native surface replacement requires a GPU context")
             })?;
@@ -225,9 +285,12 @@ impl WgpuRenderer {
                     info.device,
                 );
             }
-            capabilities.present_modes
+            (capabilities.present_modes, capabilities.alpha_modes)
         };
-        if self.target.apply(config, &supported_present_modes) {
+        if self
+            .target
+            .apply(config, &supported_present_modes, &supported_alpha_modes)?
+        {
             self.rebuild_pipelines();
         }
         let target_config = self.target.configuration().clone();

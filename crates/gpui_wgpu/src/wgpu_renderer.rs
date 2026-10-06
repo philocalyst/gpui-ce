@@ -169,9 +169,9 @@ impl WgpuRenderer {
         });
     }
 
-    pub fn update_transparency(&mut self, transparent: bool) {
-        if !self.target.set_transparent(transparent) {
-            return;
+    pub fn update_transparency(&mut self, transparent: bool) -> anyhow::Result<()> {
+        if !self.target.set_transparent(transparent)? {
+            return Ok(());
         }
         let config = self.target.configuration().clone();
         if let Some(resources) = self.resources.as_ref() {
@@ -180,6 +180,7 @@ impl WgpuRenderer {
             }
         }
         self.rebuild_pipelines();
+        Ok(())
     }
 
     pub(super) fn rebuild_pipelines(&mut self) {
