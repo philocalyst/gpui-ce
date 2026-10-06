@@ -9,7 +9,7 @@ use std::{
 use cargo_metadata::{Metadata, Package};
 
 use crate::{
-    model::{BuildResult, HarnessFailure},
+    model::{BuildResult, DiagnosticOrigin, DiagnosticPackage, HarnessFailure},
     process::Capture,
     runner::Builder,
 };
@@ -89,6 +89,8 @@ pub(crate) fn check(
     cwd: &Path,
     manifest: &Path,
     selected: String,
+    metadata: &Metadata,
+    original: &Path,
 ) -> io::Result<BuildResult> {
     let mut args = vec![
         "check".into(),
@@ -105,7 +107,38 @@ pub(crate) fn check(
     if let Some(target) = &builder.recipe.target {
         args.extend(["--target".into(), target.into()]);
     }
-    let output = builder.run(cwd, &args, Capture::Cargo, false)?;
+    let mut output = builder.run(cwd, &args, Capture::Cargo, false)?;
+    for diagnostic in &mut output.diagnostics {
+        let Some(package) = metadata
+            .packages
+            .iter()
+            .find(|p| p.id.repr == diagnostic.package_id)
+        else {
+            continue;
+        };
+        let package_root = package.manifest_path.parent().unwrap().as_std_path();
+        let origin = if package_root.starts_with(cwd) {
+            DiagnosticOrigin::Downstream
+        } else if package_root.starts_with(builder.root.join("upstream")) {
+            DiagnosticOrigin::Library
+        } else {
+            DiagnosticOrigin::Dependency
+        };
+        diagnostic.package = Some(DiagnosticPackage {
+            name: package.name.to_string(),
+            manifest: package.manifest_path.clone().into_std_path_buf(),
+            origin,
+        });
+        // Cargo invokes rustc from the workspace directory. Only link files that still
+        // match the original checkout, not generated files or modified build-script output.
+        map_diagnostic_sources(
+            &diagnostic.diagnostic,
+            metadata.workspace_root.as_std_path(),
+            cwd,
+            original,
+            &mut diagnostic.source_files,
+        );
+    }
     let failure = if output.timed_out {
         Some(HarnessFailure::Timeout)
     } else if output.data_truncated {
@@ -127,6 +160,13 @@ pub(crate) fn check(
         }))
     {
         Some(HarnessFailure::Environment)
+    } else if output.diagnostics.iter().any(|d| {
+        matches!(d.level, cargo_metadata::diagnostic::DiagnosticLevel::Error)
+            && d.package
+                .as_ref()
+                .is_some_and(|p| p.origin == DiagnosticOrigin::Library)
+    }) {
+        Some(HarnessFailure::LibraryCompilation)
     } else {
         None
     };
@@ -142,6 +182,50 @@ pub(crate) fn check(
         selected_library: Some(selected),
         failure,
     })
+}
+
+fn map_diagnostic_sources(
+    diagnostic: &cargo_metadata::diagnostic::Diagnostic,
+    rustc_cwd: &Path,
+    root: &Path,
+    original: &Path,
+    files: &mut std::collections::BTreeMap<String, PathBuf>,
+) {
+    for span in &diagnostic.spans {
+        map_span_source(span, rustc_cwd, root, original, files);
+    }
+    for child in &diagnostic.children {
+        map_diagnostic_sources(child, rustc_cwd, root, original, files);
+    }
+}
+
+fn map_span_source(
+    span: &cargo_metadata::diagnostic::DiagnosticSpan,
+    rustc_cwd: &Path,
+    root: &Path,
+    original: &Path,
+    files: &mut std::collections::BTreeMap<String, PathBuf>,
+) {
+    if !files.contains_key(&span.file_name)
+        && let Ok(path) = rustc_cwd.join(&span.file_name).canonicalize()
+        && let Ok(relative) = path.strip_prefix(root)
+        && let Ok(source) = original.join(relative).canonicalize()
+        && source.starts_with(original)
+        && path.is_file()
+        && source.is_file()
+        && fs::metadata(&path).is_ok_and(|m| m.len() <= 16 * 1024 * 1024)
+        && fs::metadata(&source).is_ok_and(|m| m.len() <= 16 * 1024 * 1024)
+        && let (Ok(current), Ok(initial)) = (fs::read(&path), fs::read(source))
+        && current == initial
+    {
+        files.insert(span.file_name.clone(), relative.to_owned());
+    }
+    if let Some(expansion) = &span.expansion {
+        map_span_source(&expansion.span, rustc_cwd, root, original, files);
+        if let Some(definition) = &expansion.def_site_span {
+            map_span_source(definition, rustc_cwd, root, original, files);
+        }
+    }
 }
 
 pub(crate) fn feature_args(builder: &Builder<'_>, args: &mut Vec<OsString>) {

@@ -6,7 +6,8 @@ use std::{
 };
 
 use cargo_impact::{
-    Classification, DownstreamSpec, HarnessFailure, ImpactRequest, analyze, analyze_with_discovery,
+    Classification, DiagnosticOrigin, DownstreamSource, DownstreamSpec, HarnessFailure,
+    ImpactRequest, analyze, analyze_with_discovery,
     discovery::Discovery,
     runner::{BuildRecipe, Runner},
 };
@@ -144,6 +145,37 @@ fn transitive_local_dependency_is_rewritten_inside_the_workspace_snapshot() {
             .any(|d| d.package_id.contains("middle")
                 && d.code.as_ref().is_some_and(|c| c.code == "E0425"))
     );
+    let diagnostic = result
+        .candidate
+        .diagnostics
+        .iter()
+        .find(|d| d.code.as_ref().is_some_and(|c| c.code == "E0425"))
+        .unwrap();
+    assert_eq!(
+        diagnostic.package.as_ref().unwrap().origin,
+        DiagnosticOrigin::Downstream
+    );
+    let primary = diagnostic.spans.iter().find(|s| s.is_primary).unwrap();
+    assert_eq!(
+        diagnostic
+            .source_files
+            .get(&primary.file_name)
+            .unwrap_or_else(|| panic!("unmapped primary span: {diagnostic:?}")),
+        Path::new("middle/src/lib.rs")
+    );
+    // Render a Git report from the same verified source evidence without fetching a remote.
+    let mut report = report;
+    report.downstreams[0].source = DownstreamSource::Git {
+        url: "https://github.com/example/consumer".into(),
+        revision: "main".into(),
+        forge: None,
+    };
+    report.downstreams[0].revision = Some("a".repeat(40));
+    assert!(
+        report
+            .markdown()
+            .contains(&format!("/blob/{}/middle/src/lib.rs#L1", "a".repeat(40)))
+    );
 }
 
 #[test]
@@ -197,6 +229,56 @@ fn transitive_git_dependency_is_patched_after_graph_resolution() {
             .iter()
             .any(|d| d.package_id.contains("middle")
                 && d.code.as_ref().is_some_and(|c| c.code == "E0425"))
+    );
+    let diagnostic = result
+        .candidate
+        .diagnostics
+        .iter()
+        .find(|d| d.code.as_ref().is_some_and(|c| c.code == "E0425"))
+        .unwrap();
+    assert_eq!(
+        diagnostic.package.as_ref().unwrap().origin,
+        DiagnosticOrigin::Dependency
+    );
+    assert!(
+        diagnostic.source_files.is_empty(),
+        "dependency sources must not link into the consumer repository"
+    );
+}
+
+#[test]
+fn candidate_library_compilation_error_is_inconclusive_with_provenance() {
+    let mut fixture = Fixture::new();
+    fixture.consumer("valid", "pub fn api() { changed_lib::kept(); }", DEP);
+    fs::write(
+        fixture.request.candidate.join("src/lib.rs"),
+        "pub fn kept() { missing(); }",
+    )
+    .unwrap();
+    let report = analyze(&fixture.request).unwrap();
+    let result = &report.downstreams[0];
+    assert!(result.baseline.success);
+    assert_eq!(result.classification, Classification::HarnessFailure);
+    assert_eq!(
+        result.candidate.failure,
+        Some(HarnessFailure::LibraryCompilation)
+    );
+    let error = result
+        .candidate
+        .diagnostics
+        .iter()
+        .find(|d| d.code.as_ref().is_some_and(|c| c.code == "E0425"))
+        .unwrap();
+    assert_eq!(
+        error.package.as_ref().unwrap().origin,
+        DiagnosticOrigin::Library
+    );
+    assert!(error.source_files.is_empty());
+    assert!(error.target.is_some());
+    assert!(
+        report
+            .markdown()
+            .contains("injected library failed to compile")
     );
 }
 

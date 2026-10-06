@@ -91,10 +91,19 @@ impl Repository {
         let mut link = self.url.clone();
         {
             let mut segments = link.path_segments_mut().ok()?;
-            if self.forge == Forge::GitLab {
-                segments.push("-");
+            match self.forge {
+                Forge::GitLab => {
+                    segments.push("-").push("blob");
+                }
+                Forge::Gitea => {
+                    segments.push("src").push("commit");
+                }
+                Forge::GitHub => {
+                    segments.push("blob");
+                }
+                Forge::Generic => return None,
             }
-            segments.push("blob").push(revision);
+            segments.push(revision);
             for component in file.split('/') {
                 if component.is_empty() || component == "." || component == ".." {
                     return None;

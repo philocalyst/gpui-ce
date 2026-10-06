@@ -89,12 +89,43 @@ fn classifies_real_downstream_builds_against_both_library_versions() {
         Classification::HarnessFailure
     );
     let markdown = report.markdown();
-    let duplicate = report.downstreams[0].candidate.diagnostics[0].clone();
+    let error = report.downstreams[0]
+        .candidate
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            matches!(
+                diagnostic.level,
+                cargo_metadata::diagnostic::DiagnosticLevel::Error
+            )
+        })
+        .expect("the regression should retain a compiler error");
+    let error_code = error
+        .code
+        .as_ref()
+        .expect("the fixture's compiler error should have a code")
+        .code
+        .clone();
+    let duplicate = error.clone();
     report.downstreams[0].candidate.diagnostics.push(duplicate);
     assert_eq!(
         report.markdown(),
         markdown,
         "duplicate target errors should stay out of the human report"
+    );
+    let regression_section = markdown
+        .split("\n## regression\n")
+        .nth(1)
+        .expect("the regression details should be rendered")
+        .split("\n## ")
+        .next()
+        .unwrap();
+    assert_eq!(
+        regression_section
+            .matches(&format!("{error_code}:"))
+            .count(),
+        1,
+        "the compiler error should appear once in the concise report"
     );
 
     // The same evidence can generate immutable forge links and survive report persistence.

@@ -13,7 +13,7 @@ into a minimal workspace. This keeps GPUI's unrelated platform dependency graph
 out of the experiment while testing its real Rust code, renamed library target,
 procedural macro, semver gate, and downstream diagnostics.
 
-| Planned draft PR | Change to the real crate | Expected result |
+| Draft PR | Change to the real crate | Expected result |
 | --- | --- | --- |
 | Additive API | Add a public experiment marker function | Gate closes; no consumer builds; exit 0 |
 | Used API becomes private | Make `Cascade::reserve` crate-private | Gate opens; reserve-user gets E0624; base-user succeeds; exit 1 |
@@ -38,10 +38,11 @@ inherited prerelease workflow is main-specific and must never be dispatched or
 allowed to publish as part of this experiment. The test base excludes itself
 from the broad inherited PR CI to avoid unrelated platform builds.
 
-The fork is public: draft PRs, workflow logs, artifacts, and bot reports would be
-publicly viewable. Remote execution is pending clarification of whether
-"private" means fork-contained or confidential. No remote state has been
-modified so far.
+The user authorized public draft PRs and Actions runs confined to this personal
+fork. Draft PRs, workflow logs, artifacts, and bot reports are publicly viewable.
+The first hosted run caught Cargo rejecting an inline-table `--config` value for
+rustdoc. Rustdoc's bootstrap flag now uses Docker's environment option instead;
+both failures and successful scans preserve their reports as artifacts.
 
 ## Local results
 

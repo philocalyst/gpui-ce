@@ -418,11 +418,11 @@ fn source_links_handle_forges_and_reject_unsafe_identities() {
     for (input, forge, fragment) in [
         ("https://github.com/org/repo.git", None, "/blob/"),
         ("https://gitlab.com/group/subgroup/repo", None, "/-/blob/"),
-        ("https://codeberg.org/org/repo", None, "/blob/"),
+        ("https://codeberg.org/org/repo", None, "/src/commit/"),
         (
             "https://forge.example/org/repo",
             Some(Forge::Gitea),
-            "/blob/",
+            "/src/commit/",
         ),
     ] {
         let repo = Repository::parse(input, forge).unwrap();

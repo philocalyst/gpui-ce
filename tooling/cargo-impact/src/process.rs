@@ -45,6 +45,12 @@ pub(crate) fn run(
     timeout: Duration,
     capture: Capture,
 ) -> io::Result<ProcessOutput> {
+    if !cfg!(unix) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "build workers require a Unix host for bounded process-tree termination",
+        ));
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -218,6 +224,7 @@ impl Stream {
         match serde_json::from_slice::<CargoMessage>(line) {
             Ok(CargoMessage::CompilerMessage {
                 package_id,
+                target,
                 message,
             }) => {
                 if self.diagnostic_bytes + line.len() > DIAGNOSTIC_LIMIT
@@ -237,7 +244,10 @@ impl Stream {
                 self.diagnostic_bytes += line.len();
                 self.diagnostics.push(CompilerDiagnostic {
                     package_id,
-                    diagnostic: message,
+                    target,
+                    package: None,
+                    source_files: Default::default(),
+                    diagnostic: *message,
                 });
             }
             Ok(CargoMessage::CompilerArtifact { package_id }) => {
@@ -273,7 +283,9 @@ impl Stream {
 enum CargoMessage {
     CompilerMessage {
         package_id: String,
-        message: cargo_metadata::diagnostic::Diagnostic,
+        #[serde(default)]
+        target: Option<cargo_metadata::Target>,
+        message: Box<cargo_metadata::diagnostic::Diagnostic>,
     },
     CompilerArtifact {
         package_id: String,
