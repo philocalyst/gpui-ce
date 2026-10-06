@@ -2177,6 +2177,121 @@ mod tests {
     use std::borrow::Cow;
 
     #[test]
+    fn composition_output_shares_gpu_resources_and_clears_transparent_layers() {
+        let pool = Arc::new(Mutex::new(InstanceBufferPool::default()));
+        let mut base = MetalRenderer::new_headless(Arc::clone(&pool));
+        let mut overlay =
+            MetalRenderer::new_composition_surface(&base, new_window_layer(true), true);
+        let render_size = size(DevicePixels(8), DevicePixels(8));
+
+        assert!(Rc::ptr_eq(&base.shared, &overlay.shared));
+        assert!(Arc::ptr_eq(
+            &base.shared.sprite_atlas,
+            &overlay.shared.sprite_atlas
+        ));
+        assert!(Arc::ptr_eq(
+            &base.shared.instance_buffer_pool,
+            &overlay.shared.instance_buffer_pool
+        ));
+        assert!(std::ptr::eq(
+            &base.shared.quads_pipeline_state,
+            &overlay.shared.quads_pipeline_state
+        ));
+        assert!(!overlay.opaque);
+
+        overlay.update_drawable_size(render_size);
+        let drawable_size = overlay.layer.as_ref().unwrap().drawable_size();
+        assert_eq!((drawable_size.width, drawable_size.height), (8., 8.));
+        overlay.update_drawable_size(size(DevicePixels(12), DevicePixels(10)));
+        let drawable_size = overlay.layer.as_ref().unwrap().drawable_size();
+        assert_eq!((drawable_size.width, drawable_size.height), (12., 10.));
+
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_width(render_size.width.0 as u64);
+        descriptor.set_height(render_size.height.0 as u64);
+        descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        descriptor
+            .set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
+        descriptor.set_storage_mode(metal::MTLStorageMode::Managed);
+        let target = base.shared.device.new_texture(&descriptor);
+
+        let full = Bounds {
+            origin: gpui::point(ScaledPixels(0.), ScaledPixels(0.)),
+            size: Size {
+                width: ScaledPixels(8.),
+                height: ScaledPixels(8.),
+            },
+        };
+        let mut filled = Scene::default();
+        filled.insert_primitive(Quad {
+            bounds: full,
+            content_mask: ContentMask {
+                bounds: full,
+                ..Default::default()
+            },
+            background: solid_background(hsla(0., 1., 0.5, 1.)),
+            ..Default::default()
+        });
+        filled.finish();
+        let mut empty = Scene::default();
+        empty.finish();
+
+        let rendered = draw_into_texture(&mut overlay, &filled, &target, render_size);
+        assert!(rendered.pixels().any(|pixel| pixel.0[3] > 0));
+        let cleared = draw_into_texture(&mut overlay, &empty, &target, render_size);
+        assert!(cleared.pixels().all(|pixel| pixel.0 == [0, 0, 0, 0]));
+
+        draw_into_texture(&mut overlay, &filled, &target, render_size);
+        let base_clear = draw_into_texture(&mut base, &empty, &target, render_size);
+        assert!(base_clear.pixels().all(|pixel| pixel.0 == [0, 0, 0, 255]));
+    }
+
+    fn draw_into_texture(
+        renderer: &mut MetalRenderer,
+        scene: &Scene,
+        texture: &metal::TextureRef,
+        size: Size<DevicePixels>,
+    ) -> RgbaImage {
+        let mut instance_buffer = renderer.acquire_instance_buffer(scene);
+        let command_buffer = renderer
+            .draw_primitives_to_texture(scene, &mut instance_buffer, texture, size)
+            .unwrap();
+        if !renderer.shared.is_unified_memory {
+            let blit = command_buffer.new_blit_command_encoder();
+            blit.synchronize_resource(texture);
+            blit.end_encoding();
+        }
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+        renderer
+            .shared
+            .instance_buffer_pool
+            .lock()
+            .release(instance_buffer);
+
+        let width = size.width.0 as u32;
+        let height = size.height.0 as u32;
+        let mut pixels = vec![0; (width * height * 4) as usize];
+        texture.get_bytes(
+            pixels.as_mut_ptr().cast(),
+            u64::from(width) * 4,
+            metal::MTLRegion {
+                origin: metal::MTLOrigin { x: 0, y: 0, z: 0 },
+                size: metal::MTLSize {
+                    width: width as u64,
+                    height: height as u64,
+                    depth: 1,
+                },
+            },
+            0,
+        );
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        RgbaImage::from_raw(width, height, pixels).unwrap()
+    }
+
+    #[test]
     fn intermediate_textures_follow_scene_requirements() {
         let pool = Arc::new(Mutex::new(InstanceBufferPool::default()));
         let mut renderer = MetalRenderer::new_headless(pool);
