@@ -3577,7 +3577,24 @@ impl Window {
         let _foreground_turn = profiler::journal::foreground_turn();
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
-        self.platform_window.draw(&self.rendered_frame.scene);
+        let presented = if let Some(composition) = self.composition.get() {
+            let composition = composition.borrow();
+            let frame = crate::CompositionFrame {
+                surfaces: composition.surfaces(),
+                scene: crate::ComposedScene::new(&self.rendered_frame.scene),
+                hit_regions: &self.rendered_frame.composition_hit_regions,
+            };
+            if let Err(error) = self.platform_window.present_composition(frame) {
+                log::error!("presenting composed window frame: {error:#}");
+                self.platform_window.schedule_frame();
+                false
+            } else {
+                true
+            }
+        } else {
+            self.platform_window.draw(&self.rendered_frame.scene);
+            true
+        };
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
             present_start,
@@ -3585,7 +3602,7 @@ impl Window {
             self.active.get(),
             !self.next_frame_callbacks.borrow().is_empty(),
         );
-        self.needs_present.set(false);
+        self.needs_present.set(!presented);
         profiling::finish_frame!();
     }
 
