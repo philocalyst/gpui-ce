@@ -12,6 +12,10 @@ workspace = true
 [lib]
 path = "src/gpui_macos.rs"
 
+[[example]]
+name = "native_composition"
+path = "examples/native_composition.rs"
+
 [features]
 default = ["gpui/default"]
 bench-support = ["gpui/bench-support", "gpui_apple/bench-support"]
