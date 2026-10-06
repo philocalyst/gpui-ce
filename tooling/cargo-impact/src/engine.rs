@@ -196,50 +196,54 @@ fn experiment(
         .map(|p| p.manifest_path.clone().into_std_path_buf())
         .collect();
     manifests.push(workspace_manifest.clone());
-    result.baseline = build(
-        &builder,
-        &working,
-        &manifest,
-        &workspace_manifest,
-        &manifests,
-        &request.library,
-        baseline,
-    )?;
+    let workspace = ConsumerWorkspace {
+        root: &working,
+        original: &checkout,
+        manifest: &manifest,
+        workspace_manifest: &workspace_manifest,
+        manifests: &manifests,
+    };
+    result.baseline = build(&builder, &workspace, &request.library, baseline)?;
     // Restore original manifests and sources to prevent baseline build scripts from modifying candidate inputs.
     let lock = fs::read(workspace_manifest.with_file_name("Cargo.lock")).ok();
     source::snapshot(&checkout, &working)?;
     if let Some(lock) = lock {
         fs::write(workspace_manifest.with_file_name("Cargo.lock"), lock)?;
     }
-    result.candidate = build(
-        &builder,
-        &working,
-        &manifest,
-        &workspace_manifest,
-        &manifests,
-        &request.library,
-        candidate,
-    )?;
+    result.candidate = build(&builder, &workspace, &request.library, candidate)?;
     result.classification = classify(&result.baseline, &result.candidate);
     result.message = Some(match result.classification {
         Classification::Compatible => "Both versions compiled with the requested library selected and built.",
         Classification::Regression => "Baseline compiled; candidate introduced compiler errors.",
         Classification::PreExistingFailure => "Baseline already has compiler errors; this comparison cannot establish a regression.",
         Classification::NotExercised => "The requested library was not compiled in this configuration; enable its feature or select the consuming package.",
+        Classification::HarnessFailure if result.baseline.failure == Some(HarnessFailure::LibraryCompilation) || result.candidate.failure == Some(HarnessFailure::LibraryCompilation) => "The injected library failed to compile in this configuration; fix its build before attributing errors to downstream code.",
         Classification::HarnessFailure => "The build environment, dependency resolution, or output limits prevented a reliable comparison; adjust this downstream's recipe and retry.",
     }.into());
     Ok(())
 }
 
+struct ConsumerWorkspace<'a> {
+    root: &'a Path,
+    original: &'a Path,
+    manifest: &'a Path,
+    workspace_manifest: &'a Path,
+    manifests: &'a [PathBuf],
+}
+
 fn build(
     builder: &Builder<'_>,
-    root: &Path,
-    manifest: &Path,
-    workspace_manifest: &Path,
-    manifests: &[PathBuf],
+    workspace: &ConsumerWorkspace<'_>,
     library: &str,
     upstream: &Path,
 ) -> io::Result<BuildResult> {
+    let ConsumerWorkspace {
+        root,
+        original,
+        manifest,
+        workspace_manifest,
+        manifests,
+    } = workspace;
     cargo::inject(root, workspace_manifest, manifests, library, upstream)?;
     let prepare = || {
         cargo::fetch(builder, root, manifest)?;
@@ -278,7 +282,7 @@ fn build(
             ..BuildResult::default()
         });
     };
-    cargo::check(builder, root, manifest, selected)
+    cargo::check(builder, root, manifest, selected, &metadata, original)
 }
 
 fn exercised(build: &BuildResult) -> bool {

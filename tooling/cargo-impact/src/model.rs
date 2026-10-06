@@ -156,6 +156,7 @@ pub enum HarnessFailure {
     OutputLimit,
     InternalCompilerError,
     Environment,
+    LibraryCompilation,
 }
 
 /// Keep rustc's diagnostic tree, suggestions, macro expansions, byte ranges, and snippets.
@@ -163,8 +164,31 @@ pub enum HarnessFailure {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompilerDiagnostic {
     pub package_id: String,
+    #[serde(default)]
+    pub target: Option<cargo_metadata::Target>,
+    #[serde(default)]
+    pub package: Option<DiagnosticPackage>,
+    /// Original rustc filenames mapped to verified files in the downstream repository.
+    /// Generated files and sources from other repositories deliberately have no mapping.
+    #[serde(default)]
+    pub source_files: std::collections::BTreeMap<String, PathBuf>,
     #[serde(flatten)]
     pub diagnostic: cargo_metadata::diagnostic::Diagnostic,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiagnosticPackage {
+    pub name: String,
+    pub manifest: PathBuf,
+    pub origin: DiagnosticOrigin,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticOrigin {
+    Downstream,
+    Library,
+    Dependency,
 }
 
 impl std::ops::Deref for CompilerDiagnostic {
