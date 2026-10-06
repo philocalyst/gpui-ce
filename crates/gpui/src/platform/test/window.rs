@@ -1,10 +1,11 @@
 use crate::{
-    AnyWindowHandle, AtlasKey, AtlasTextureId, AtlasTile, Bounds, DevicePixels,
-    DispatchEventResult, GpuSpecs, Pixels, PlatformAtlas, PlatformDisplay,
-    PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PromptButton, RequestFrameOptions, Scene, Size, TestPlatform, TextInputConfiguration,
-    TextInputStateChange, TileId, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowParams,
+    AnyWindowHandle, AtlasKey, AtlasTextureId, AtlasTile, Bounds, CompositionContent,
+    CompositionFrame, CompositionHitRegion, CompositionSurfaceId, DevicePixels,
+    DispatchEventResult, GpuSpecs, GpuiSurfaceId, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler, PlatformSurfaceAttachment,
+    PlatformSurfaceHandle, PlatformWindow, Point, PromptButton, RequestFrameOptions, Scene, Size,
+    TestPlatform, TextInputConfiguration, TextInputStateChange, TileId, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams,
 };
 use collections::HashMap;
 use gpui_util::ResultExt as _;
@@ -50,10 +51,23 @@ pub(crate) struct TestWindowState {
     appearance: WindowAppearance,
     external_drag_files: Vec<(PathBuf, bool)>,
     start_external_drag_result: bool,
+    composition_enabled: bool,
+    composition_present_failures: usize,
+    composition_presentations: Vec<Vec<(CompositionSurfaceId, Option<CompositionSurfaceId>)>>,
+    composition_layer_presence: Vec<Vec<(GpuiSurfaceId, bool)>>,
+    composition_hit_regions: Vec<Vec<CompositionHitRegion>>,
 }
 
 #[derive(Clone)]
 pub struct TestWindow(pub(crate) Rc<Mutex<TestWindowState>>);
+
+struct TestCompositionAttachment;
+
+unsafe impl PlatformSurfaceAttachment for TestCompositionAttachment {
+    fn platform_handle(&self) -> PlatformSurfaceHandle<'_> {
+        panic!("test composition attachment has no platform handle")
+    }
+}
 
 // Test windows are not backed by a real platform window, so there is no raw
 // handle to report; `NotSupported` is `raw_window_handle`'s variant for exactly this.
@@ -115,6 +129,11 @@ impl TestWindow {
             appearance: WindowAppearance::Light,
             external_drag_files: Vec::new(),
             start_external_drag_result: false,
+            composition_enabled: false,
+            composition_present_failures: 0,
+            composition_presentations: Vec::new(),
+            composition_layer_presence: Vec::new(),
+            composition_hit_regions: Vec::new(),
         })))
     }
     pub fn simulate_scheduled_frame(&self) -> bool {
@@ -152,6 +171,24 @@ impl TestWindow {
 
     pub fn text_input_state_changes(&self) -> Vec<TextInputStateChange> {
         self.0.lock().text_input_state_changes.clone()
+    }
+
+    pub fn composition_presentations(
+        &self,
+    ) -> Vec<Vec<(CompositionSurfaceId, Option<CompositionSurfaceId>)>> {
+        self.0.lock().composition_presentations.clone()
+    }
+
+    pub fn composition_hit_regions(&self) -> Vec<Vec<CompositionHitRegion>> {
+        self.0.lock().composition_hit_regions.clone()
+    }
+
+    pub fn composition_layer_presence(&self) -> Vec<Vec<(GpuiSurfaceId, bool)>> {
+        self.0.lock().composition_layer_presence.clone()
+    }
+
+    pub fn fail_next_composition_presentations(&self, count: usize) {
+        self.0.lock().composition_present_failures = count;
     }
 
     pub fn simulate_resize(&mut self, size: Size<Pixels>) {
@@ -438,6 +475,55 @@ impl PlatformWindow for TestWindow {
         if let Some(renderer) = &mut state.renderer {
             renderer.render_scene(scene, device_size).warn_on_err();
         }
+    }
+
+    fn enable_composition(&self) -> anyhow::Result<()> {
+        self.0.lock().composition_enabled = true;
+        Ok(())
+    }
+
+    fn create_composition_surface(&self) -> anyhow::Result<Rc<dyn PlatformSurfaceAttachment>> {
+        anyhow::ensure!(
+            self.0.lock().composition_enabled,
+            "composition was not enabled"
+        );
+        Ok(Rc::new(TestCompositionAttachment))
+    }
+
+    fn present_composition(&self, frame: CompositionFrame<'_>) -> anyhow::Result<()> {
+        let mut state = self.0.lock();
+        anyhow::ensure!(state.composition_enabled, "composition was not enabled");
+        if state.composition_present_failures > 0 {
+            state.composition_present_failures -= 1;
+            anyhow::bail!("injected composition presentation failure");
+        }
+        state.composition_presentations.push(
+            frame
+                .surfaces
+                .into_iter()
+                .map(|surface| (surface.id(), surface.parent))
+                .collect(),
+        );
+        state.composition_layer_presence.push(
+            frame
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface.content {
+                    CompositionContent::Gpui { id, .. } => {
+                        Some((id, !frame.scene.is_layer_empty(id)))
+                    }
+                    CompositionContent::Native { .. } | CompositionContent::ExternalGpu { .. } => {
+                        None
+                    }
+                })
+                .collect(),
+        );
+        state
+            .composition_hit_regions
+            .push(frame.hit_regions.to_vec());
+        state.frame_callback_pending = true;
+        state.frame_scheduled = true;
+        Ok(())
     }
 
     fn sprite_atlas(&self) -> sync::Arc<dyn crate::PlatformAtlas> {
