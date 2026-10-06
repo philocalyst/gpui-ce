@@ -3039,6 +3039,65 @@ mod tests {
     }
 
     #[test]
+    fn composition_routing_reopens_balanced_layer_scopes_and_survives_replay() {
+        let base = crate::GpuiSurfaceId::fresh();
+        let overlay = crate::GpuiSurfaceId::fresh();
+        let mut source = Scene::default();
+        source.set_composition_target(base).unwrap();
+        source.push_layer(full_bounds());
+        source.insert_primitive(quad());
+        source.set_composition_target(overlay).unwrap();
+        source.insert_primitive(quad());
+        source.set_composition_target(base).unwrap();
+        source.pop_layer();
+        source.finish();
+
+        let base_layer = source.composition_layer(base).unwrap();
+        let overlay_layer = source.composition_layer(overlay).unwrap();
+        assert_eq!(base_layer.quads.len(), 1);
+        assert_eq!(overlay_layer.quads.len(), 1);
+        assert!(base_layer.layer_stack.is_empty());
+        assert!(overlay_layer.layer_stack.is_empty());
+        assert_eq!(base_layer.layer_bounds_stack.len(), 0);
+        assert_eq!(overlay_layer.layer_bounds_stack.len(), 0);
+
+        let mut replayed = Scene::default();
+        replayed.replay(0..source.paint_operations.len(), &source);
+        replayed.finish();
+        assert_eq!(replayed.composition_layer(base).unwrap().quads.len(), 1);
+        assert_eq!(replayed.composition_layer(overlay).unwrap().quads.len(), 1);
+        assert!(
+            replayed
+                .composition_layer(base)
+                .unwrap()
+                .layer_stack
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn composition_targets_cannot_split_content_filter_groups() {
+        let base = crate::GpuiSurfaceId::fresh();
+        let overlay = crate::GpuiSurfaceId::fresh();
+        let mut scene = Scene::default();
+        scene.set_composition_target(base).unwrap();
+        scene.insert_primitive(boundary(true));
+        assert!(scene.set_composition_target(overlay).is_err());
+        scene.insert_primitive(boundary(false));
+        scene.set_composition_target(overlay).unwrap();
+        scene.finish();
+        assert_eq!(
+            scene
+                .composition_layer(base)
+                .unwrap()
+                .filter_boundaries
+                .len(),
+            2
+        );
+        assert!(scene.composition_layer(overlay).is_none());
+    }
+
+    #[test]
     fn maximum_draw_order_is_not_treated_as_an_empty_batch_cursor() {
         let mut scene = Scene::default();
         let mut quad = quad();
