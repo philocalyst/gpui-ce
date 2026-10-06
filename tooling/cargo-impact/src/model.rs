@@ -104,6 +104,8 @@ pub enum SemverBump {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GateResult {
+    /// Whether the gate decision calls for downstream experiments, including forced runs.
+    /// A false value is a skip decision only when the report has no fatal error.
     pub ran: bool,
     pub required_bump: Option<SemverBump>,
     pub reason: String,

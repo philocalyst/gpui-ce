@@ -4,6 +4,10 @@ on:
     branches: [codex/impact-fork-base]
   workflow_dispatch:
     inputs:
+      scanner_only:
+        description: Install and warm the trusted scanner without running downstream checks
+        type: boolean
+        default: false
       missing_target:
         description: Exercise the recoverable missing-std harness failure
         type: boolean
@@ -35,6 +39,7 @@ jobs:
         with:
           source: baseline/tooling/cargo-impact
       - name: Prepare consumers from this fork only
+        if: github.event_name != 'workflow_dispatch' || inputs.scanner_only != true
         env:
           MISSING_TARGET: ${{ inputs.missing_target || false }}
         run: |
@@ -43,11 +48,13 @@ jobs:
           python3 baseline/tooling/cargo-impact/experiments/fork/prepare.py \
             --baseline baseline --candidate candidate --output "$RUNNER_TEMP/impact-inputs" "${options[@]}"
       - uses: actions/cache/restore@v4
+        if: github.event_name != 'workflow_dispatch' || inputs.scanner_only != true
         with:
           path: ${{ runner.temp }}/impact-work
           key: impact-fork-work-${{ runner.os }}-${{ github.event.pull_request.number || 'dispatch' }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: impact-fork-work-${{ runner.os }}-${{ github.event.pull_request.number || 'dispatch' }}-
       - name: Run embedded gate and isolated downstream checks
+        if: github.event_name != 'workflow_dispatch' || inputs.scanner_only != true
         # Dispatch also builds identical revisions, to test Docker and recipe recovery.
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -60,16 +67,16 @@ jobs:
             --config "$RUNNER_TEMP/impact-inputs/impact.toml" --no-discovery \
             --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report "${options[@]}"
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.scanner_only != true)
         with:
           name: downstream-impact
           path: impact-report/
           if-no-files-found: error
       - name: Report summary
-        if: always()
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.scanner_only != true)
         run: if test -f impact-report/report.md; then cat impact-report/report.md >> "$GITHUB_STEP_SUMMARY"; fi
       - uses: actions/cache/save@v4
-        if: always()
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.scanner_only != true)
         with:
           path: ${{ runner.temp }}/impact-work
           key: impact-fork-work-${{ runner.os }}-${{ github.event.pull_request.number || 'dispatch' }}-${{ github.run_id }}-${{ github.run_attempt }}

@@ -33,7 +33,7 @@ changes, or other changes outside the checker's API model. Downstreams still
 receive the same recipe and revision on both sides of the comparison.
 
 Reports are written to `impact-report/report.json` and `report.md`, including
-fatal preparation or gate errors. The JSON includes fingerprints, selected
+fatal configuration, preparation, or gate errors. The JSON includes fingerprints, selected
 package IDs, recipes, immutable downstream revisions, full rustc diagnostic
 trees, suggestions, macro expansions, byte/line/column ranges, and source
 snippets. Markdown shows the useful errors and links to tested source commits.
@@ -83,11 +83,19 @@ permissions. The comment workflow becomes available on the default branch.
 
 Authorization, builds, and reporting run in separate jobs. The control jobs use
 trusted default-branch code; the worker installs the scanner and reads recipes
-from the PR's pinned baseline. Candidate code runs in Docker without API tokens
+from the PR's pinned baseline in the PR workflow. Comment jobs pass the trusted
+default-branch scanner as an immutable same-run artifact to the worker and
+reporter; their recipes still come from the pinned baseline. Candidate code runs in Docker without API tokens
 or checkout credentials. The reporter reads JSON as data and checks the current
 PR head again before commenting. If the PR moved, it keeps the artifact and
 does not post stale results. Comments neutralize source-controlled mentions,
 HTML, and Markdown delimiters. Cache keys are scoped to untrusted PR work.
+
+GitHub gives `issue_comment` jobs read-only cache tokens. The default-branch
+push job warms the scanner cache, and the bot's artifact handoff avoids repeated
+installation even on a cold run. PR/dispatch jobs save incremental work caches;
+comment jobs can restore available caches but do not write them. For persistent
+incremental retries, use the PR workflow or the CLI's retained work directory.
 
 This implements an Actions bot. There is no webhook server or GitHub App
 installation flow yet. A service integrating `bot::plan` must verify webhook
