@@ -27,6 +27,7 @@ use crate::{
     prelude::*, px, rems, size, transparent_black, white,
 };
 
+use crate::composition::CompositionTree;
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
 use crate::interactive::TouchEvent;
 use anyhow::{Context as _, Result, anyhow};
@@ -49,7 +50,7 @@ use std::collections::HashMap;
 use std::{
     any::{Any, TypeId},
     borrow::Cow,
-    cell::{Cell, RefCell},
+    cell::{Cell, OnceCell, RefCell},
     cmp,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
@@ -1242,12 +1243,165 @@ enum InputModality {
     Touch,
 }
 
+/// Controls the ordered surfaces attached to one GPUI window.
+pub struct WindowComposition<'window> {
+    platform_window: &'window dyn PlatformWindow,
+    tree: &'window RefCell<CompositionTree>,
+    invalidator: &'window WindowInvalidator,
+}
+
+impl WindowComposition<'_> {
+    fn changed(&self) {
+        self.invalidator.set_dirty(true);
+        self.platform_window.schedule_frame();
+    }
+
+    /// Returns the fixed GPUI scene below all native children.
+    pub fn base_surface(&self) -> crate::GpuiSurfaceId {
+        self.tree.borrow().base()
+    }
+
+    /// Returns the fixed GPUI scene above all native children and deferred draws.
+    pub fn overlay_surface(&self) -> crate::GpuiSurfaceId {
+        self.tree.borrow().overlay()
+    }
+
+    /// Creates an additional GPUI scene plane.
+    pub fn create_gpui_surface(
+        &self,
+        parent: Option<crate::CompositionSurfaceId>,
+    ) -> Result<crate::GpuiSurfaceId> {
+        let mut tree = self.tree.borrow_mut();
+        tree.validate_parent(parent)?;
+        let surface = crate::GpuiSurfaceId::fresh();
+        tree.insert_gpui(surface, crate::GpuiSurfaceRole::Additional, parent)?;
+        drop(tree);
+        self.changed();
+        Ok(surface)
+    }
+
+    /// Creates a platform slot for a native view, such as a web view.
+    pub fn create_native_surface(
+        &self,
+        bounds: Bounds<DevicePixels>,
+        parent: Option<crate::CompositionSurfaceId>,
+    ) -> Result<crate::NativeSurface> {
+        CompositionTree::validate_bounds(bounds)?;
+        self.tree.borrow().validate_parent(parent)?;
+        let attachment = self.platform_window.create_composition_surface()?;
+        let surface = crate::NativeSurfaceId::fresh();
+        self.tree
+            .borrow_mut()
+            .insert_native(surface, bounds, attachment.clone(), parent)?;
+        self.changed();
+        Ok(crate::NativeSurface::new(surface, attachment))
+    }
+
+    /// Creates a platform slot for a surface produced by an external GPU renderer.
+    pub fn create_external_gpu_surface(
+        &self,
+        bounds: Bounds<DevicePixels>,
+        parent: Option<crate::CompositionSurfaceId>,
+    ) -> Result<crate::ExternalGpuSurface> {
+        CompositionTree::validate_bounds(bounds)?;
+        self.tree.borrow().validate_parent(parent)?;
+        let attachment = self.platform_window.create_composition_surface()?;
+        let surface = crate::ExternalGpuSurfaceId::fresh();
+        self.tree
+            .borrow_mut()
+            .insert_external_gpu(surface, bounds, attachment.clone(), parent)?;
+        self.changed();
+        Ok(crate::ExternalGpuSurface::new(surface, attachment))
+    }
+
+    /// Updates the window-coordinate bounds of a native or external surface.
+    pub fn set_bounds(
+        &self,
+        surface: impl Into<crate::CompositionSurfaceId>,
+        bounds: Bounds<DevicePixels>,
+    ) -> Result<()> {
+        if self.tree.borrow_mut().set_bounds(surface.into(), bounds)? {
+            self.changed();
+        }
+        Ok(())
+    }
+
+    /// Places `surface` immediately above its sibling.
+    pub fn place_above(
+        &self,
+        surface: impl Into<crate::CompositionSurfaceId>,
+        sibling: impl Into<crate::CompositionSurfaceId>,
+    ) -> Result<()> {
+        if self
+            .tree
+            .borrow_mut()
+            .place_relative(surface.into(), sibling.into(), true)?
+        {
+            self.changed();
+        }
+        Ok(())
+    }
+
+    /// Places `surface` immediately below its sibling.
+    pub fn place_below(
+        &self,
+        surface: impl Into<crate::CompositionSurfaceId>,
+        sibling: impl Into<crate::CompositionSurfaceId>,
+    ) -> Result<()> {
+        if self
+            .tree
+            .borrow_mut()
+            .place_relative(surface.into(), sibling.into(), false)?
+        {
+            self.changed();
+        }
+        Ok(())
+    }
+
+    /// Moves a surface below a new parent, or back to the root level.
+    pub fn reparent(
+        &self,
+        surface: impl Into<crate::CompositionSurfaceId>,
+        parent: Option<crate::CompositionSurfaceId>,
+    ) -> Result<()> {
+        if self.tree.borrow_mut().reparent(surface.into(), parent)? {
+            self.changed();
+        }
+        Ok(())
+    }
+
+    /// Removes one surface, promoting its children into its former position.
+    pub fn remove_surface(&self, surface: impl Into<crate::CompositionSurfaceId>) -> Result<()> {
+        self.tree.borrow_mut().remove(surface.into())?;
+        self.changed();
+        Ok(())
+    }
+
+    /// Returns the parent of a surface.
+    pub fn parent(
+        &self,
+        surface: impl Into<crate::CompositionSurfaceId>,
+    ) -> Result<Option<crate::CompositionSurfaceId>> {
+        self.tree.borrow().parent_of(surface.into())
+    }
+
+    /// Returns a surface's ordered children, or the ordered root surfaces when `parent` is `None`.
+    pub fn children(
+        &self,
+        parent: Option<crate::CompositionSurfaceId>,
+    ) -> Result<Vec<crate::CompositionSurfaceId>> {
+        self.tree.borrow().children_of(parent)
+    }
+}
+
 /// Holds the state for a specific window.
 pub struct Window {
     pub(crate) handle: AnyWindowHandle,
     pub(crate) invalidator: WindowInvalidator,
     pub(crate) removed: bool,
     pub(crate) platform_window: Box<dyn PlatformWindow>,
+    composition: OnceCell<RefCell<CompositionTree>>,
+    composition_prepaint_target: Cell<Option<crate::GpuiSurfaceId>>,
     display_id: Option<DisplayId>,
     is_resizable: bool,
     is_minimizable: bool,
@@ -2005,6 +2159,8 @@ impl Window {
             invalidator,
             removed: false,
             platform_window,
+            composition: OnceCell::new(),
+            composition_prepaint_target: Cell::new(None),
             display_id,
             is_resizable,
             is_minimizable,
@@ -2281,6 +2437,70 @@ impl Window {
     /// Obtain a handle to the window that belongs to this context.
     pub fn window_handle(&self) -> AnyWindowHandle {
         self.handle
+    }
+
+    /// Enables layered composition and returns a controller for this window's surfaces.
+    /// The base scene stays below native content; deferred and window-level draws use the overlay.
+    pub fn enable_window_composition(&self) -> Result<WindowComposition<'_>> {
+        if self.composition.get().is_none() {
+            anyhow::ensure!(
+                self.invalidator.not_drawing(),
+                "enable window composition outside a draw"
+            );
+            self.platform_window.enable_composition()?;
+            let _ = self.composition.set(RefCell::new(CompositionTree::new()));
+            self.invalidator.set_dirty(true);
+            self.platform_window.schedule_frame();
+        }
+        Ok(WindowComposition {
+            platform_window: self.platform_window.as_ref(),
+            tree: self
+                .composition
+                .get()
+                .expect("composition just initialized"),
+            invalidator: &self.invalidator,
+        })
+    }
+
+    /// Scopes prepaint hitboxes and paint operations onto another GPUI surface in this window.
+    /// Call it around both `prepaint` and `paint` when the surface should receive pointer input.
+    /// A surface scope cannot cross a content-filter isolation group.
+    pub fn with_composition_surface<R>(
+        &mut self,
+        surface: crate::GpuiSurfaceId,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> Result<R> {
+        self.invalidator.debug_assert_paint_or_prepaint();
+        let tree = self
+            .composition
+            .get()
+            .ok_or_else(|| anyhow!("enable window composition before selecting a GPUI surface"))?;
+        anyhow::ensure!(
+            tree.borrow().contains_gpui(surface),
+            "GPUI composition surface does not exist in this window"
+        );
+        let painting = self.invalidator.inner.borrow().draw_phase == DrawPhase::Paint;
+        let previous_scene_target = if painting {
+            let previous = self
+                .next_frame
+                .scene
+                .composition_target()
+                .ok_or_else(|| anyhow!("composition paint scope has no active base surface"))?;
+            self.next_frame.scene.set_composition_target(surface)?;
+            Some(previous)
+        } else {
+            None
+        };
+        let previous_hitbox_target = self.composition_prepaint_target.replace(Some(surface));
+        let result = f(self);
+        self.composition_prepaint_target.set(previous_hitbox_target);
+        if let Some(previous_scene_target) = previous_scene_target {
+            self.next_frame
+                .scene
+                .set_composition_target(previous_scene_target)
+                .expect("restoring the previous composition surface is valid");
+        }
+        Ok(result)
     }
 
     /// Mark the window as dirty, scheduling it to be redrawn on the next frame.
