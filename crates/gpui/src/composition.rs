@@ -630,3 +630,403 @@ impl CompositionTree {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CompositionSurfaceId as Id, point, size};
+
+    struct NoPlatformHandle;
+
+    unsafe impl PlatformSurfaceAttachment for NoPlatformHandle {
+        fn platform_handle(&self) -> PlatformSurfaceHandle<'_> {
+            panic!("test attachment has no platform handle")
+        }
+    }
+
+    fn bounds(x: i32, y: i32) -> Bounds<DevicePixels> {
+        Bounds {
+            origin: point(DevicePixels(x), DevicePixels(y)),
+            size: size(DevicePixels(30), DevicePixels(20)),
+        }
+    }
+
+    fn insert_gpui(tree: &mut CompositionTree, parent: Option<Id>) -> crate::GpuiSurfaceId {
+        let id = crate::GpuiSurfaceId::fresh();
+        tree.insert_gpui(id, GpuiSurfaceRole::Additional, parent)
+            .unwrap();
+        id
+    }
+
+    fn order(tree: &CompositionTree) -> Vec<Id> {
+        tree.surfaces().iter().map(|surface| surface.id()).collect()
+    }
+
+    #[derive(Clone)]
+    struct ReferenceNode {
+        id: Id,
+        children: Vec<ReferenceNode>,
+    }
+
+    impl ReferenceNode {
+        fn leaf(id: Id) -> Self {
+            Self {
+                id,
+                children: Vec::new(),
+            }
+        }
+    }
+
+    fn reference_parent(nodes: &[ReferenceNode], id: Id) -> Option<Option<Id>> {
+        fn search(nodes: &[ReferenceNode], id: Id, parent: Option<Id>) -> Option<Option<Id>> {
+            for node in nodes {
+                if node.id == id {
+                    return Some(parent);
+                }
+                if let Some(found) = search(&node.children, id, Some(node.id)) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        search(nodes, id, None)
+    }
+
+    fn reference_contains(node: &ReferenceNode, id: Id) -> bool {
+        node.id == id
+            || node
+                .children
+                .iter()
+                .any(|child| reference_contains(child, id))
+    }
+
+    fn reference_node(nodes: &[ReferenceNode], id: Id) -> Option<&ReferenceNode> {
+        for node in nodes {
+            if node.id == id {
+                return Some(node);
+            }
+            if let Some(found) = reference_node(&node.children, id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn reference_take(nodes: &mut Vec<ReferenceNode>, id: Id) -> Option<ReferenceNode> {
+        for index in 0..nodes.len() {
+            if nodes[index].id == id {
+                return Some(nodes.remove(index));
+            }
+            if let Some(found) = reference_take(&mut nodes[index].children, id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn reference_node_mut(nodes: &mut [ReferenceNode], id: Id) -> Option<&mut ReferenceNode> {
+        for node in nodes {
+            if node.id == id {
+                return Some(node);
+            }
+            if let Some(found) = reference_node_mut(&mut node.children, id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn reference_children_mut(
+        roots: &mut Vec<ReferenceNode>,
+        parent: Option<Id>,
+    ) -> Option<&mut Vec<ReferenceNode>> {
+        match parent {
+            Some(parent) => reference_node_mut(roots, parent).map(|node| &mut node.children),
+            None => Some(roots),
+        }
+    }
+
+    fn reference_reparent(
+        roots: &mut Vec<ReferenceNode>,
+        surface: Id,
+        parent: Option<Id>,
+        fixed: [Id; 2],
+        overlay: Id,
+    ) -> Result<bool, ()> {
+        let Some(old_parent) = reference_parent(roots, surface) else {
+            return Err(());
+        };
+        if fixed.contains(&surface) {
+            return Err(());
+        }
+        let destination = if let Some(parent) = parent {
+            let Some(source_node) = reference_node(roots, surface) else {
+                return Err(());
+            };
+            if reference_contains(source_node, parent) {
+                return Err(());
+            }
+            let Some(parent_node) = reference_node_mut(roots, parent) else {
+                return Err(());
+            };
+            Some(parent_node.children.len())
+        } else {
+            Some(roots.iter().position(|node| node.id == overlay).ok_or(())?)
+        };
+        if old_parent == parent {
+            return Ok(false);
+        }
+
+        let node = reference_take(roots, surface).ok_or(())?;
+        let children = reference_children_mut(roots, parent).ok_or(())?;
+        let index = destination.ok_or(())?.min(children.len());
+        children.insert(index, node);
+        Ok(true)
+    }
+
+    fn reference_place_relative(
+        roots: &mut Vec<ReferenceNode>,
+        surface: Id,
+        sibling: Id,
+        above: bool,
+        fixed: [Id; 2],
+        base: Id,
+        overlay: Id,
+    ) -> Result<bool, ()> {
+        if surface == sibling || fixed.contains(&surface) {
+            return Err(());
+        }
+        let Some(parent) = reference_parent(roots, surface) else {
+            return Err(());
+        };
+        if reference_parent(roots, sibling) != Some(parent) {
+            return Err(());
+        }
+        if parent.is_none() && ((above && sibling == overlay) || (!above && sibling == base)) {
+            return Err(());
+        }
+        let source = reference_node_mut(roots, surface).ok_or(())?;
+        if reference_contains(source, sibling) {
+            return Err(());
+        }
+
+        let children = reference_children_mut(roots, parent).ok_or(())?;
+        let source_index = children
+            .iter()
+            .position(|node| node.id == surface)
+            .ok_or(())?;
+        let sibling_index = children
+            .iter()
+            .position(|node| node.id == sibling)
+            .ok_or(())?;
+        if (above && sibling_index + 1 == source_index)
+            || (!above && source_index + 1 == sibling_index)
+        {
+            return Ok(false);
+        }
+
+        let node = reference_take(children, surface).ok_or(())?;
+        let sibling_index = children
+            .iter()
+            .position(|node| node.id == sibling)
+            .ok_or(())?;
+        children.insert(sibling_index + usize::from(above), node);
+        Ok(true)
+    }
+
+    fn reference_preorder(nodes: &[ReferenceNode]) -> Vec<(Id, Option<Id>)> {
+        fn visit(nodes: &[ReferenceNode], parent: Option<Id>, result: &mut Vec<(Id, Option<Id>)>) {
+            for node in nodes {
+                result.push((node.id, parent));
+                visit(&node.children, Some(node.id), result);
+            }
+        }
+        let mut result = Vec::new();
+        visit(nodes, None, &mut result);
+        result
+    }
+
+    fn seeded_word(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn preorder_encodes_parentage_and_default_planes_stay_fixed() {
+        let mut tree = CompositionTree::new();
+        let base = Id::Gpui(tree.base());
+        let overlay = Id::Gpui(tree.overlay());
+        let root = insert_gpui(&mut tree, None);
+        let child = insert_gpui(&mut tree, Some(root.into()));
+
+        assert_eq!(order(&tree), [base, root.into(), child.into(), overlay]);
+        assert_eq!(tree.parent_of(child.into()).unwrap(), Some(root.into()));
+        assert!(tree.reparent(base, None).is_err());
+        assert!(tree.remove(overlay).is_err());
+        assert!(tree.place_relative(root.into(), base, false).is_err());
+        assert!(tree.place_relative(root.into(), overlay, true).is_err());
+        assert_eq!(order(&tree), [base, root.into(), child.into(), overlay]);
+    }
+
+    #[test]
+    fn nested_subtrees_move_and_reorder_as_contiguous_units() {
+        let mut tree = CompositionTree::new();
+        let left = insert_gpui(&mut tree, None);
+        let left_child = insert_gpui(&mut tree, Some(left.into()));
+        let right = insert_gpui(&mut tree, None);
+        let right_child = insert_gpui(&mut tree, Some(right.into()));
+
+        tree.place_relative(left.into(), right.into(), true)
+            .unwrap();
+        assert_eq!(
+            tree.parent_of(left_child.into()).unwrap(),
+            Some(left.into())
+        );
+        assert_eq!(
+            order(&tree),
+            [
+                Id::Gpui(tree.base()),
+                right.into(),
+                right_child.into(),
+                left.into(),
+                left_child.into(),
+                Id::Gpui(tree.overlay()),
+            ]
+        );
+
+        tree.reparent(left.into(), Some(right_child.into()))
+            .unwrap();
+        assert_eq!(
+            tree.parent_of(left.into()).unwrap(),
+            Some(right_child.into())
+        );
+        assert_eq!(
+            tree.parent_of(left_child.into()).unwrap(),
+            Some(left.into())
+        );
+        tree.reparent(right_child.into(), None).unwrap();
+        assert_eq!(tree.parent_of(right_child.into()).unwrap(), None);
+        assert_eq!(
+            tree.parent_of(left.into()).unwrap(),
+            Some(right_child.into())
+        );
+    }
+
+    #[test]
+    fn seeded_edits_match_a_recursive_hierarchy_model() {
+        for seed in 1..=32 {
+            let mut tree = CompositionTree::new();
+            let base = tree.base();
+            let overlay = tree.overlay();
+            let base_id = Id::Gpui(base);
+            let overlay_id = Id::Gpui(overlay);
+            let left = insert_gpui(&mut tree, None);
+            let left_child = insert_gpui(&mut tree, Some(left.into()));
+            let left_grandchild = insert_gpui(&mut tree, Some(left_child.into()));
+            let left_sibling = insert_gpui(&mut tree, Some(left.into()));
+            let middle = insert_gpui(&mut tree, None);
+            let middle_child = insert_gpui(&mut tree, Some(middle.into()));
+            let right = insert_gpui(&mut tree, None);
+            let right_child = insert_gpui(&mut tree, Some(right.into()));
+            let fixed = [base_id, overlay_id];
+            let movable = [
+                Id::Gpui(left),
+                Id::Gpui(left_child),
+                Id::Gpui(left_grandchild),
+                Id::Gpui(left_sibling),
+                Id::Gpui(middle),
+                Id::Gpui(middle_child),
+                Id::Gpui(right),
+                Id::Gpui(right_child),
+            ];
+            let all = [
+                base_id, overlay_id, movable[0], movable[1], movable[2], movable[3], movable[4],
+                movable[5], movable[6], movable[7],
+            ];
+            let mut reference = vec![
+                ReferenceNode::leaf(base_id),
+                ReferenceNode {
+                    id: movable[0],
+                    children: vec![
+                        ReferenceNode {
+                            id: movable[1],
+                            children: vec![ReferenceNode::leaf(movable[2])],
+                        },
+                        ReferenceNode::leaf(movable[3]),
+                    ],
+                },
+                ReferenceNode {
+                    id: movable[4],
+                    children: vec![ReferenceNode::leaf(movable[5])],
+                },
+                ReferenceNode {
+                    id: movable[6],
+                    children: vec![ReferenceNode::leaf(movable[7])],
+                },
+                ReferenceNode::leaf(overlay_id),
+            ];
+            let mut state = seed;
+
+            for _ in 0..512 {
+                let word = seeded_word(&mut state);
+                let surface = movable[(word as usize >> 8) % movable.len()];
+                let target = all[(word as usize >> 16) % all.len()];
+                match word % 3 {
+                    0 => {
+                        let parent = match (word >> 32) as usize % (all.len() + 1) {
+                            0 => None,
+                            index => Some(all[index - 1]),
+                        };
+                        let expected =
+                            reference_reparent(&mut reference, surface, parent, fixed, overlay_id);
+                        let actual = tree.reparent(surface, parent).map_err(|_| ());
+                        assert_eq!(actual, expected);
+                    }
+                    1 | 2 => {
+                        let above = word & 1 != 0;
+                        let expected = reference_place_relative(
+                            &mut reference,
+                            surface,
+                            target,
+                            above,
+                            fixed,
+                            base_id,
+                            overlay_id,
+                        );
+                        let actual = tree.place_relative(surface, target, above).map_err(|_| ());
+                        assert_eq!(actual, expected);
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    tree.surfaces()
+                        .iter()
+                        .map(|surface| (surface.id(), surface.parent))
+                        .collect::<Vec<_>>(),
+                    reference_preorder(&reference),
+                    "seed {seed}, operation {word:#x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn removing_a_node_promotes_descendants_without_changing_window_bounds() {
+        let mut tree = CompositionTree::new();
+        let parent = insert_gpui(&mut tree, None);
+        let child = insert_gpui(&mut tree, Some(parent.into()));
+        let grandchild = insert_gpui(&mut tree, Some(child.into()));
+        tree.remove(parent.into()).unwrap();
+
+        assert_eq!(tree.parent_of(child.into()).unwrap(), None);
+        assert_eq!(
+            tree.parent_of(grandchild.into()).unwrap(),
+            Some(child.into())
+        );
+        assert!(tree.index(parent.into()).is_err());
+        assert_eq!(tree.surfaces[1].depth, 0);
+        assert_eq!(tree.surfaces[2].depth, 1);
+    }
+
+}
