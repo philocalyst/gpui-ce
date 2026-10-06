@@ -44,6 +44,7 @@ use super::{
     ButtonOrScroll, ScrollDirection, X11Display, X11WindowStatePtr, XcbAtoms, XimCallbackEvent,
     XimHandler, button_or_scroll_from_event_detail, check_reply,
     clipboard::{self, Clipboard},
+    composition::xinput_position,
     get_reply, get_valuator_axis_index, handle_connection_error, modifiers_from_state,
     pressed_button_from_mask, xcb_flush,
 };
@@ -192,6 +193,7 @@ pub struct X11ClientState {
     pub(crate) resource_database: Database,
     pub(crate) atoms: XcbAtoms,
     pub(crate) windows: HashMap<xproto::Window, WindowRef>,
+    composition_windows: HashMap<xproto::Window, (X11WindowStatePtr, Point<Pixels>)>,
     pub(crate) mouse_focused_window: Option<xproto::Window>,
     pub(crate) keyboard_focused_window: Option<xproto::Window>,
     pub(crate) xkb: xkbc::State,
@@ -256,6 +258,30 @@ impl X11ClientStatePtr {
             state.cursor_hidden_window = None;
         }
         state.cursor_styles.remove(&x_window);
+        state
+            .composition_windows
+            .retain(|_, (window, _)| window.x_window != x_window);
+    }
+
+    pub(crate) fn register_composition_window(
+        &self,
+        surface: xproto::Window,
+        window: X11WindowStatePtr,
+        origin: Point<Pixels>,
+    ) {
+        if let Some(client) = self.get_client() {
+            client
+                .0
+                .borrow_mut()
+                .composition_windows
+                .insert(surface, (window, origin));
+        }
+    }
+
+    pub(crate) fn unregister_composition_window(&self, surface: xproto::Window) {
+        if let Some(client) = self.get_client() {
+            client.0.borrow_mut().composition_windows.remove(&surface);
+        }
     }
 
     pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
@@ -305,6 +331,10 @@ impl X11ClientStatePtr {
 
 #[derive(Clone)]
 pub(crate) struct X11Client(pub(crate) Rc<RefCell<X11ClientState>>);
+
+fn leaves_window_subtree(detail: xinput::NotifyDetail) -> bool {
+    detail != xinput::NotifyDetail::INFERIOR
+}
 
 impl X11Client {
     pub(crate) fn new() -> anyhow::Result<Self> {
@@ -539,6 +569,7 @@ impl X11Client {
             resource_database,
             atoms,
             windows: HashMap::default(),
+            composition_windows: HashMap::default(),
             mouse_focused_window: None,
             keyboard_focused_window: None,
             xkb: xkb_state,
@@ -789,11 +820,35 @@ impl X11Client {
 
     pub(crate) fn get_window(&self, win: xproto::Window) -> Option<X11WindowStatePtr> {
         let state = self.0.borrow();
-        state
+        let window = state
             .windows
             .get(&win)
-            .filter(|window_reference| !window_reference.window.state.borrow().destroyed)
-            .map(|window_reference| window_reference.window.clone())
+            .map(|window_reference| window_reference.window.clone());
+        window.filter(|window| !window.state.borrow().destroyed)
+    }
+
+    fn get_pointer_event_window(&self, win: xproto::Window) -> Option<X11WindowStatePtr> {
+        let state = self.0.borrow();
+        let window = state
+            .composition_windows
+            .get(&win)
+            .map(|(window, _)| window.clone())
+            .or_else(|| {
+                state
+                    .windows
+                    .get(&win)
+                    .map(|window_reference| window_reference.window.clone())
+            });
+        window.filter(|window| !window.state.borrow().destroyed)
+    }
+
+    fn composition_window_position(&self, win: xproto::Window, x: i32, y: i32) -> Point<Pixels> {
+        let state = self.0.borrow();
+        let origin = state
+            .composition_windows
+            .get(&win)
+            .map_or(Point::default(), |(_, origin)| *origin);
+        xinput_position(origin, x, y, state.scale_factor)
     }
 
     fn handle_event(&self, event: Event) -> Option<()> {
@@ -1146,16 +1201,13 @@ impl X11Client {
                 window.handle_input(PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }));
             }
             Event::XinputButtonPress(event) => {
-                let window = self.get_window(event.event)?;
+                let window = self.get_pointer_event_window(event.event)?;
+                let position =
+                    self.composition_window_position(event.event, event.event_x, event.event_y);
                 let mut state = self.0.borrow_mut();
 
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
-
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
 
                 if state.composing && state.ximc.is_some() {
                     drop(state);
@@ -1223,15 +1275,13 @@ impl X11Client {
                 }
             }
             Event::XinputButtonRelease(event) => {
-                let window = self.get_window(event.event)?;
+                let window = self.get_pointer_event_window(event.event)?;
+                let position =
+                    self.composition_window_position(event.event, event.event_x, event.event_y);
                 let mut state = self.0.borrow_mut();
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
 
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
                 match button_or_scroll_from_event_detail(event.detail) {
                     Some(ButtonOrScroll::Button(button)) => {
                         let click_count = state.current_count;
@@ -1248,7 +1298,9 @@ impl X11Client {
                 }
             }
             Event::XinputMotion(event) => {
-                let window = self.get_window(event.event)?;
+                let window = self.get_pointer_event_window(event.event)?;
+                let position =
+                    self.composition_window_position(event.event, event.event_x, event.event_y);
                 let mut state = self.0.borrow_mut();
                 state.restore_cursor_after_hide();
                 if window.is_blocked() {
@@ -1279,10 +1331,6 @@ impl X11Client {
                     };
                 }
                 let pressed_button = pressed_button_from_mask(event.button_mask[0]);
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
                 drop(state);
@@ -1309,28 +1357,29 @@ impl X11Client {
                 }
             }
             Event::XinputEnter(event) if event.mode == xinput::NotifyMode::NORMAL => {
-                let window = self.get_window(event.event)?;
+                let window = self.get_pointer_event_window(event.event)?;
                 window.set_hovered(true);
                 let mut state = self.0.borrow_mut();
-                state.mouse_focused_window = Some(event.event);
+                state.mouse_focused_window = Some(window.x_window);
                 state.restore_cursor_after_hide();
             }
-            Event::XinputLeave(event) if event.mode == xinput::NotifyMode::NORMAL => {
+            Event::XinputLeave(event)
+                if event.mode == xinput::NotifyMode::NORMAL
+                    && leaves_window_subtree(event.detail) =>
+            {
+                let window = self.get_pointer_event_window(event.event)?;
+                let position =
+                    self.composition_window_position(event.event, event.event_x, event.event_y);
                 let mut state = self.0.borrow_mut();
 
                 // Set last scroll values to `None` so that a large delta isn't created if scrolling is done outside the window (the valuator is global)
                 reset_all_pointer_device_scroll_positions(&mut state.pointer_device_states);
                 state.mouse_focused_window = None;
                 let pressed_button = pressed_button_from_mask(event.buttons[0]);
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
                 drop(state);
 
-                let window = self.get_window(event.event)?;
                 window.handle_input(PlatformInput::MouseExited(gpui::MouseExitEvent {
                     pressed_button,
                     position,
@@ -1361,15 +1410,13 @@ impl X11Client {
                 }
             }
             Event::XinputGesturePinchBegin(event) => {
-                let window = self.get_window(event.event)?;
+                let window = self.get_pointer_event_window(event.event)?;
+                let position =
+                    self.composition_window_position(event.event, event.event_x, event.event_y);
                 let mut state = self.0.borrow_mut();
                 state.pinch_scale = 1.0;
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
                 drop(state);
                 window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
                     position,
@@ -1379,14 +1426,12 @@ impl X11Client {
                 }));
             }
             Event::XinputGesturePinchUpdate(event) => {
-                let window = self.get_window(event.event)?;
+                let window = self.get_pointer_event_window(event.event)?;
+                let position =
+                    self.composition_window_position(event.event, event.event_x, event.event_y);
                 let mut state = self.0.borrow_mut();
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
                 // scale is in FP16.16 format: divide by 65536 to get the float value
                 let new_absolute_scale = event.scale as f32 / 65536.0;
                 let previous_scale = state.pinch_scale;
@@ -1401,15 +1446,13 @@ impl X11Client {
                 }));
             }
             Event::XinputGesturePinchEnd(event) => {
-                let window = self.get_window(event.event)?;
+                let window = self.get_pointer_event_window(event.event)?;
+                let position =
+                    self.composition_window_position(event.event, event.event_x, event.event_y);
                 let mut state = self.0.borrow_mut();
                 state.pinch_scale = 1.0;
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
-                let position = point(
-                    px(event.event_x as f32 / u16::MAX as f32 / state.scale_factor),
-                    px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
-                );
                 drop(state);
                 window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
                     position,
@@ -3124,5 +3167,20 @@ mod tests {
 
         // Assert pressing space while on the Czech layout still types a space.
         assert_eq!(key_event_state.key_get_utf8(space), " ");
+    }
+
+    #[test]
+    fn xinput_coordinates_convert_fixed_point_then_apply_nested_surface_origin() {
+        let origin = point(px(12.0), px(7.0));
+        assert_eq!(
+            xinput_position(origin, 10 * 65536, -4 * 65536, 2.0),
+            point(px(17.0), px(5.0))
+        );
+    }
+
+    #[test]
+    fn crossing_into_a_child_is_not_a_window_exit() {
+        assert!(!leaves_window_subtree(xinput::NotifyDetail::INFERIOR));
+        assert!(leaves_window_subtree(xinput::NotifyDetail::NONLINEAR));
     }
 }
