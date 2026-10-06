@@ -6,7 +6,8 @@ use crate::{
     discovery::Discovery,
     forge::Repository,
     model::{
-        BuildResult, Classification, DownstreamResult, DownstreamSource, GateResult, ImpactReport,
+        BuildResult, Classification, CompilerDiagnostic, DiagnosticOrigin, DownstreamResult,
+        DownstreamSource, GateResult, ImpactReport,
     },
 };
 
@@ -106,7 +107,9 @@ impl ImpactReport {
             if let Some(revision) = &result.revision {
                 let _ = writeln!(output, "Downstream revision: {}\n", escape(revision));
             }
-            let build = if result.classification == Classification::PreExistingFailure {
+            let build = if result.classification == Classification::PreExistingFailure
+                || result.candidate.diagnostics.is_empty()
+            {
                 &result.baseline
             } else {
                 &result.candidate
@@ -117,13 +120,18 @@ impl ImpactReport {
                     ("Baseline", &result.baseline),
                     ("Candidate", &result.candidate),
                 ] {
-                    if !build.log.trim().is_empty() {
+                    // Rustc's rendered error is already above; keep only additional
+                    // harness context here. Complete original logs remain in JSON.
+                    let mut context = build.log.clone();
+                    for diagnostic in &build.diagnostics {
+                        if let Some(rendered) = &diagnostic.rendered {
+                            context = context.replace(rendered, "");
+                        }
+                    }
+                    if !context.trim().is_empty() {
                         let _ = writeln!(output, "{label} harness output:\n");
                         // The concise Markdown view is bounded independently of retained JSON logs.
-                        fenced(
-                            &mut output,
-                            &build.log.chars().take(4000).collect::<String>(),
-                        );
+                        fenced(&mut output, &context.chars().take(4000).collect::<String>());
                     }
                 }
             }
@@ -166,40 +174,61 @@ fn render_diagnostics(output: &mut String, result: &DownstreamResult, build: &Bu
             escape(&diagnostic.message)
         );
         if let Some(package) = &diagnostic.package {
-            let _ = writeln!(
-                output,
-                "Package: {} ({:?})\n",
-                escape(&package.name),
-                package.origin
-            );
-        }
-        if let Some(span) = diagnostic.spans.iter().find(|s| s.is_primary) {
-            let label = format!(
-                "{}:{}:{}",
-                escape(&span.file_name),
-                span.line_start,
-                span.column_start
-            );
-            let link = match (&result.source, &result.revision) {
-                (DownstreamSource::Git { url, forge, .. }, Some(revision)) => diagnostic
-                    .source_files
-                    .get(&span.file_name)
-                    .and_then(|path| {
-                        Repository::parse(url, *forge).ok().and_then(|repo| {
-                            repo.source_link(revision, path.to_str()?, span.line_start)
-                        })
-                    }),
-                _ => None,
+            let origin = match package.origin {
+                DiagnosticOrigin::Downstream => "downstream",
+                DiagnosticOrigin::Library => "injected library",
+                DiagnosticOrigin::Dependency => "external dependency",
             };
-            if let Some(link) = link {
-                let _ = writeln!(output, "[{label}](<{link}>)\n");
-            } else {
-                let _ = writeln!(output, "{label}\n");
+            let _ = writeln!(output, "Package: {} ({origin})\n", escape(&package.name),);
+        }
+        for span in diagnostic.spans.iter().filter(|s| s.is_primary).take(4) {
+            render_span(output, result, diagnostic, span);
+            if !diagnostic.source_files.contains_key(&span.file_name)
+                && let Some(callsite) = std::iter::successors(span.expansion.as_deref(), |e| {
+                    e.span.expansion.as_deref()
+                })
+                .map(|e| &e.span)
+                .find(|s| diagnostic.source_files.contains_key(&s.file_name))
+            {
+                output.push_str("Macro invocation: ");
+                render_span(output, result, diagnostic, callsite);
             }
         }
         if let Some(rendered) = &diagnostic.rendered {
             fenced(output, &rendered.chars().take(8000).collect::<String>());
         }
+    }
+}
+
+fn render_span(
+    output: &mut String,
+    result: &DownstreamResult,
+    diagnostic: &CompilerDiagnostic,
+    span: &cargo_metadata::diagnostic::DiagnosticSpan,
+) {
+    let label = format!(
+        "{}:{}:{}",
+        escape(&span.file_name),
+        span.line_start,
+        span.column_start
+    );
+    let link = match (&result.source, &result.revision) {
+        (DownstreamSource::Git { url, forge, .. }, Some(revision)) => diagnostic
+            .source_files
+            .get(&span.file_name)
+            .and_then(|path| {
+                Repository::parse(url, *forge).ok()?.source_link(
+                    revision,
+                    path.to_str()?,
+                    span.line_start,
+                )
+            }),
+        _ => None,
+    };
+    if let Some(link) = link {
+        let _ = writeln!(output, "[{label}](<{link}>)\n");
+    } else {
+        let _ = writeln!(output, "{label}\n");
     }
 }
 

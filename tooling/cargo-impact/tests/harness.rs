@@ -79,6 +79,11 @@ fn unavailable_standard_library_is_an_environment_failure() {
             .iter()
             .any(|d| d.code.as_ref().is_some_and(|c| c.code == "E0463"))
     );
+    assert_eq!(
+        report.markdown().matches("error[E0463]").count(),
+        1,
+        "the human report should not repeat rustc's error in both harness logs"
+    );
 }
 
 #[test]
@@ -280,6 +285,209 @@ fn candidate_library_compilation_error_is_inconclusive_with_provenance() {
             .markdown()
             .contains("injected library failed to compile")
     );
+}
+
+#[test]
+fn generated_out_dir_error_is_a_regression_without_a_consumer_source_mapping() {
+    let mut fixture = Fixture::new();
+    let consumer = fixture.consumer(
+        "generated-source",
+        "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));",
+        DEP,
+    );
+    fs::write(
+        consumer.join("build.rs"),
+        r#"
+fn main() {
+    let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(
+        output.join("generated.rs"),
+        "pub fn api() { changed_lib::removed(); }\n",
+    )
+    .unwrap();
+}
+"#,
+    )
+    .unwrap();
+
+    let report = analyze(&fixture.request).unwrap();
+    let result = &report.downstreams[0];
+    assert_eq!(
+        result.classification,
+        Classification::Regression,
+        "{result:?}"
+    );
+    let diagnostic = result
+        .candidate
+        .diagnostics
+        .iter()
+        .find(|d| d.code.as_ref().is_some_and(|c| c.code == "E0425"))
+        .expect("generated consumer code should report the removed API");
+    assert_eq!(
+        diagnostic.package.as_ref().unwrap().origin,
+        DiagnosticOrigin::Downstream
+    );
+    let primary = diagnostic
+        .spans
+        .iter()
+        .find(|span| span.is_primary)
+        .unwrap();
+    assert!(primary.file_name.ends_with("generated.rs"), "{primary:?}");
+    assert!(
+        !diagnostic.source_files.contains_key(&primary.file_name),
+        "generated OUT_DIR files must not map to consumer checkout sources"
+    );
+}
+
+#[test]
+fn exported_macro_diagnostic_keeps_consumer_callsite_and_library_definition_provenance() {
+    let mut fixture = Fixture::new();
+    let macro_source = "#[macro_export]\nmacro_rules! call_removed { () => { $crate::removed() }; }\npub fn removed() {}\npub fn kept() {}\n";
+    fs::write(fixture.request.baseline.join("src/lib.rs"), macro_source).unwrap();
+    fs::write(
+        fixture.request.candidate.join("src/lib.rs"),
+        "#[macro_export]\nmacro_rules! call_removed { () => { $crate::removed() }; }\npub fn kept() {}\n",
+    )
+    .unwrap();
+    fixture.consumer(
+        "macro-consumer",
+        "pub fn api() { changed_lib::call_removed!(); }\n",
+        DEP,
+    );
+
+    let mut report = analyze(&fixture.request).unwrap();
+    let (primary_source, primary_line) = {
+        let result = &report.downstreams[0];
+        assert_eq!(
+            result.classification,
+            Classification::Regression,
+            "{result:?}"
+        );
+        let diagnostic = result
+            .candidate
+            .diagnostics
+            .iter()
+            .find(|d| d.code.as_ref().is_some_and(|c| c.code == "E0425"))
+            .expect("the expanded macro should report its removed API");
+        assert_eq!(
+            diagnostic.package.as_ref().unwrap().origin,
+            DiagnosticOrigin::Downstream
+        );
+        assert_eq!(diagnostic.target.as_ref().unwrap().name, "consumer");
+        let expansion = diagnostic
+            .spans
+            .iter()
+            .find_map(|span| span.expansion.as_ref())
+            .expect("rustc macro expansion provenance should be retained");
+        assert_eq!(
+            diagnostic.source_files.get(&expansion.span.file_name),
+            Some(&PathBuf::from("src/lib.rs")),
+            "the invocation site should map to the original consumer source"
+        );
+        let definition = expansion
+            .def_site_span
+            .as_ref()
+            .expect("exported macro provenance should include its definition site");
+        assert!(
+            !diagnostic.source_files.contains_key(&definition.file_name),
+            "upstream macro definitions must not link into the consumer repository"
+        );
+        let primary = diagnostic
+            .spans
+            .iter()
+            .find(|span| span.is_primary)
+            .unwrap();
+        (
+            diagnostic.source_files.get(&primary.file_name).cloned(),
+            primary.line_start,
+        )
+    };
+
+    let sha = "a".repeat(40);
+    report.downstreams[0].source = DownstreamSource::Git {
+        url: "https://github.com/example/consumer".into(),
+        revision: "main".into(),
+        forge: None,
+    };
+    report.downstreams[0].revision = Some(sha.clone());
+    let markdown = report.markdown();
+    if let Some(path) = primary_source {
+        assert!(markdown.contains(&format!("/blob/{sha}/{}#L{}", path.display(), primary_line)));
+    } else {
+        assert!(markdown.contains("Macro invocation:"));
+        assert!(
+            markdown.contains(&format!("/blob/{sha}/src/lib.rs#L1")),
+            "the verified consumer invocation should be linked"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_unrelated_license_link_is_preserved_but_escaping_links_fail_with_context() {
+    let mut fixture = Fixture::new();
+    let consumer = fixture.consumer(
+        "dangling-license",
+        "pub fn api() { changed_lib::removed(); }",
+        DEP,
+    );
+    let license = consumer.join("tooling/perf/LICENSE-APACHE");
+    fs::create_dir_all(license.parent().unwrap()).unwrap();
+    let safe_target = PathBuf::from("../../LICENSE-APACHE");
+    std::os::unix::fs::symlink(&safe_target, &license).unwrap();
+
+    let report = analyze(&fixture.request).unwrap();
+    assert_eq!(
+        report.downstreams[0].classification,
+        Classification::Regression,
+        "an unrelated safe dangling license link must not hide the API break"
+    );
+    assert_eq!(fs::read_link(&license).unwrap(), safe_target);
+    let snapshots = fs::read_dir(
+        fixture
+            .request
+            .work_dir
+            .as_ref()
+            .unwrap()
+            .join("downstreams"),
+    )
+    .unwrap()
+    .map(|entry| entry.unwrap().path())
+    .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 1);
+    let snapshot_link = snapshots[0].join("tooling/perf/LICENSE-APACHE");
+    assert!(
+        fs::symlink_metadata(&snapshot_link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_link(&snapshot_link).unwrap(), safe_target);
+
+    for (target, reason) in [
+        (
+            PathBuf::from("../../../../outside-missing-license"),
+            "escapes source tree",
+        ),
+        (
+            PathBuf::from("/outside-missing-license"),
+            "relative target inside the source tree",
+        ),
+    ] {
+        fs::remove_file(&license).unwrap();
+        std::os::unix::fs::symlink(&target, &license).unwrap();
+        let report = analyze(&fixture.request).unwrap();
+        let result = &report.downstreams[0];
+        assert_eq!(
+            result.classification,
+            Classification::HarnessFailure,
+            "unsafe dangling link {target:?} must fail snapshot preparation"
+        );
+        let message = result.message.as_deref().unwrap_or_default();
+        assert!(message.contains("tooling/perf/LICENSE-APACHE"), "{message}");
+        assert!(message.contains(reason), "{message}");
+        assert_eq!(fs::read_link(&license).unwrap(), target);
+    }
 }
 
 fn commit_fixture(root: &Path) -> String {

@@ -36,30 +36,54 @@ pub(crate) fn checkout(
     {
         return Err(io::Error::other("invalid git revision"));
     }
-    if !destination.exists() {
-        fs::create_dir_all(
-            destination
-                .parent()
-                .ok_or_else(|| io::Error::other("missing checkout parent"))?,
-        )?;
+    if (7..64).contains(&revision.len())
+        && revision.len() != 40
+        && revision.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(io::Error::other(
+            "use a full 40- or 64-character Git commit ID; abbreviated IDs cannot be fetched reliably (for a hexadecimal branch name, use refs/heads/<name>)",
+        ));
+    }
+    if !destination.join(".git").is_dir() {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| io::Error::other("missing checkout parent"))?;
+        fs::create_dir_all(parent)?;
+        // Interrupted clones must not leave a checkout that poisons every retry.
+        let staged = tempfile::TempDir::new_in(parent)?;
+        let repository = staged.path().join("repository");
         git(
-            destination.parent().unwrap(),
+            parent,
             &[
                 "clone",
                 "--quiet",
                 "--no-checkout",
+                "--depth=1",
+                "--filter=blob:none",
+                "--no-tags",
                 "--",
                 url,
-                destination
+                repository
                     .to_str()
                     .ok_or_else(|| io::Error::other("non-UTF8 checkout path"))?,
             ],
             timeout,
         )?;
+        if fs::symlink_metadata(destination).is_ok() {
+            fs::remove_dir_all(destination)?;
+        }
+        fs::rename(repository, destination)?;
     }
     git(
         destination,
-        &["fetch", "--quiet", "origin", revision],
+        &[
+            "fetch",
+            "--quiet",
+            "--depth=1",
+            "--no-tags",
+            "origin",
+            revision,
+        ],
         timeout,
     )?;
     let sha = git(
@@ -176,9 +200,38 @@ impl Snapshot<'_> {
                 continue;
             }
             let path = entry.path();
-            let metadata = fs::metadata(&path)?;
             let relative = relative.join(&name);
             let destination = destination.join(&name);
+            let metadata = match fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound
+                        && fs::symlink_metadata(&path)?.is_symlink() =>
+                {
+                    let target =
+                        preserve_dangling_link(self.root, &path, &destination).map_err(|e| {
+                            io::Error::new(
+                                e.kind(),
+                                format!("snapshot {}: {e}", relative.display()),
+                            )
+                        })?;
+                    self.hash.update(relative.as_os_str().as_encoded_bytes());
+                    self.hash.update([0]);
+                    self.hash.update(u64::MAX.to_le_bytes());
+                    self.hash.update(target.as_os_str().as_encoded_bytes());
+                    self.files += 1;
+                    if self.files > 100_000 {
+                        return Err(io::Error::other("source snapshot exceeds 100,000 files"));
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("snapshot {}: {error}", relative.display()),
+                    ));
+                }
+            };
             if metadata.is_dir() {
                 self.copy(&path, &destination, &relative)?;
             } else if metadata.is_file() {
@@ -226,6 +279,38 @@ impl Snapshot<'_> {
         self.visited.remove(&resolved);
         Ok(())
     }
+}
+
+/// An unused, dangling license link should not prevent compiling a valid package.
+/// Only preserve direct relative links whose existing parent proves they stay inside the source.
+fn preserve_dangling_link(root: &Path, source: &Path, destination: &Path) -> io::Result<PathBuf> {
+    let target = fs::read_link(source)?;
+    if target.is_absolute() {
+        return Err(io::Error::other(
+            "dangling symlink must have a relative target inside the source tree",
+        ));
+    }
+    let target_path = source.parent().unwrap().join(&target);
+    let parent = target_path.parent().unwrap().canonicalize()?;
+    if !parent.starts_with(root) {
+        return Err(io::Error::other("dangling symlink escapes source tree"));
+    }
+    match fs::symlink_metadata(&target_path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        _ => {
+            return Err(io::Error::other(
+                "cannot prove dangling symlink target stays inside source tree",
+            ));
+        }
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, destination)?;
+    #[cfg(not(unix))]
+    return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "symlink snapshots require a Unix host",
+    ));
+    Ok(target)
 }
 
 pub(crate) fn validate_manifest(manifest: &Path) -> io::Result<()> {
