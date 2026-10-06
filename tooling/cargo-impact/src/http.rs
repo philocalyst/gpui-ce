@@ -49,11 +49,19 @@ impl Api {
         })
     }
 
-    pub fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T, ApiError> {
+    pub fn get<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<T, ApiError> {
         self.request(reqwest::Method::GET, path, query, None)
     }
 
-    pub fn post<T: DeserializeOwned>(&self, path: &str, body: serde_json::Value) -> Result<T, ApiError> {
+    pub fn post<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<T, ApiError> {
         self.request(reqwest::Method::POST, path, &[], Some(body))
     }
 
@@ -69,7 +77,11 @@ impl Api {
         if url.origin() != self.base.origin() {
             return Err(ApiError::Status(StatusCode::BAD_REQUEST));
         }
-        let mut request = self.client.request(method, url).query(query).header("Accept", "application/json");
+        let mut request = self
+            .client
+            .request(method, url)
+            .query(query)
+            .header("Accept", "application/json");
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
@@ -80,11 +92,17 @@ impl Api {
         let status = response.status();
         if status == StatusCode::TOO_MANY_REQUESTS
             || (status == StatusCode::FORBIDDEN
-                && response.headers().get("x-ratelimit-remaining").is_some_and(|v| v == "0"))
+                && response
+                    .headers()
+                    .get("x-ratelimit-remaining")
+                    .is_some_and(|v| v == "0"))
         {
             return Err(ApiError::RateLimited {
-                retry_after_seconds: response.headers().get("retry-after")
-                    .and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok()),
+                retry_after_seconds: response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse().ok()),
             });
         }
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {

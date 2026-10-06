@@ -308,6 +308,7 @@ dependencies = [
  "cargo_metadata",
  "clap",
  "fs2",
+ "libc",
  "predicates",
  "reqwest 0.12.28",
  "serde",

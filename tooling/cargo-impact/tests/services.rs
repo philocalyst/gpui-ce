@@ -28,7 +28,18 @@ impl Server {
         let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let received = requests.clone();
-        let replies: Vec<_> = responses.into_iter().map(|(s, b, h)| (s, b, h.into_iter().map(|(k, v)| (k.to_owned(), v.to_owned())).collect::<Vec<_>>())).collect();
+        let replies: Vec<_> = responses
+            .into_iter()
+            .map(|(s, b, h)| {
+                (
+                    s,
+                    b,
+                    h.into_iter()
+                        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
         let thread = thread::spawn(move || {
             for (status, body, headers) in replies {
                 let started = Instant::now();
@@ -36,14 +47,19 @@ impl Server {
                     match listener.accept() {
                         Ok((stream, _)) => break stream,
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(started.elapsed() < Duration::from_secs(5), "expected request did not arrive");
+                            assert!(
+                                started.elapsed() < Duration::from_secs(5),
+                                "expected request did not arrive"
+                            );
                             thread::sleep(Duration::from_millis(5));
                         }
                         Err(error) => panic!("accept: {error}"),
                     }
                 };
                 stream.set_nonblocking(false).unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
                 let mut request = Vec::new();
                 let mut buffer = [0; 4096];
                 loop {
@@ -51,25 +67,48 @@ impl Server {
                     request.extend_from_slice(&buffer[..size]);
                     if let Some(end) = request.windows(4).position(|v| v == b"\r\n\r\n") {
                         let header = String::from_utf8_lossy(&request[..end]).to_lowercase();
-                        let length = header.lines().find_map(|line| line.strip_prefix("content-length: ")?.parse::<usize>().ok()).unwrap_or(0);
-                        if request.len() >= end + 4 + length { break; }
+                        let length = header
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("content-length: ")?.parse::<usize>().ok()
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
                     }
-                    if size == 0 { break; }
+                    if size == 0 {
+                        break;
+                    }
                 }
-                received.lock().unwrap().push(String::from_utf8_lossy(&request).into_owned());
+                received
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&request).into_owned());
                 let body = body.to_string();
                 write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n", body.len()).unwrap();
-                for (key, value) in headers { write!(stream, "{key}: {value}\r\n").unwrap(); }
+                for (key, value) in headers {
+                    write!(stream, "{key}: {value}\r\n").unwrap();
+                }
                 write!(stream, "\r\n{body}").unwrap();
             }
         });
-        Self { base, requests, thread: Some(thread) }
+        Self {
+            base,
+            requests,
+            thread: Some(thread),
+        }
     }
 
-    fn api(&self) -> Api { Api::new(self.base.clone(), Some("fixture-token".into())).unwrap() }
+    fn api(&self) -> Api {
+        Api::new(self.base.clone(), Some("fixture-token".into())).unwrap()
+    }
     fn finish(mut self) -> Vec<String> {
         self.thread.take().unwrap().join().unwrap();
-        Arc::try_unwrap(self.requests).unwrap().into_inner().unwrap()
+        Arc::try_unwrap(self.requests)
+            .unwrap()
+            .into_inner()
+            .unwrap()
     }
 }
 
@@ -83,7 +122,12 @@ fn registry_paginates_and_preserves_multi_package_repository_evidence() {
         {"crate":"b", "num":"1.0.0", "repository":"https://gitlab.com/group/consumer"}
     ], "meta":{"total":2}});
     let server = Server::new(vec![(200, first, vec![]), (200, second, vec![])]);
-    let discovery = CratesIo { api: server.api(), max_pages: 10 }.discover("demo-lib").unwrap();
+    let discovery = CratesIo {
+        api: server.api(),
+        max_pages: 10,
+    }
+    .discover("demo-lib")
+    .unwrap();
     assert_eq!(discovery.candidates.len(), 1);
     assert_eq!(discovery.candidates[0].packages.len(), 2);
     assert_eq!(discovery.candidates[0].repository.forge(), Forge::GitLab);
@@ -95,16 +139,30 @@ fn registry_paginates_and_preserves_multi_package_repository_evidence() {
 
 #[test]
 fn search_truncation_and_false_positive_candidates_are_explicit() {
-    let server = Server::new(vec![(200, json!({
-        "total_count":1001, "incomplete_results":true, "items":[
-            {"path":"app/Cargo.toml", "repository":{"html_url":"https://github.com/org/app"}},
-            {"path":"../Cargo.toml", "repository":{"html_url":"https://github.com/org/unsafe"}}
-        ]
-    }), vec![])]);
-    let discovery = GitHubSearch { api: server.api(), max_pages: 1 }.discover("demo-lib").unwrap();
+    let server = Server::new(vec![(
+        200,
+        json!({
+            "total_count":1001, "incomplete_results":true, "items":[
+                {"path":"app/Cargo.toml", "repository":{"html_url":"https://github.com/org/app"}},
+                {"path":"../Cargo.toml", "repository":{"html_url":"https://github.com/org/unsafe"}}
+            ]
+        }),
+        vec![],
+    )]);
+    let discovery = GitHubSearch {
+        api: server.api(),
+        max_pages: 1,
+    }
+    .discover("demo-lib")
+    .unwrap();
     assert_eq!(discovery.candidates.len(), 1);
     assert!(discovery.notes.iter().any(|v| v.contains("capped")));
-    assert!(discovery.notes.iter().any(|v| v.contains("incomplete results")));
+    assert!(
+        discovery
+            .notes
+            .iter()
+            .any(|v| v.contains("incomplete results"))
+    );
     assert!(discovery.notes.iter().any(|v| v.contains("unsafe")));
     server.finish();
 }
@@ -112,8 +170,16 @@ fn search_truncation_and_false_positive_candidates_are_explicit() {
 #[test]
 fn rate_limit_is_actionable_and_requests_do_not_retry_indefinitely() {
     let server = Server::new(vec![(429, json!({}), vec![("Retry-After", "42")])]);
-    let error = server.api().get::<serde_json::Value>("search/code", &[]).unwrap_err();
-    assert!(matches!(error, ApiError::RateLimited { retry_after_seconds: Some(42) }));
+    let error = server
+        .api()
+        .get::<serde_json::Value>("search/code", &[])
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ApiError::RateLimited {
+            retry_after_seconds: Some(42)
+        }
+    ));
     assert_eq!(server.finish().len(), 1);
 }
 
@@ -128,7 +194,13 @@ fn event(body: &str) -> CommentEvent {
 #[test]
 fn bot_rechecks_current_permission_before_reacting() {
     let server = Server::new(vec![(200, json!({"permission":"read"}), vec![])]);
-    let error = bot::plan(&server.api(), &event("@cargo-impact check"), "org/lib", "cargo-impact").unwrap_err();
+    let error = bot::plan(
+        &server.api(),
+        &event("@cargo-impact check"),
+        "org/lib",
+        "cargo-impact",
+    )
+    .unwrap_err();
     assert!(matches!(error, BotError::Unauthorized));
     let requests = server.finish();
     assert_eq!(requests.len(), 1);
@@ -141,11 +213,22 @@ fn authorized_bot_pins_both_shas_and_acknowledges() {
     let candidate = "b".repeat(40);
     let server = Server::new(vec![
         (200, json!({"permission":"maintain"}), vec![]),
-        (200, json!({"state":"open","base":{"sha":baseline,"repo":{"full_name":"org/lib"}},"head":{"sha":candidate,"repo":{"full_name":"contributor/lib"}}}), vec![]),
+        (
+            200,
+            json!({"state":"open","base":{"sha":baseline,"repo":{"full_name":"org/lib"}},"head":{"sha":candidate,"repo":{"full_name":"contributor/lib"}}}),
+            vec![],
+        ),
         (201, json!({"id":1}), vec![]),
     ]);
     let api = server.api();
-    let plan = bot::plan(&api, &event("@cargo-impact check"), "org/lib", "cargo-impact").unwrap().unwrap();
+    let plan = bot::plan(
+        &api,
+        &event("@cargo-impact check"),
+        "org/lib",
+        "cargo-impact",
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(plan.baseline_sha, baseline);
     assert_eq!(plan.candidate_sha, candidate);
     bot::acknowledge(&api, &plan).unwrap();
@@ -157,8 +240,16 @@ fn authorized_bot_pins_both_shas_and_acknowledges() {
 #[test]
 fn bot_ignores_quotes_arguments_and_edited_comments() {
     let api = Api::new(Url::parse("http://127.0.0.1:1/").unwrap(), None).unwrap();
-    for body in ["> @cargo-impact check", "@cargo-impact check --shell rm", "@cargo-impact check\nmore"] {
-        assert!(bot::plan(&api, &event(body), "org/lib", "cargo-impact").unwrap().is_none());
+    for body in [
+        "> @cargo-impact check",
+        "@cargo-impact check --shell rm",
+        "@cargo-impact check\nmore",
+    ] {
+        assert!(
+            bot::plan(&api, &event(body), "org/lib", "cargo-impact")
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -169,7 +260,11 @@ fn source_links_handle_forges_and_reject_unsafe_identities() {
         ("https://github.com/org/repo.git", None, "/blob/"),
         ("https://gitlab.com/group/subgroup/repo", None, "/-/blob/"),
         ("https://codeberg.org/org/repo", None, "/blob/"),
-        ("https://forge.example/org/repo", Some(Forge::Gitea), "/blob/"),
+        (
+            "https://forge.example/org/repo",
+            Some(Forge::Gitea),
+            "/blob/",
+        ),
     ] {
         let repo = Repository::parse(input, forge).unwrap();
         let link = repo.source_link(&sha, "src/a b.rs", 12).unwrap();
@@ -177,7 +272,11 @@ fn source_links_handle_forges_and_reject_unsafe_identities() {
         assert!(link.as_str().contains("a%20b.rs#L12"));
         assert!(repo.source_link(&sha, "../private", 12).is_none());
     }
-    for input in ["file:///etc/passwd", "https://token@github.com/org/repo", "https://github.com/org/repo?token=x"] {
+    for input in [
+        "file:///etc/passwd",
+        "https://token@github.com/org/repo",
+        "https://github.com/org/repo?token=x",
+    ] {
         assert!(Repository::parse(input, None).is_err());
     }
 }

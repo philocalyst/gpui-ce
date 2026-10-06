@@ -1,0 +1,53 @@
+name: Downstream impact
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: impact-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # Always install the scanner and read recipes from trusted base code.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Install the vendored scanner
+        run: cargo install --locked --path baseline/.github/cargo-impact --root "$RUNNER_TEMP/impact"
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/impact-work
+          key: impact-untrusted-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-${{ github.run_id }}
+          restore-keys: impact-untrusted-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-
+      - name: Check downstream consumers
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          "$RUNNER_TEMP/impact/bin/cargo-impact" check
+          --baseline baseline --candidate candidate --config baseline/impact.toml
+          --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: downstream-impact
+          path: impact-report/
+      - name: Add report to job summary
+        if: always()
+        run: if test -f impact-report/report.md; then cat impact-report/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ${{ runner.temp }}/impact-work
+          key: impact-untrusted-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-${{ github.run_id }}

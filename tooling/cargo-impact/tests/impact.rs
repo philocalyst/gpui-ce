@@ -1,8 +1,6 @@
 use std::{fs, path::Path, time::Duration};
 
-use cargo_impact::{
-    Classification, DownstreamSource, DownstreamSpec, ImpactRequest, analyze,
-};
+use cargo_impact::{Classification, DownstreamSpec, ImpactRequest, analyze};
 use tempfile::TempDir;
 
 #[test]
@@ -10,12 +8,27 @@ fn classifies_real_downstream_builds_against_both_library_versions() {
     let fixture = TempDir::new().unwrap();
     let baseline = fixture.path().join("upstream-baseline");
     let candidate = fixture.path().join("upstream-candidate");
-    library(&baseline, "pub fn removed() -> u8 { 1 }\npub fn kept() -> u8 { 2 }\n");
+    library(
+        &baseline,
+        "pub fn removed() -> u8 { 1 }\npub fn kept() -> u8 { 2 }\n",
+    );
     library(&candidate, "pub fn kept() -> u8 { 2 }\n");
 
-    let regress = downstream(fixture.path(), "regress", "pub fn use_api() { changed_lib::removed(); }\n");
-    let compatible = downstream(fixture.path(), "compatible", "pub fn use_api() { let _ = 1; }\n");
-    let preexisting = downstream(fixture.path(), "preexisting", "pub fn use_api() { missing_name(); }\n");
+    let regress = downstream(
+        fixture.path(),
+        "regress",
+        "pub fn use_api() { changed_lib::removed(); }\n",
+    );
+    let compatible = downstream(
+        fixture.path(),
+        "compatible",
+        "pub fn use_api() { let _ = 1; }\n",
+    );
+    let preexisting = downstream(
+        fixture.path(),
+        "preexisting",
+        "pub fn use_api() { missing_name(); }\n",
+    );
     let broken_metadata = fixture.path().join("invalid-metadata");
     fs::create_dir_all(&broken_metadata).unwrap();
     fs::write(broken_metadata.join("Cargo.toml"), "this is not a manifest").unwrap();
@@ -30,19 +43,51 @@ fn classifies_real_downstream_builds_against_both_library_versions() {
             local("pre-existing", preexisting),
             local("invalid-metadata", broken_metadata),
         ],
+        recipe: cargo_impact::runner::BuildRecipe {
+            runner: cargo_impact::runner::Runner::Local,
+            ..Default::default()
+        },
+        force: false,
         work_dir: Some(fixture.path().join("work")),
         timeout: Duration::from_secs(240),
     })
     .expect("semver gate and fixture runs should complete");
-    assert!(report.gate.ran, "removed public API should open the gate: {:?}", report.gate);
-    assert_eq!(report.downstreams[0].classification, Classification::Regression);
-    assert!(report.downstreams[0].candidate.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("cannot find function `removed`")
-            && diagnostic.spans.iter().any(|span| span.is_primary && !span.text.is_empty())
-    }));
-    assert_eq!(report.downstreams[1].classification, Classification::Compatible);
-    assert_eq!(report.downstreams[2].classification, Classification::PreExistingFailure);
-    assert_eq!(report.downstreams[3].classification, Classification::HarnessFailure);
+    assert!(
+        report.gate.ran,
+        "removed public API should open the gate: {:?}",
+        report.gate
+    );
+    assert_eq!(
+        report.downstreams[0].classification,
+        Classification::Regression
+    );
+    assert!(
+        report.downstreams[0]
+            .candidate
+            .diagnostics
+            .iter()
+            .any(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("cannot find function `removed`")
+                    && diagnostic
+                        .spans
+                        .iter()
+                        .any(|span| span.is_primary && !span.text.is_empty())
+            })
+    );
+    assert_eq!(
+        report.downstreams[1].classification,
+        Classification::Compatible
+    );
+    assert_eq!(
+        report.downstreams[2].classification,
+        Classification::PreExistingFailure
+    );
+    assert_eq!(
+        report.downstreams[3].classification,
+        Classification::HarnessFailure
+    );
 }
 
 #[test]
@@ -59,19 +104,24 @@ fn semantic_break_without_downstream_impact_does_not_invent_a_regression() {
         baseline,
         candidate,
         downstreams: vec![local("consumer", consumer)],
+        recipe: cargo_impact::runner::BuildRecipe {
+            runner: cargo_impact::runner::Runner::Local,
+            ..Default::default()
+        },
+        force: false,
         work_dir: None,
         timeout: Duration::from_secs(240),
     })
     .unwrap();
     assert!(report.gate.ran);
-    assert_eq!(report.downstreams[0].classification, Classification::Compatible);
+    assert_eq!(
+        report.downstreams[0].classification,
+        Classification::Compatible
+    );
 }
 
 fn local(name: &str, path: impl Into<std::path::PathBuf>) -> DownstreamSpec {
-    DownstreamSpec {
-        name: name.into(),
-        source: DownstreamSource::Local(path.into()),
-    }
+    DownstreamSpec::local(name, path)
 }
 
 fn library(root: &Path, source: &str) {

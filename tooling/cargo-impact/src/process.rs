@@ -1,95 +1,282 @@
+//! Drain both pipes continuously, retain bounded logs, and parse diagnostics after log limits.
+
 use std::{
-    io::{Read, Write},
-    path::Path,
+    collections::{BTreeSet, VecDeque},
+    io::{self, Read},
     process::{Command, Stdio},
     thread,
     time::Duration,
 };
 
+use serde::Deserialize;
 use wait_timeout::ChildExt;
 
-pub(crate) const OUTPUT_LIMIT: usize = 256 * 1024;
+use crate::model::CompilerDiagnostic;
 
+const LOG_LIMIT: usize = 256 * 1024;
+const VALUE_LIMIT: usize = 16 * 1024 * 1024;
+const DIAGNOSTIC_LIMIT: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub(crate) enum Capture {
+    Bytes,
+    Cargo,
+}
+
+#[derive(Default)]
 pub(crate) struct ProcessOutput {
     pub success: bool,
     pub code: Option<i32>,
     pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
+    pub log: String,
     pub timed_out: bool,
+    pub log_truncated: bool,
+    pub data_truncated: bool,
+    pub diagnostics: Vec<CompilerDiagnostic>,
+    pub artifacts: BTreeSet<String>,
 }
 
 pub(crate) fn run(
-    program: &str,
-    args: &[&std::ffi::OsStr],
-    cwd: &Path,
-    target_dir: &Path,
+    command: &mut Command,
     timeout: Duration,
-) -> std::io::Result<ProcessOutput> {
-    let mut child = Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .env("CARGO_TARGET_DIR", target_dir)
-        .env("CARGO_TERM_COLOR", "never")
+    capture: Capture,
+) -> io::Result<ProcessOutput> {
+    command
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
-    let out_reader = thread::spawn(move || read_capped(stdout));
-    let err_reader = thread::spawn(move || read_capped(stderr));
-
-    let timed_out = match child.wait_timeout(timeout)? {
-        Some(_) => false,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            true
-        }
-    };
-    let status = child.try_wait()?.or_else(|| child.wait().ok());
-    let (stdout, stdout_truncated) = out_reader.join().unwrap_or_default();
-    let (stderr, stderr_truncated) = err_reader.join().unwrap_or_default();
-    let mut stdout = stdout;
-    let mut stderr = stderr;
-    if stdout_truncated {
-        stdout.extend_from_slice(b"\n[cargo-impact: stdout truncated at 256 KiB]\n");
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
-    if stderr_truncated {
-        stderr.extend_from_slice(b"\n[cargo-impact: stderr truncated at 256 KiB]\n");
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("missing stdout pipe"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("missing stderr pipe"))?;
+    let out_reader = thread::spawn(move || drain(stdout, capture));
+    let err_reader = thread::spawn(move || drain(stderr, Capture::Cargo));
+    let wait = child.wait_timeout(timeout);
+    let timed_out = matches!(wait, Ok(None));
+    // Background grandchildren must not hold log pipes open, even on normal parent exit.
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
-    let code = status.and_then(|status| status.code());
+    if timed_out || wait.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait();
+    let stdout = out_reader
+        .join()
+        .map_err(|_| io::Error::other("stdout reader panicked"))??;
+    let stderr = err_reader
+        .join()
+        .map_err(|_| io::Error::other("stderr reader panicked"))??;
+    wait?;
+    let status = status?;
     Ok(ProcessOutput {
-        success: !timed_out && code == Some(0),
-        code,
-        stdout,
-        stderr,
+        success: status.success() && !timed_out,
+        code: status.code(),
+        stdout: stdout.value,
+        log: format!("{}\n{}", stdout.log.text(), stderr.log.text()),
         timed_out,
+        log_truncated: stdout.log.truncated || stderr.log.truncated,
+        data_truncated: stdout.truncated || stderr.truncated,
+        diagnostics: stdout
+            .diagnostics
+            .into_iter()
+            .chain(stderr.diagnostics)
+            .collect(),
+        artifacts: stdout
+            .artifacts
+            .into_iter()
+            .chain(stderr.artifacts)
+            .collect(),
     })
 }
 
-fn read_capped(mut reader: impl Read) -> (Vec<u8>, bool) {
-    let mut kept = Vec::with_capacity(OUTPUT_LIMIT);
-    let mut truncated = false;
+#[derive(Default)]
+struct Stream {
+    value: Vec<u8>,
+    log: Tail,
+    truncated: bool,
+    diagnostics: Vec<CompilerDiagnostic>,
+    artifacts: BTreeSet<String>,
+    diagnostic_bytes: usize,
+}
+
+#[derive(Default)]
+struct Tail {
+    bytes: VecDeque<u8>,
+    truncated: bool,
+}
+impl Tail {
+    fn append(&mut self, bytes: &[u8]) {
+        self.bytes.extend(bytes);
+        let excess = self.bytes.len().saturating_sub(LOG_LIMIT);
+        self.truncated |= excess > 0;
+        self.bytes.drain(..excess);
+    }
+    fn text(&self) -> String {
+        let bytes: Vec<_> = self.bytes.iter().copied().collect();
+        let prefix = if self.truncated {
+            "[earlier output truncated]\n"
+        } else {
+            ""
+        };
+        format!("{prefix}{}", String::from_utf8_lossy(&bytes))
+    }
+}
+
+fn drain(mut reader: impl Read, capture: Capture) -> io::Result<Stream> {
+    let mut stream = Stream::default();
     let mut buffer = [0; 8192];
+    let mut line = Vec::new();
+    let mut discard_line = false;
     loop {
-        match reader.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
-            Ok(read) => {
-                let remaining = OUTPUT_LIMIT.saturating_sub(kept.len());
-                kept.extend_from_slice(&buffer[..read.min(remaining)]);
-                truncated |= read > remaining;
+        let size = reader.read(&mut buffer)?;
+        if size == 0 {
+            break;
+        }
+        match capture {
+            Capture::Bytes => {
+                stream.log.append(&buffer[..size]);
+                let remaining = VALUE_LIMIT.saturating_sub(stream.value.len());
+                stream
+                    .value
+                    .extend_from_slice(&buffer[..size.min(remaining)]);
+                stream.truncated |= size > remaining;
+            }
+            Capture::Cargo => {
+                for byte in &buffer[..size] {
+                    if *byte == b'\n' {
+                        if !discard_line {
+                            stream.record(&line);
+                        }
+                        line.clear();
+                        discard_line = false;
+                    } else if !discard_line {
+                        if line.len() == VALUE_LIMIT {
+                            stream.truncated = true;
+                            discard_line = true;
+                            line.clear();
+                        } else {
+                            line.push(*byte);
+                        }
+                    }
+                }
             }
         }
     }
-    (kept, truncated)
+    if matches!(capture, Capture::Cargo) && !line.is_empty() {
+        stream.record(&line);
+    }
+    Ok(stream)
 }
 
-pub(crate) fn write_log(stdout: &[u8], stderr: &[u8]) -> String {
-    let mut bytes = Vec::with_capacity(stdout.len() + stderr.len());
-    let _ = bytes.write_all(stdout);
-    if !stderr.is_empty() {
-        let _ = bytes.write_all(b"\n--- stderr ---\n");
-        let _ = bytes.write_all(stderr);
+impl Stream {
+    fn record(&mut self, line: &[u8]) {
+        match serde_json::from_slice::<CargoMessage>(line) {
+            Ok(CargoMessage::CompilerMessage {
+                package_id,
+                message,
+            }) => {
+                if self.diagnostic_bytes + line.len() > DIAGNOSTIC_LIMIT
+                    || self.diagnostics.len() >= 512
+                {
+                    self.truncated = true;
+                    return;
+                }
+                if matches!(
+                    message.level,
+                    cargo_metadata::diagnostic::DiagnosticLevel::Error
+                        | cargo_metadata::diagnostic::DiagnosticLevel::Ice
+                ) {
+                    if let Some(rendered) = &message.rendered {
+                        self.log.append(rendered.as_bytes());
+                    }
+                }
+                self.diagnostic_bytes += line.len();
+                self.diagnostics.push(CompilerDiagnostic {
+                    package_id,
+                    diagnostic: message,
+                });
+            }
+            Ok(CargoMessage::CompilerArtifact { package_id }) => {
+                if self.artifacts.len() < 100_000 {
+                    self.artifacts.insert(package_id);
+                } else {
+                    self.truncated = true;
+                }
+            }
+            Ok(CargoMessage::Other) => {}
+            Err(_) => {
+                let text = String::from_utf8_lossy(line);
+                if ![
+                    "Compiling ",
+                    "Checking ",
+                    "Finished ",
+                    "Downloading ",
+                    "Updating ",
+                ]
+                .iter()
+                .any(|v| text.trim_start().starts_with(v))
+                {
+                    self.log.append(line);
+                    self.log.append(b"\n");
+                }
+            }
+        }
     }
-    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "reason", rename_all = "kebab-case")]
+enum CargoMessage {
+    CompilerMessage {
+        package_id: String,
+        message: cargo_metadata::diagnostic::Diagnostic,
+    },
+    CompilerArtifact {
+        package_id: String,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn final_diagnostic_survives_progress_output_limit() {
+        let mut bytes = vec![b'x'; LOG_LIMIT * 3];
+        bytes.push(b'\n');
+        bytes.extend_from_slice(br#"{"reason":"compiler-message","package_id":"consumer","message":{"message":"removed API","code":{"code":"E0425","explanation":null},"level":"error","spans":[],"children":[],"rendered":"error[E0425]"}}"#);
+        let result = drain(&bytes[..], Capture::Cargo).unwrap();
+        assert!(result.log.truncated);
+        assert!(!result.truncated);
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].message, "removed API");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_grandchildren_holding_pipes() {
+        let started = std::time::Instant::now();
+        let output = run(
+            Command::new("sh").args(["-c", "sleep 20 & wait"]),
+            Duration::from_millis(100),
+            Capture::Cargo,
+        )
+        .unwrap();
+        assert!(output.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
 }
