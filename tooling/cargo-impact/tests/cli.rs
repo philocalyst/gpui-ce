@@ -178,6 +178,71 @@ fn fatal_scan_error_writes_both_reports_before_exiting_two() {
     assert!(markdown.contains("Adjust the library build recipe"));
 }
 
+#[test]
+fn malformed_config_writes_failure_reports_with_config_path_and_library() {
+    let directory = TempDir::new().unwrap();
+    let config = directory.path().join("broken-impact.toml");
+    fs::write(&config, "this is not valid TOML = [\n").unwrap();
+    let report_dir = directory.path().join("report");
+
+    let output = cli()
+        .args(["check", "--library", "probe-lib", "--config"])
+        .arg(&config)
+        .args(["--baseline"])
+        .arg(directory.path().join("missing-baseline"))
+        .args(["--candidate"])
+        .arg(directory.path().join("missing-candidate"))
+        .args(["--report-dir"])
+        .arg(&report_dir)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let report: Value =
+        serde_json::from_slice(&fs::read(report_dir.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["library"], "probe-lib");
+    let error = report["error"].as_str().unwrap();
+    assert!(error.contains(config.to_str().unwrap()), "{error}");
+    assert!(error.contains("configuration file"), "{error}");
+    let markdown = fs::read_to_string(report_dir.join("report.md")).unwrap();
+    assert!(markdown.contains("experiment did not complete"));
+    assert!(markdown.contains("broken-impact.toml"));
+}
+
+#[test]
+fn local_recipe_without_allow_local_writes_failure_reports_without_building() {
+    let directory = TempDir::new().unwrap();
+    let config = directory.path().join("impact.toml");
+    fs::write(
+        &config,
+        "library = 'probe-lib'\n\n[recipe.runner]\nkind = 'local'\n",
+    )
+    .unwrap();
+    let report_dir = directory.path().join("report");
+
+    let output = cli()
+        .args(["check", "--config"])
+        .arg(&config)
+        .args(["--baseline"])
+        .arg(directory.path().join("missing-baseline"))
+        .args(["--candidate"])
+        .arg(directory.path().join("missing-candidate"))
+        .args(["--report-dir"])
+        .arg(&report_dir)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let report: Value =
+        serde_json::from_slice(&fs::read(report_dir.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["library"], "probe-lib");
+    let error = report["error"].as_str().unwrap();
+    assert!(error.contains("--allow-local"), "{error}");
+    let markdown = fs::read_to_string(report_dir.join("report.md")).unwrap();
+    assert!(markdown.contains("--allow-local"));
+    assert!(markdown.contains("Adjust the library build recipe"));
+}
+
 fn package(root: &Path) {
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(

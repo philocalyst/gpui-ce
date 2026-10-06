@@ -28,7 +28,7 @@ runs:
         rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
         cargo "+$RUST_TOOLCHAIN" install --locked --path "$SCANNER_SOURCE" --root "$RUNNER_TEMP/impact"
     - uses: actions/cache/save@v4
-      if: steps.scanner-cache.outputs.cache-hit != 'true'
+      if: steps.scanner-cache.outputs.cache-hit != 'true' && github.event_name != 'issue_comment'
       with:
         path: ${{ runner.temp }}/impact/bin
         key: cargo-impact-v1-${{ inputs.toolchain }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source), format('{0}/src/**', inputs.source), format('{0}/examples/**', inputs.source), format('{0}/clippy.toml', inputs.source), format('{0}/LICENSE.md', inputs.source), format('{0}/action.yml', inputs.source)) }}
