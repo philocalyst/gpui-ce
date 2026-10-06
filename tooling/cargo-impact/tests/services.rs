@@ -186,6 +186,54 @@ fn rate_limit_is_actionable_and_requests_do_not_retry_indefinitely() {
 }
 
 #[test]
+fn credentialed_api_does_not_follow_redirects_or_accept_foreign_origins() {
+    let server = Server::new(vec![(
+        302,
+        json!({}),
+        vec![("Location", "https://other.example/secret")],
+    )]);
+    let api = server.api();
+    assert!(
+        matches!(api.get::<serde_json::Value>("redirect", &[]), Err(ApiError::Status(status)) if status.as_u16() == 302)
+    );
+    assert!(
+        matches!(api.get::<serde_json::Value>("https://other.example/secret", &[]), Err(ApiError::Status(status)) if status.as_u16() == 400)
+    );
+    assert_eq!(server.finish().len(), 1);
+}
+
+#[test]
+fn very_large_bot_report_keeps_a_complete_summary_and_artifact_link() {
+    let sha = "b".repeat(40);
+    let server = Server::new(vec![
+        (
+            200,
+            json!({"state":"open","base":{"sha":"a".repeat(40),"repo":{"full_name":"org/lib"}},"head":{"sha":sha,"repo":{"full_name":"org/lib"}}}),
+            vec![],
+        ),
+        (201, json!({"id":1}), vec![]),
+    ]);
+    let report = cargo_impact::ImpactReport::failed("demo", &"```x".repeat(20_000));
+    bot::publish(
+        &server.api(),
+        "org/lib",
+        7,
+        &sha,
+        &report,
+        &Url::parse("https://github.com/org/lib/actions/runs/1").unwrap(),
+    )
+    .unwrap();
+    let requests = server.finish();
+    let (_, body) = requests[1].split_once("\r\n\r\n").unwrap();
+    let body: serde_json::Value = serde_json::from_str(body).unwrap();
+    let text = body["body"].as_str().unwrap();
+    assert!(text.len() < 2000);
+    assert!(text.contains("exceeds the comment limit"));
+    assert!(text.contains("[Full report and build artifacts]"));
+    assert!(!text.contains("```"));
+}
+
+#[test]
 fn later_discovery_failure_retains_earlier_candidates() {
     let first = json!({"dependencies":[{}], "versions":[{"crate":"app", "num":"1.0.0", "repository":"https://codeberg.org/org/app"}], "meta":{"total":2}});
     let server = Server::new(vec![

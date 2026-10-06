@@ -185,12 +185,11 @@ pub fn publish(
     if pr.state != "open" || pr.head.sha != candidate_sha {
         return Ok(false);
     }
-    let markdown = report.markdown();
-    // GitHub limits comment bodies. Preserve the full report in the linked CI artifact.
-    let markdown: String = markdown.chars().take(30_000).collect();
     let body = format!(
-        "{}\n\nTested PR head: `{}`. [Full report and build artifacts]({}).",
-        markdown, candidate_sha, run_url
+        "{}\n\nTested PR head: `{}`. [Full report and build artifacts](<{}>).",
+        report.comment_markdown(),
+        candidate_sha,
+        run_url
     );
     let _: serde_json::Value = api.post(
         &format!("repos/{repository}/issues/{number}/comments"),

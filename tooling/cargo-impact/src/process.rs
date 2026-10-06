@@ -308,6 +308,20 @@ mod tests {
         assert_eq!(result.diagnostics[0].message, "removed API");
     }
 
+    #[test]
+    fn cancelled_reader_bounds_drain_even_if_a_detached_writer_keeps_its_pipe() {
+        struct OpenPipe;
+        impl Read for OpenPipe {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+        }
+        let started = Instant::now();
+        let stream = drain(OpenPipe, Capture::Cargo, &AtomicBool::new(true)).unwrap();
+        assert!(stream.truncated);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
     #[cfg(unix)]
     #[test]
     fn timeout_kills_grandchildren_holding_pipes() {

@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
     time::Duration,
 };
 
@@ -143,6 +144,92 @@ fn transitive_local_dependency_is_rewritten_inside_the_workspace_snapshot() {
             .any(|d| d.package_id.contains("middle")
                 && d.code.as_ref().is_some_and(|c| c.code == "E0425"))
     );
+}
+
+#[test]
+fn transitive_git_dependency_is_patched_after_graph_resolution() {
+    let mut fixture = Fixture::new();
+    let original_library = fixture.dir.path().join("git-library");
+    package(
+        &original_library,
+        "changed-lib",
+        "1.0.0",
+        "pub fn removed() {}",
+        "",
+    );
+    let library_sha = commit_fixture(&original_library);
+    let middle = fixture.dir.path().join("git-middle");
+    let library_url = url::Url::from_directory_path(&original_library).unwrap();
+    package(
+        &middle,
+        "middle",
+        "1.0.0",
+        "pub fn api() { changed_lib::removed(); }",
+        &format!("[dependencies]\nchanged-lib={{git='{library_url}',rev='{library_sha}'}}"),
+    );
+    let middle_sha = commit_fixture(&middle);
+    let middle_url = url::Url::from_directory_path(&middle).unwrap();
+    fixture.consumer(
+        "git-transitive",
+        "pub fn api() { middle::api(); }",
+        &format!("[dependencies]\nmiddle={{git='{middle_url}',rev='{middle_sha}'}}"),
+    );
+
+    let report = analyze(&fixture.request).unwrap();
+    let result = &report.downstreams[0];
+    assert_eq!(
+        result.classification,
+        Classification::Regression,
+        "{result:?}"
+    );
+    assert!(
+        result
+            .baseline
+            .selected_library
+            .as_ref()
+            .unwrap()
+            .contains("upstream/baseline")
+    );
+    assert!(
+        result
+            .candidate
+            .diagnostics
+            .iter()
+            .any(|d| d.package_id.contains("middle")
+                && d.code.as_ref().is_some_and(|c| c.code == "E0425"))
+    );
+}
+
+fn commit_fixture(root: &Path) -> String {
+    let run = |args: &[&str]| {
+        let output = Command::new("git")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+            ])
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    run(&["init", "--quiet"]);
+    run(&["add", "."]);
+    run(&["commit", "--quiet", "-m", "fixture"]);
+    run(&["rev-parse", "HEAD"])
 }
 
 #[test]

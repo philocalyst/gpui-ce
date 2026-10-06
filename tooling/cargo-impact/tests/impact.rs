@@ -33,7 +33,7 @@ fn classifies_real_downstream_builds_against_both_library_versions() {
     fs::create_dir_all(&broken_metadata).unwrap();
     fs::write(broken_metadata.join("Cargo.toml"), "this is not a manifest").unwrap();
 
-    let report = analyze(&ImpactRequest {
+    let mut report = analyze(&ImpactRequest {
         library: "changed-lib".into(),
         baseline,
         candidate,
@@ -88,6 +88,33 @@ fn classifies_real_downstream_builds_against_both_library_versions() {
         report.downstreams[3].classification,
         Classification::HarnessFailure
     );
+
+    // The same evidence can generate immutable forge links and survive report persistence.
+    let sha = "a".repeat(40);
+    report.downstreams[0].source = cargo_impact::DownstreamSource::Git {
+        url: "https://gitlab.com/team/app".into(),
+        revision: "main".into(),
+        forge: Some(cargo_impact::forge::Forge::GitLab),
+    };
+    report.downstreams[0].revision = Some(sha.clone());
+    assert!(
+        report
+            .markdown()
+            .contains(&format!("/-/blob/{sha}/src/lib.rs#L1"))
+    );
+    let persisted = serde_json::to_vec(&report).unwrap();
+    let restored: cargo_impact::ImpactReport = serde_json::from_slice(&persisted).unwrap();
+    let error = restored.downstreams[0]
+        .candidate
+        .diagnostics
+        .iter()
+        .find(|d| d.code.as_ref().is_some_and(|c| c.code == "E0425"))
+        .unwrap();
+    let span = error.spans.iter().find(|s| s.is_primary).unwrap();
+    assert!(span.byte_end > span.byte_start);
+    assert!(!span.text.is_empty());
+    assert!(error.rendered.as_ref().unwrap().contains("removed"));
+    assert_eq!(restored.markdown(), report.markdown());
 }
 
 #[test]

@@ -50,7 +50,7 @@ pub enum Runner {
 impl Default for Runner {
     fn default() -> Self {
         Self::Docker {
-            image: "rust:1.98.1".into(),
+            image: "rust:1.99.0-bookworm".into(),
         }
     }
 }

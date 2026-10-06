@@ -40,6 +40,29 @@ impl ImpactReport {
                 .iter()
                 .any(|r| r.classification == Classification::HarnessFailure)
     }
+    /// Large reports fall back to counts instead of cutting a diagnostic fence in half.
+    pub(crate) fn comment_markdown(&self) -> String {
+        let markdown = self.markdown();
+        if markdown.chars().count() <= 30_000 {
+            return markdown;
+        }
+        let count = |classification| {
+            self.downstreams
+                .iter()
+                .filter(|r| r.classification == classification)
+                .count()
+        };
+        format!(
+            "# Downstream impact: {}\n\n{}\n\n{} regressions, {} compatible, {} baseline failures, {} harness failures, {} not exercised.\n\nThe detailed report exceeds the comment limit; inspect the full artifact for diagnostics and coverage notes.",
+            escape(&self.library.chars().take(100).collect::<String>()),
+            escape(&self.gate.reason.chars().take(1000).collect::<String>()),
+            count(Classification::Regression),
+            count(Classification::Compatible),
+            count(Classification::PreExistingFailure),
+            count(Classification::HarnessFailure),
+            count(Classification::NotExercised),
+        )
+    }
     pub fn markdown(&self) -> String {
         let mut output = format!(
             "# Downstream impact: {}\n\n{}\n\n",
@@ -144,7 +167,7 @@ fn render_diagnostics(output: &mut String, result: &DownstreamResult, build: &Bu
                 _ => None,
             };
             if let Some(link) = link {
-                let _ = writeln!(output, "[{label}]({link})\n");
+                let _ = writeln!(output, "[{label}](<{link}>)\n");
             } else {
                 let _ = writeln!(output, "{label}\n");
             }
