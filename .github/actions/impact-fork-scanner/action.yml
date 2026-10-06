@@ -1,0 +1,27 @@
+name: Install fork experiment scanner
+description: Compile trusted scanner code once and reuse its exact binary.
+inputs:
+  source:
+    description: Path to trusted cargo-impact source
+    required: true
+  toolchain:
+    description: Rust toolchain used to build the scanner
+    default: 1.99.0
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v4
+      id: binary
+      with:
+        path: ${{ runner.temp }}/impact/bin
+        key: impact-fork-scanner-v2-${{ inputs.toolchain }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source), format('{0}/src/**', inputs.source), format('{0}/examples/**', inputs.source), format('{0}/clippy.toml', inputs.source), format('{0}/LICENSE.md', inputs.source), format('{0}/build.rs', inputs.source)) }}
+    - name: Build trusted scanner
+      if: steps.binary.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        SCANNER_SOURCE: ${{ inputs.source }}
+        SCANNER_TOOLCHAIN: ${{ inputs.toolchain }}
+        CARGO_BUILD_JOBS: "2"
+      run: |
+        rustup toolchain install "$SCANNER_TOOLCHAIN" --profile minimal
+        cargo "+$SCANNER_TOOLCHAIN" install --locked --path "$SCANNER_SOURCE" --root "$RUNNER_TEMP/impact"

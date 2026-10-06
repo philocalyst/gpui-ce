@@ -8,7 +8,8 @@ on:
   push:
     branches: [main, "v[0-9]+.[0-9]+.x"]
   pull_request:
-    branches: ["**"]
+    # The bounded fork experiment has its own CI; keep platform/release CI out of it.
+    branches-ignore: [codex/impact-fork-base]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}

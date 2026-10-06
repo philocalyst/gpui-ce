@@ -1,0 +1,126 @@
+name: Fork impact comment experiment
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: read
+concurrency:
+  group: impact-fork-comment-${{ github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  authorize:
+    if: github.repository == 'philocalyst/gpui-ce' && github.actor == github.repository_owner && github.event.issue.pull_request && github.event.comment.body == '/cargo-impact check'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    outputs:
+      requested: ${{ steps.plan.outputs.requested }}
+      baseline: ${{ steps.plan.outputs.baseline }}
+      candidate: ${{ steps.plan.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: philocalyst/gpui-ce
+          persist-credentials: false
+      - uses: ./.github/actions/impact-fork-scanner
+        with:
+          source: tooling/cargo-impact
+      - id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          allowed="$(gh api "repos/philocalyst/gpui-ce/pulls/$PR_NUMBER" --jq '.state == "open" and .base.ref == "codex/impact-fork-base" and .head.repo.full_name == "philocalyst/gpui-ce"')"
+          if [ "$allowed" != true ]; then
+            echo 'Ignored a PR outside the fork experiment branch.'
+            exit 0
+          fi
+          "$RUNNER_TEMP/impact/bin/cargo-impact" bot --acknowledge > plan.json
+          if jq -e '. != null and .candidate_repository == "philocalyst/gpui-ce"' plan.json >/dev/null; then
+            echo 'requested=true' >> "$GITHUB_OUTPUT"
+            jq -r '"baseline=" + .baseline_sha, "candidate=" + .candidate_sha' plan.json >> "$GITHUB_OUTPUT"
+          fi
+  build:
+    needs: authorize
+    if: needs.authorize.outputs.requested == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: philocalyst/gpui-ce
+          ref: ${{ needs.authorize.outputs.baseline }}
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: philocalyst/gpui-ce
+          ref: ${{ needs.authorize.outputs.candidate }}
+          path: candidate
+          persist-credentials: false
+      - uses: ./baseline/.github/actions/impact-fork-scanner
+        with:
+          source: baseline/tooling/cargo-impact
+      - name: Prepare consumers from this fork only
+        run: >-
+          python3 baseline/tooling/cargo-impact/experiments/fork/prepare.py
+          --baseline baseline --candidate candidate --output "$RUNNER_TEMP/impact-inputs"
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/impact-work
+          key: impact-fork-work-${{ runner.os }}-${{ github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: impact-fork-work-${{ runner.os }}-${{ github.event.issue.number }}-
+      - name: Run isolated downstream checks
+        run: >-
+          "$RUNNER_TEMP/impact/bin/cargo-impact" check
+          --baseline "$RUNNER_TEMP/impact-inputs/baseline" --candidate "$RUNNER_TEMP/impact-inputs/candidate"
+          --config "$RUNNER_TEMP/impact-inputs/impact.toml" --no-discovery
+          --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: downstream-impact
+          path: impact-report/
+          if-no-files-found: error
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ${{ runner.temp }}/impact-work
+          key: impact-fork-work-${{ runner.os }}-${{ github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+  report:
+    needs: [authorize, build]
+    if: always() && needs.authorize.outputs.requested == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: philocalyst/gpui-ce
+          persist-credentials: false
+      - uses: ./.github/actions/impact-fork-scanner
+        with:
+          source: tooling/cargo-impact
+      - uses: actions/download-artifact@v4
+        with:
+          name: downstream-impact
+          path: impact-report
+      - name: Publish only against the tested head
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TESTED_HEAD: ${{ needs.authorize.outputs.candidate }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: >-
+          "$RUNNER_TEMP/impact/bin/cargo-impact" publish
+          --repository philocalyst/gpui-ce --pull-request "$PR_NUMBER" --candidate-sha "$TESTED_HEAD"
+          --report impact-report/report.json
+          --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

@@ -50,3 +50,7 @@ xcuserdata/
 .build
 
 /build
+
+# Downstream impact experiments and retained build results
+/.cargo-impact/
+/impact-report/

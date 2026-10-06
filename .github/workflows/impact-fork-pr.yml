@@ -1,0 +1,75 @@
+name: Fork impact experiment
+on:
+  pull_request:
+    branches: [codex/impact-fork-base]
+  workflow_dispatch:
+    inputs:
+      missing_target:
+        description: Exercise the recoverable missing-std harness failure
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: impact-fork-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    if: github.repository == 'philocalyst/gpui-ce' && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: philocalyst/gpui-ce
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: philocalyst/gpui-ce
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: ./baseline/.github/actions/impact-fork-scanner
+        with:
+          source: baseline/tooling/cargo-impact
+      - name: Prepare consumers from this fork only
+        env:
+          MISSING_TARGET: ${{ inputs.missing_target || false }}
+        run: |
+          options=()
+          if [ "$MISSING_TARGET" = true ]; then options+=(--missing-target); fi
+          python3 baseline/tooling/cargo-impact/experiments/fork/prepare.py \
+            --baseline baseline --candidate candidate --output "$RUNNER_TEMP/impact-inputs" "${options[@]}"
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/impact-work
+          key: impact-fork-work-${{ runner.os }}-${{ github.event.pull_request.number || 'dispatch' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: impact-fork-work-${{ runner.os }}-${{ github.event.pull_request.number || 'dispatch' }}-
+      - name: Run embedded gate and isolated downstream checks
+        # Dispatch also builds identical revisions, to test Docker and recipe recovery.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          options=()
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then options+=(--force); fi
+          "$RUNNER_TEMP/impact/bin/cargo-impact" check \
+            --baseline "$RUNNER_TEMP/impact-inputs/baseline" \
+            --candidate "$RUNNER_TEMP/impact-inputs/candidate" \
+            --config "$RUNNER_TEMP/impact-inputs/impact.toml" --no-discovery \
+            --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report "${options[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: downstream-impact
+          path: impact-report/
+          if-no-files-found: error
+      - name: Report summary
+        if: always()
+        run: if test -f impact-report/report.md; then cat impact-report/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ${{ runner.temp }}/impact-work
+          key: impact-fork-work-${{ runner.os }}-${{ github.event.pull_request.number || 'dispatch' }}-${{ github.run_id }}-${{ github.run_attempt }}
