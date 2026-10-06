@@ -1,5 +1,6 @@
 mod client;
 mod clipboard;
+mod composition;
 mod display;
 mod event;
 mod window;
