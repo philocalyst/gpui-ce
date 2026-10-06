@@ -1117,6 +1117,22 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
     fn draw(&self, scene: &Scene);
+    /// Enables native composition for this window. The default implementation reports that this
+    /// platform window cannot compose native child surfaces.
+    fn enable_composition(&self) -> anyhow::Result<()> {
+        anyhow::bail!("window composition is not supported on this platform")
+    }
+    /// Creates a platform-owned slot that can host native or external GPU content.
+    fn create_composition_surface(&self) -> anyhow::Result<Rc<dyn PlatformSurfaceAttachment>> {
+        anyhow::bail!("composition surfaces are not supported on this platform")
+    }
+    /// Reconciles the requested surface tree and presents one composed frame.
+    ///
+    /// Implementations should retain their previous composition if reconciling the new frame
+    /// fails. A later frame retries the latest requested tree.
+    fn present_composition(&self, _frame: CompositionFrame<'_>) -> anyhow::Result<()> {
+        anyhow::bail!("window composition is not supported on this platform")
+    }
     fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;
