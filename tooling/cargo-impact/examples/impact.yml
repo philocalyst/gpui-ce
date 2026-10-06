@@ -24,8 +24,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
           persist-credentials: false
-      - name: Install the vendored scanner
-        run: cargo install --locked --path baseline/.github/cargo-impact --root "$RUNNER_TEMP/impact"
+      - uses: ./baseline/.github/cargo-impact
+        with:
+          source: baseline/.github/cargo-impact
       - uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/impact-work

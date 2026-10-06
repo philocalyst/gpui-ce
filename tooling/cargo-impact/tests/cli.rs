@@ -50,6 +50,17 @@ fn init_vendors_a_standalone_scanner_manifest() {
     );
     assert!(scanner.join("src/setup.rs").is_file());
     assert!(scanner.join("examples/impact.yml").is_file());
+    assert!(scanner.join("action.yml").is_file());
+    let impact_workflow =
+        fs::read_to_string(directory.path().join(".github/workflows/impact.yml")).unwrap();
+    assert!(impact_workflow.contains("uses: ./baseline/.github/cargo-impact"));
+    let comment_workflow = fs::read_to_string(
+        directory
+            .path()
+            .join(".github/workflows/impact-comment.yml"),
+    )
+    .unwrap();
+    assert!(comment_workflow.contains("uses: ./.github/cargo-impact"));
 }
 
 #[test]
