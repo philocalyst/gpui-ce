@@ -2228,6 +2228,33 @@ mod tests {
         }
     }
 
+    fn tagged_surface(tag: i32) -> PaintSurface {
+        PaintSurface {
+            source: SurfaceSource::Unsupported(Size {
+                width: DevicePixels(tag),
+                height: DevicePixels(1),
+            }),
+            ..surface()
+        }
+    }
+
+    fn path_with_triangles(triangle_count: usize) -> Path<ScaledPixels> {
+        let mut path = Path::new(point(crate::px(10.0), crate::px(10.0)));
+        let triangle = (
+            point(crate::px(10.0), crate::px(10.0)),
+            point(crate::px(20.0), crate::px(10.0)),
+            point(crate::px(10.0), crate::px(20.0)),
+        );
+        let st = (point(0.0, 0.0), point(1.0, 0.0), point(0.0, 1.0));
+        for _ in 0..triangle_count {
+            path.push_triangle(triangle, st);
+        }
+        let mut path = path.scale(1.0);
+        path.bounds = full_bounds();
+        path.content_mask = mask();
+        path
+    }
+
     fn batch_kinds(scene: &mut Scene) -> Vec<&'static str> {
         scene.finish();
         scene
@@ -2462,6 +2489,116 @@ mod tests {
         scene.finish();
         assert_ne!(scene.render_commands(), commands);
         assert_eq!(scene.render_plan().requirements().instance_batch_count, 1);
+    }
+
+    #[test]
+    fn lazy_indices_survive_replay_reopen_and_repeated_finish() {
+        let mut scene = Scene::default();
+        for smoothing in [0.1, 0.2, 0.3] {
+            let mut quad = quad();
+            quad.corner_smoothing = smoothing;
+            scene.insert_primitive(quad);
+        }
+        for (quad, order) in scene.quads.iter_mut().zip([3, 1, 2]) {
+            quad.order = order;
+        }
+        scene.finish();
+
+        assert_eq!(
+            scene
+                .paint_operations
+                .iter()
+                .map(|operation| match operation {
+                    PaintOperation::Quad(index) => *index,
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+
+        let mut appended = quad();
+        appended.corner_smoothing = 0.4;
+        scene.insert_primitive(appended);
+        // Public lane edits followed by finish remain supported after reopening.
+        scene.quads[0].order = 99;
+        scene.finish();
+        scene.finish();
+
+        let mut replay = Scene::default();
+        replay.replay(0..scene.paint_operations.len(), &scene);
+        replay.finish();
+        assert_eq!(
+            replay
+                .quads
+                .iter()
+                .map(|quad| quad.corner_smoothing)
+                .collect::<Vec<_>>(),
+            [0.1, 0.2, 0.3, 0.4]
+        );
+    }
+
+    #[test]
+    fn repeated_finish_composes_indices_and_preserves_direct_lane_additions() {
+        fn recorded_indices(scene: &Scene) -> Vec<usize> {
+            scene
+                .paint_operations
+                .iter()
+                .map(|operation| match operation {
+                    PaintOperation::Quad(index) => *index,
+                    _ => unreachable!(),
+                })
+                .collect()
+        }
+
+        let mut scene = Scene::default();
+        for smoothing in [0.1, 0.2, 0.3, 0.4] {
+            let mut quad = quad();
+            quad.corner_smoothing = smoothing;
+            scene.insert_primitive(quad);
+        }
+        for (quad, order) in scene.quads.iter_mut().zip([4, 1, 3, 2]) {
+            quad.order = order;
+        }
+        scene.finish();
+
+        assert_eq!(recorded_indices(&scene), [0, 1, 2, 3]);
+
+        for (quad, order) in scene.quads.iter_mut().zip([4, 3, 2, 1]) {
+            quad.order = order;
+        }
+        scene.finish();
+        let mut public_only_quad = quad();
+        public_only_quad.corner_smoothing = 0.5;
+        public_only_quad.order = 5;
+        scene.quads.push(public_only_quad);
+        scene.finish();
+        for (quad, order) in scene.quads.iter_mut().zip([5, 4, 3, 2, 1]) {
+            quad.order = order;
+        }
+        scene.finish();
+        assert_eq!(recorded_indices(&scene), [0, 1, 2, 3]);
+
+        for round in 0..20 {
+            let lane_len = scene.quads.len();
+            for (index, quad) in scene.quads.iter_mut().enumerate() {
+                quad.order = ((index * 2 + round) % lane_len) as DrawOrder;
+            }
+            scene.finish();
+            assert_eq!(recorded_indices(&scene), [0, 1, 2, 3]);
+            assert!(scene.sort_old_to_new.len() <= 4);
+        }
+
+        let mut replay = Scene::default();
+        replay.replay(0..scene.paint_operations.len(), &scene);
+        replay.finish();
+        assert_eq!(
+            replay
+                .quads
+                .iter()
+                .map(|quad| quad.corner_smoothing)
+                .collect::<Vec<_>>(),
+            [0.1, 0.2, 0.3, 0.4]
+        );
     }
 
     #[test]
