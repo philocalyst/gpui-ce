@@ -73,6 +73,7 @@ use std::io::Cursor;
 use std::ops;
 use std::time::Duration;
 use std::{
+    any::Any,
     ffi::OsString,
     fmt::{self, Debug},
     ops::Range,
@@ -80,6 +81,190 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
+
+/// A platform handle for content attached to a composition slot.
+pub enum PlatformSurfaceHandle<'a> {
+    /// A platform window handle, such as an AppKit view, Wayland surface, or X11 window.
+    Window(raw_window_handle::WindowHandle<'a>),
+    /// An owned reference to a DirectComposition visual used as native or external surface content.
+    #[cfg(target_os = "windows")]
+    DirectCompositionVisual(windows::Win32::Graphics::DirectComposition::IDCompositionVisual),
+}
+
+/// Platform-owned content attached to a composition slot.
+///
+/// # Safety
+/// Implementations must return handles that remain valid for the borrow of `self` and expose a
+/// handle variant appropriate for the current platform. A returned `WindowHandle` must remain
+/// valid for the borrow of `self`; callbacks announce replacement but do not shorten that
+/// lifetime. A Windows DirectComposition handle is an owned COM reference and may outlive `self`.
+pub unsafe trait PlatformSurfaceAttachment: Any {
+    /// Returns the platform handle that an application can parent its native content to.
+    fn platform_handle(&self) -> PlatformSurfaceHandle<'_>;
+
+    /// Registers for handle replacement after compositor recovery.
+    fn on_handle_changed(
+        &self,
+        callback: Rc<dyn for<'a> Fn(PlatformSurfaceHandle<'a>)>,
+    ) -> anyhow::Result<()> {
+        let _ = callback;
+        Ok(())
+    }
+}
+
+/// The content assigned to one node of a composition tree.
+#[derive(Clone, Copy)]
+pub enum CompositionContent<'a> {
+    /// A surface drawn by GPUI.
+    Gpui {
+        /// Typed identity of the GPUI surface.
+        id: crate::GpuiSurfaceId,
+        /// Whether the surface is a fixed plane or application-created plane.
+        role: crate::GpuiSurfaceRole,
+    },
+    /// A platform-native view or child window.
+    Native {
+        /// Typed identity of the native surface.
+        id: crate::NativeSurfaceId,
+        /// Absolute window-content bounds in device pixels.
+        bounds: Bounds<DevicePixels>,
+        /// Platform-owned native attachment.
+        attachment: &'a Rc<dyn PlatformSurfaceAttachment>,
+    },
+    /// A slot whose content is produced by an external GPU renderer.
+    ExternalGpu {
+        /// Typed identity of the external GPU surface.
+        id: crate::ExternalGpuSurfaceId,
+        /// Absolute window-content bounds in device pixels.
+        bounds: Bounds<DevicePixels>,
+        /// Platform-owned external GPU attachment.
+        attachment: &'a Rc<dyn PlatformSurfaceAttachment>,
+    },
+}
+
+impl CompositionContent<'_> {
+    /// Returns the identity encoded by this content kind.
+    pub fn id(self) -> crate::CompositionSurfaceId {
+        match self {
+            Self::Gpui { id, .. } => id.into(),
+            Self::Native { id, .. } => id.into(),
+            Self::ExternalGpu { id, .. } => id.into(),
+        }
+    }
+
+    /// Returns bounds for native and external surfaces.
+    pub fn bounds(self) -> Option<Bounds<DevicePixels>> {
+        match self {
+            Self::Gpui { .. } => None,
+            Self::Native { bounds, .. } | Self::ExternalGpu { bounds, .. } => Some(bounds),
+        }
+    }
+}
+
+/// One surface in bottom-to-top preorder.
+///
+/// The typed ID and bounds are stored in [`CompositionContent`], so content kind, identity, and
+/// geometry cannot drift apart.
+#[derive(Clone, Copy)]
+pub struct CompositionSurface<'a> {
+    /// Parent surface, if this node is nested.
+    pub parent: Option<crate::CompositionSurfaceId>,
+    /// The renderer or platform attachment that supplies this surface's content.
+    pub content: CompositionContent<'a>,
+    /// Absolute parent bounds when the parent is a native or external surface.
+    ///
+    /// A GPUI parent spans the full window and has no explicit bounds.
+    pub(crate) parent_bounds: Option<Bounds<DevicePixels>>,
+}
+
+impl CompositionSurface<'_> {
+    /// Returns the typed identity of this surface.
+    pub fn id(self) -> crate::CompositionSurfaceId {
+        self.content.id()
+    }
+
+    /// Returns bounds for native and external surfaces.
+    pub fn bounds(self) -> Option<Bounds<DevicePixels>> {
+        self.content.bounds()
+    }
+
+    /// Returns the explicit bounds of a native or external parent, if any.
+    ///
+    /// When this is `None`, the parent is a full-window GPUI surface (or this is a root).
+    pub fn parent_bounds(self) -> Option<Bounds<DevicePixels>> {
+        self.parent_bounds
+    }
+
+    /// Returns this surface's absolute window-content origin in device pixels.
+    ///
+    /// GPUI surfaces span the window and therefore have a zero origin.
+    pub fn origin(self) -> Point<DevicePixels> {
+        self.bounds()
+            .map_or_else(Point::default, |bounds| bounds.origin)
+    }
+
+    /// Returns this surface's origin relative to its parent, widened before subtraction.
+    ///
+    /// The result is not restricted to `i32`; individual platform adapters can convert it to
+    /// their native coordinate type and report coordinates their APIs cannot represent.
+    pub fn local_origin(self) -> Point<i64> {
+        let origin = self.origin();
+        let parent_origin = self
+            .parent_bounds
+            .map_or_else(Point::default, |bounds| bounds.origin);
+        point(
+            i64::from(origin.x.0) - i64::from(parent_origin.x.0),
+            i64::from(origin.y.0) - i64::from(parent_origin.y.0),
+        )
+    }
+}
+
+/// A frame split across the GPUI surfaces in its composition tree.
+pub struct ComposedScene<'a> {
+    full_scene: &'a Scene,
+}
+
+impl<'a> ComposedScene<'a> {
+    pub(crate) fn new(full_scene: &'a Scene) -> Self {
+        Self { full_scene }
+    }
+
+    /// Returns the complete unsplit scene for ordinary single-surface presentation.
+    pub fn full_scene(&self) -> &'a Scene {
+        self.full_scene
+    }
+
+    /// Returns the compiled scene for one GPUI composition surface, if that surface painted
+    /// primitives in this frame.
+    pub fn layer(&self, surface: crate::GpuiSurfaceId) -> Option<&'a Scene> {
+        self.full_scene.composition_layer(surface)
+    }
+
+    /// Returns whether the scene for a GPUI composition surface contains no visible primitives.
+    pub fn is_layer_empty(&self, surface: crate::GpuiSurfaceId) -> bool {
+        self.layer(surface).is_none_or(Scene::is_empty)
+    }
+}
+
+/// A logical-pixel region that routes pointer input to a GPUI composition surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CompositionHitRegion {
+    /// The GPUI surface whose scene and hitboxes occupy this region.
+    pub surface: crate::GpuiSurfaceId,
+    /// Logical-pixel bounds where this GPUI surface should receive pointer input.
+    pub bounds: Bounds<Pixels>,
+}
+
+/// All content needed to reconcile and present one composed window frame.
+pub struct CompositionFrame<'a> {
+    /// The ordered native and GPUI surfaces in this window.
+    pub surfaces: crate::CompositionSurfaces<'a>,
+    /// GPUI-rendered scene layers for this frame.
+    pub scene: ComposedScene<'a>,
+    /// Logical-pixel GPUI hit regions. Platforms can route input into the topmost matching GPUI
+    /// surface while passing input through transparent portions to native content underneath.
+    pub hit_regions: &'a [CompositionHitRegion],
+}
 use strum::EnumIter;
 use uuid::Uuid;
 
