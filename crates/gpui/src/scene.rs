@@ -2602,6 +2602,67 @@ mod tests {
     }
 
     #[test]
+    fn lane_permutation_composition_matches_every_pair_through_five_items() {
+        fn enumerate(items: &mut [usize], position: usize, output: &mut Vec<Vec<usize>>) {
+            if position == items.len() {
+                output.push(items.to_vec());
+                return;
+            }
+            for next in position..items.len() {
+                items.swap(position, next);
+                enumerate(items, position + 1, output);
+                items.swap(position, next);
+            }
+        }
+
+        for len in 0..=5 {
+            let mut permutations = Vec::new();
+            enumerate(&mut (0..len).collect::<Vec<_>>(), 0, &mut permutations);
+            for previous_map in &permutations {
+                for current_map in &permutations {
+                    let mut source = previous_map.clone();
+                    source.extend_from_slice(current_map);
+                    let previous = LaneMapping {
+                        source_len: len,
+                        sort: LaneSort::Indexed(0..len),
+                    };
+                    let current = LaneMapping {
+                        source_len: len,
+                        sort: LaneSort::Indexed(len..2 * len),
+                    };
+                    let mut composed_map = Vec::new();
+                    let composed = compose_lane(&previous, &current, &source, &mut composed_map);
+                    for old_index in 0..len {
+                        assert_eq!(
+                            map_index(old_index, &composed.sort, &composed_map),
+                            current_map[previous_map[old_index]],
+                            "len={len}, previous={previous_map:?}, current={current_map:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut scratch = Vec::new();
+        let swap = LaneMapping {
+            source_len: 6,
+            sort: LaneSort::Swap(2),
+        };
+        assert!(matches!(
+            compose_lane(&swap, &swap, &[], &mut scratch).sort,
+            LaneSort::Identity
+        ));
+        let reverse = LaneMapping {
+            source_len: 6,
+            sort: LaneSort::Reverse(6),
+        };
+        assert!(matches!(
+            compose_lane(&reverse, &reverse, &[], &mut scratch).sort,
+            LaneSort::Identity
+        ));
+    }
+
+    #[test]
     fn render_plan_reuses_its_command_allocation_across_frames() {
         let mut scene = Scene::default();
         for _ in 0..32 {
