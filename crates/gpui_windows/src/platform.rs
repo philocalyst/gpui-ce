@@ -345,17 +345,27 @@ impl WindowsPlatform {
     }
 }
 
-fn translate_accelerator(msg: &MSG) -> Option<()> {
-    if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
+fn translate_accelerator(
+    message: &MSG,
+    window_handles: &RwLock<SmallVec<[SafeHwnd; 4]>>,
+) -> Option<()> {
+    if message.message != WM_KEYDOWN && message.message != WM_SYSKEYDOWN {
+        return None;
+    }
+    let is_gpui_window = window_handles
+        .read()
+        .iter()
+        .any(|handle| handle.as_raw() == message.hwnd);
+    if !is_gpui_window {
         return None;
     }
 
     let result = unsafe {
         SendMessageW(
-            msg.hwnd,
+            message.hwnd,
             WM_GPUI_KEYDOWN,
-            Some(msg.wParam),
-            Some(msg.lParam),
+            Some(message.wParam),
+            Some(message.lParam),
         )
     };
     (result.0 == 0).then_some(())
@@ -442,7 +452,7 @@ impl Platform for WindowsPlatform {
         let mut msg = MSG::default();
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                if translate_accelerator(&msg).is_none() {
+                if translate_accelerator(&msg, &self.raw_window_handles).is_none() {
                     _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
@@ -1071,8 +1081,12 @@ impl WindowsPlatformInner {
                     // then quit out of foreground work to allow us to process other gpui events first before returning back to foreground task work
                     // if we don't we might not for example process window quit events
                     let mut msg = MSG::default();
-                    let process_message = |msg: &_| {
-                        if translate_accelerator(msg).is_none() {
+                    let process_message = |msg: &MSG| {
+                        let translated = self
+                            .raw_window_handles
+                            .upgrade()
+                            .is_some_and(|handles| translate_accelerator(msg, &handles).is_some());
+                        if !translated {
                             _ = unsafe { TranslateMessage(msg) };
                             unsafe { DispatchMessageW(msg) };
                         }
@@ -1555,7 +1569,10 @@ mod tests {
     use crate::{read_from_clipboard, write_to_clipboard};
     use gpui::ClipboardItem;
 
-    use super::encode_restart_arguments;
+    use super::{encode_restart_arguments, translate_accelerator};
+    use parking_lot::RwLock;
+    use smallvec::smallvec;
+    use windows::Win32::UI::WindowsAndMessaging::{MSG, WM_CHAR, WM_KEYDOWN, WM_SYSKEYDOWN};
 
     #[test]
     fn test_encode_restart_arguments() {
@@ -1570,6 +1587,37 @@ mod tests {
         assert_eq!(
             encode_restart_arguments(&[OsString::from(r"C:\")]),
             OsStr::new(r#""C:\\""#)
+        );
+    }
+
+    #[test]
+    fn native_child_key_messages_are_not_eaten_by_gpui_accelerators() {
+        let gpui_windows = RwLock::new(smallvec![crate::SafeHwnd::from(crate::HWND(
+            10usize as *mut _,
+        ))]);
+        for message in [WM_KEYDOWN, WM_SYSKEYDOWN] {
+            assert!(
+                translate_accelerator(
+                    &MSG {
+                        hwnd: crate::HWND(11usize as *mut _),
+                        message,
+                        ..Default::default()
+                    },
+                    &gpui_windows,
+                )
+                .is_none()
+            );
+        }
+        assert!(
+            translate_accelerator(
+                &MSG {
+                    hwnd: crate::HWND(11usize as *mut _),
+                    message: WM_CHAR,
+                    ..Default::default()
+                },
+                &gpui_windows,
+            )
+            .is_none()
         );
     }
 
