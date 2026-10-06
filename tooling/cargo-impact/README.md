@@ -68,6 +68,10 @@ the scanner in `.github/cargo-impact`. It checks every destination first and
 refuses existing files. The workflows install that copy with `--locked`; no
 published crate, hosted service, or GitHub App registration is required. Add
 `.cargo-impact/` and `impact-report/` to the library repository's `.gitignore`.
+The vendored composite action pins the scanner's Rust toolchain and saves its
+binary cache immediately, so a later regression failure still preserves the
+installation for the next attempt. Its key includes source, embedded templates,
+lockfile, toolchain, host OS, and architecture.
 
 The PR workflow produces an artifact and a job summary. The comment workflow
 accepts exactly `@cargo-impact check` or `/cargo-impact check` on an open PR.
@@ -133,6 +137,10 @@ forge = "git_lab"
 Git branches are resolved to immutable commits per experiment. Private Git
 repositories, submodules, and Git LFS materialization are not supported by the
 anonymous checkout adapter. Local sources use `kind = "local"` and `path`.
+Use full commit IDs when pinning revisions; abbreviated IDs are rejected with
+an actionable error. Checkouts use shallow, filtered clones and atomic staging
+so interrupted downloads can be retried. Safe internal dangling symlinks are
+preserved; unsafe or unprovable links report their repository path.
 Paths resolve relative to `impact.toml`. Use the containing workspace as the
 source when a package has sibling path dependencies; `manifest` chooses the
 consumer within it.
@@ -250,8 +258,11 @@ missing std, timeouts, retry recipes, cache reuse, source immutability, provider
 pagination/rate limits, authorization, stale heads, output neutralization, and
 self-contained setup. A local Git fixture verifies patching a transitive Git
 dependency after graph resolution. Local Cargo and a Nix shell were exercised during
-development on macOS. Docker/Boxington live execution and hosted Actions remain
-unverified; remote transport and alternate-registry patching need broader fixture coverage.
+development on macOS. Fork-contained Actions runs exercised Docker, the embedded
+gate, a real GPUI Refineable API change, exact E0624 spans, E0463 environment
+failures, and the comment bot's permission check and eyes reaction. An anonymous
+Git checkout of that fork verified a nested consumer's commit-pinned source link.
+Boxington live execution and alternate-registry patching need broader coverage.
 
 The gate checks the configured feature/target selection, not every possible
 configuration or runtime behavior. Builds use `cargo check --all-targets`, not

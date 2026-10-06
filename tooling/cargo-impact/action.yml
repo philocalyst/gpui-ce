@@ -1,0 +1,34 @@
+name: Install cargo-impact
+description: Build the trusted vendored cargo-impact scanner and cache its binary.
+inputs:
+  source:
+    description: Path to the trusted cargo-impact source and action files
+    required: false
+    default: .github/cargo-impact
+  toolchain:
+    description: Rust toolchain used to build the scanner
+    required: false
+    default: 1.99.0
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache/restore@v4
+      id: scanner-cache
+      with:
+        path: ${{ runner.temp }}/impact/bin
+        key: cargo-impact-v1-${{ inputs.toolchain }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source), format('{0}/src/**', inputs.source), format('{0}/examples/**', inputs.source), format('{0}/clippy.toml', inputs.source), format('{0}/LICENSE.md', inputs.source), format('{0}/action.yml', inputs.source)) }}
+    - name: Build trusted scanner
+      if: steps.scanner-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        SCANNER_SOURCE: ${{ inputs.source }}
+        RUST_TOOLCHAIN: ${{ inputs.toolchain }}
+        CARGO_BUILD_JOBS: "2"
+      run: |
+        rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+        cargo "+$RUST_TOOLCHAIN" install --locked --path "$SCANNER_SOURCE" --root "$RUNNER_TEMP/impact"
+    - uses: actions/cache/save@v4
+      if: steps.scanner-cache.outputs.cache-hit != 'true'
+      with:
+        path: ${{ runner.temp }}/impact/bin
+        key: cargo-impact-v1-${{ inputs.toolchain }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source), format('{0}/src/**', inputs.source), format('{0}/examples/**', inputs.source), format('{0}/clippy.toml', inputs.source), format('{0}/LICENSE.md', inputs.source), format('{0}/action.yml', inputs.source)) }}

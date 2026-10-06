@@ -11,6 +11,7 @@ macro_rules! assets {
 const SCANNER: &[Asset] = assets![
     "Cargo.toml",
     "Cargo.lock",
+    "action.yml",
     "clippy.toml",
     "LICENSE.md",
     "src/lib.rs",
