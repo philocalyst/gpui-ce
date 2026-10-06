@@ -2165,12 +2165,13 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 surface_y,
                 ..
             } => {
-                let position = point(px(surface_x as f32), px(surface_y as f32));
                 state.serial_tracker.update(SerialKind::MouseEnter, serial);
-                state.mouse_location = Some(position);
                 state.button_pressed = None;
 
-                if let Some(window) = get_window(&mut state, &surface.id()) {
+                if let Some((window, offset)) = get_input_target(&mut state, &surface.id()) {
+                    let position = point(px(surface_x as f32), px(surface_y as f32)) + offset;
+                    state.mouse_location = Some(position);
+                    state.mouse_focused_surface = Some(surface.id());
                     state.mouse_focused_window = Some(window.clone());
 
                     if state.enter_token.is_some() {
@@ -2200,20 +2201,41 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                         pressed_button: None,
                         modifiers,
                     }));
-                }
-            }
-            wl_pointer::Event::Leave { .. } => {
-                if let Some(focused_window) = state.mouse_focused_window.clone() {
-                    let input = PlatformInput::MouseExited(MouseExitEvent {
-                        position: state.mouse_location.unwrap(),
-                        pressed_button: state.button_pressed,
-                        modifiers: state.modifiers,
+                } else {
+                    let previous = state.mouse_focused_window.take();
+                    let exit = previous.as_ref().map(|_| {
+                        PlatformInput::MouseExited(MouseExitEvent {
+                            position: state.mouse_location.unwrap_or_default(),
+                            pressed_button: state.button_pressed,
+                            modifiers: state.modifiers,
+                        })
                     });
-                    state.mouse_focused_window = None;
+                    state.mouse_focused_surface = Some(surface.id());
                     state.mouse_location = None;
                     state.button_pressed = None;
                     state.cursor_hidden_window = None;
+                    if let (Some(window), Some(input)) = (previous, exit) {
+                        drop(state);
+                        window.handle_input(input);
+                        window.set_hovered(false);
+                    }
+                }
+            }
+            wl_pointer::Event::Leave { .. } => {
+                let focused_window = state.mouse_focused_window.take();
+                let input = focused_window.as_ref().map(|_| {
+                    PlatformInput::MouseExited(MouseExitEvent {
+                        position: state.mouse_location.unwrap_or_default(),
+                        pressed_button: state.button_pressed,
+                        modifiers: state.modifiers,
+                    })
+                });
+                state.mouse_focused_surface = None;
+                state.mouse_location = None;
+                state.button_pressed = None;
+                state.cursor_hidden_window = None;
 
+                if let (Some(focused_window), Some(input)) = (focused_window, input) {
                     drop(state);
                     focused_window.handle_input(input);
                     focused_window.set_hovered(false);
@@ -2227,7 +2249,13 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 if state.mouse_focused_window.is_none() {
                     return;
                 }
-                state.mouse_location = Some(point(px(surface_x as f32), px(surface_y as f32)));
+                let focused_surface = state.mouse_focused_surface.clone();
+                let offset = focused_surface
+                    .as_ref()
+                    .and_then(|surface_id| get_input_target(&mut state, surface_id))
+                    .map_or(Point::default(), |(_, origin)| origin);
+                state.mouse_location =
+                    Some(point(px(surface_x as f32), px(surface_y as f32)) + offset);
                 state.restore_cursor_after_hide();
                 let kinetic_input = state.kinetic_scroll.cancel();
 
@@ -2732,9 +2760,22 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
             } => {
                 state.serial_tracker.update(SerialKind::DataDevice, serial);
                 if let Some(data_offer) = data_offer {
-                    let Some(drag_window) = get_window(&mut state, &surface.id()) else {
+                    let Some((drag_window, offset)) = get_input_target(&mut state, &surface.id())
+                    else {
+                        data_offer.destroy();
+                        if let Some(previous) = state.drag.window.take() {
+                            state.drag.data_offer = None;
+                            state.drag.surface = Some(surface.id());
+                            drop(state);
+                            previous
+                                .handle_input(PlatformInput::FileDrop(FileDropEvent::Exited {}));
+                        } else {
+                            state.drag.data_offer = None;
+                            state.drag.surface = Some(surface.id());
+                        }
                         return;
                     };
+                    let drag_surface_id = surface.id();
 
                     const ACTIONS: DndAction = DndAction::Copy;
                     data_offer.set_actions(ACTIONS, ACTIONS);
@@ -2776,7 +2817,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                                     }
                                 })
                                 .collect();
-                            let position = Point::new(x.into(), y.into());
+                            let position = Point::new(x.into(), y.into()) + offset;
 
                             // Prevent dropping text from other programs.
                             if paths.is_empty() {
@@ -2794,6 +2835,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                             state.drag.data_offer = Some(data_offer);
                             state.drag.window = Some(drag_window.clone());
                             state.drag.position = position;
+                            state.drag.surface = Some(drag_surface_id);
 
                             drop(state);
                             drag_window.handle_input(input);
@@ -2805,7 +2847,12 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                 let Some(drag_window) = state.drag.window.clone() else {
                     return;
                 };
-                let position = Point::new(x.into(), y.into());
+                let drag_surface = state.drag.surface.clone();
+                let offset = drag_surface
+                    .as_ref()
+                    .and_then(|surface_id| get_input_target(&mut state, surface_id))
+                    .map_or(Point::default(), |(_, origin)| origin);
+                let position = Point::new(x.into(), y.into()) + offset;
                 state.drag.position = position;
 
                 let input = PlatformInput::FileDrop(FileDropEvent::Pending { position });
@@ -2813,18 +2860,15 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                 drag_window.handle_input(input);
             }
             wl_data_device::Event::Leave => {
-                let Some(drag_window) = state.drag.window.clone() else {
-                    return;
-                };
-                let data_offer = state.drag.data_offer.clone().unwrap();
-                data_offer.destroy();
-
-                state.drag.data_offer = None;
-                state.drag.window = None;
-
-                let input = PlatformInput::FileDrop(FileDropEvent::Exited {});
-                drop(state);
-                drag_window.handle_input(input);
+                if let Some(data_offer) = state.drag.data_offer.take() {
+                    data_offer.destroy();
+                }
+                let drag_window = state.drag.window.take();
+                state.drag.surface = None;
+                if let Some(drag_window) = drag_window {
+                    drop(state);
+                    drag_window.handle_input(PlatformInput::FileDrop(FileDropEvent::Exited {}));
+                }
             }
             wl_data_device::Event::Drop => {
                 let Some(drag_window) = state.drag.window.clone() else {
