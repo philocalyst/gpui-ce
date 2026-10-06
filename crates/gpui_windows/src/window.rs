@@ -1057,6 +1057,24 @@ impl PlatformWindow for WindowsWindow {
             .log_err();
     }
 
+    fn enable_composition(&self) -> anyhow::Result<()> {
+        self.state.renderer.borrow().enable_composition()
+    }
+
+    fn create_composition_surface(&self) -> anyhow::Result<Rc<dyn PlatformSurfaceAttachment>> {
+        self.state
+            .renderer
+            .borrow_mut()
+            .create_composition_surface()
+    }
+
+    fn present_composition(&self, frame: CompositionFrame<'_>) -> anyhow::Result<()> {
+        self.state
+            .renderer
+            .borrow_mut()
+            .present_composition(frame, self.state.background_appearance.get())
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
         self.state
