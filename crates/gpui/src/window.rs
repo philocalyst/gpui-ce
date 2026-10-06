@@ -1107,8 +1107,10 @@ pub(crate) struct Frame {
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
     pub(crate) hitboxes: Vec<Hitbox>,
+    composition_hitbox_surfaces: Vec<crate::GpuiSurfaceId>,
     pub(crate) window_control_hitboxes: Vec<(WindowControlArea, Hitbox)>,
     pub(crate) deferred_draws: Vec<DeferredDraw>,
+    composition_hit_regions: Vec<crate::CompositionHitRegion>,
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
     pub(crate) tooltip_requests: Vec<Option<TooltipRequest>>,
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
@@ -1153,8 +1155,10 @@ impl Frame {
             dispatch_tree,
             scene: Scene::default(),
             hitboxes: Vec::new(),
+            composition_hitbox_surfaces: Vec::new(),
             window_control_hitboxes: Vec::new(),
             deferred_draws: Vec::new(),
+            composition_hit_regions: Vec::new(),
             input_handlers: Vec::new(),
             tooltip_requests: Vec::new(),
             cursor_styles: Vec::new(),
@@ -1181,8 +1185,10 @@ impl Frame {
         self.tooltip_requests.clear();
         self.cursor_styles.clear();
         self.hitboxes.clear();
+        self.composition_hitbox_surfaces.clear();
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
+        self.composition_hit_regions.clear();
         self.tab_stops.clear();
         self.focus = None;
 
@@ -1229,6 +1235,35 @@ impl Frame {
                 prev_frame.element_states.remove_entry(element_state_key)
             {
                 self.element_states.insert(element_state_key, element_state);
+            }
+        }
+
+        self.composition_hit_regions.clear();
+        if !self.composition_hitbox_surfaces.is_empty() {
+            debug_assert_eq!(self.composition_hitbox_surfaces.len(), self.hitboxes.len());
+            for (hitbox, surface) in self.hitboxes.iter().zip(&self.composition_hitbox_surfaces) {
+                let clip = hitbox.content_mask.bounds;
+                if let Some(fragments) = &hitbox.fragments {
+                    self.composition_hit_regions.extend(
+                        fragments
+                            .iter()
+                            .map(|bounds| bounds.intersect(&clip))
+                            .filter(|bounds| !bounds.is_empty())
+                            .map(|bounds| crate::CompositionHitRegion {
+                                surface: *surface,
+                                bounds,
+                            }),
+                    );
+                } else {
+                    let bounds = hitbox.bounds.intersect(&clip);
+                    if !bounds.is_empty() {
+                        self.composition_hit_regions
+                            .push(crate::CompositionHitRegion {
+                                surface: *surface,
+                                bounds,
+                            });
+                    }
+                }
             }
         }
 
@@ -3794,6 +3829,10 @@ impl Window {
 
     fn prepaint_deferred_draws(&mut self, cx: &mut App) {
         assert_eq!(self.element_id_stack.len(), 0);
+        let previous_hitbox_target = self.composition.get().map(|tree| {
+            let overlay = tree.borrow().overlay();
+            self.composition_prepaint_target.replace(Some(overlay))
+        });
 
         // Process deferred draws in multiple rounds to support nesting.
         // Each round processes all current deferred draws, which may push new ones.
@@ -3871,6 +3910,9 @@ impl Window {
             self.text_style_stack.clear();
             round_start = round_end;
         }
+        if let Some(previous_hitbox_target) = previous_hitbox_target {
+            self.composition_prepaint_target.set(previous_hitbox_target);
+        }
     }
 
     fn paint_deferred_draws(&mut self, cx: &mut App) {
@@ -3941,6 +3983,21 @@ impl Window {
                 .iter()
                 .cloned(),
         );
+        if let Some(tree) = self.composition.get() {
+            let default_target = self
+                .composition_prepaint_target
+                .get()
+                .unwrap_or_else(|| tree.borrow().base());
+            let previous_targets = &self.rendered_frame.composition_hitbox_surfaces;
+            self.next_frame.composition_hitbox_surfaces.extend(
+                (range.start.hitboxes_index..range.end.hitboxes_index).map(|index| {
+                    previous_targets
+                        .get(index)
+                        .copied()
+                        .unwrap_or(default_target)
+                }),
+            );
+        }
         self.next_frame.tooltip_requests.extend(
             self.rendered_frame.tooltip_requests
                 [range.start.tooltips_index..range.end.tooltips_index]
@@ -4186,6 +4243,9 @@ impl Window {
         let result = f(self);
         if result.is_err() {
             self.next_frame.hitboxes.truncate(index.hitboxes_index);
+            self.next_frame
+                .composition_hitbox_surfaces
+                .truncate(index.hitboxes_index);
             self.next_frame
                 .tooltip_requests
                 .truncate(index.tooltips_index);
@@ -5666,6 +5726,13 @@ impl Window {
             tags: Vec::default(),
             fragments: self.current_inline_fragments.clone(),
         };
+        if let Some(tree) = self.composition.get() {
+            let surface = self
+                .composition_prepaint_target
+                .get()
+                .unwrap_or_else(|| tree.borrow().base());
+            self.next_frame.composition_hitbox_surfaces.push(surface);
+        }
         self.next_frame.hitboxes.push_mut(hitbox)
     }
 
