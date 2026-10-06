@@ -97,7 +97,7 @@ impl<S: Refineable + Default> Cascade<S> {
     ///
     /// The new slot is initially empty (`None`) and can be populated later
     /// using `set()`.
-    pub fn reserve(&mut self) -> CascadeSlot {
+    pub(crate) fn reserve(&mut self) -> CascadeSlot {
         self.0.push(None);
         CascadeSlot(self.0.len() - 1)
     }
