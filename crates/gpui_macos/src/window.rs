@@ -8,13 +8,15 @@ use anyhow::Result;
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use gpui::{
-    AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, ExternalDragPayload,
-    ExternalPaths, FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PromptButton, PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
-    WindowParams, point, px, size,
+    AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CompositionContent, CompositionFrame,
+    CompositionSurface, CompositionSurfaceId, CursorStyle, DevicePixels, ExternalDragPayload,
+    ExternalPaths, FileDropEvent, ForegroundExecutor, GpuiSurfaceId, GpuiSurfaceRole, KeyDownEvent,
+    Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformSurfaceAttachment, PlatformSurfaceHandle, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowParams, point,
+    px, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -48,7 +50,8 @@ use parking_lot::Mutex;
 use raw_window_handle as rwh;
 use smallvec::SmallVec;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
+    collections::HashMap,
     ffi::{CStr, CString, c_void},
     mem,
     ops::Range,
@@ -64,6 +67,8 @@ use std::{
 };
 
 const WINDOW_STATE_IVAR: &str = "windowState";
+const COMPOSITION_LAYER_IVAR: &str = "compositionLayer";
+const COMPOSITION_VIEW_STATE_IVAR: &str = "compositionViewState";
 
 unsafe fn set_window_state_ivar(object: ObjcId, state: *mut c_void) {
     let object = unsafe { &mut *object };
@@ -286,6 +291,7 @@ static mut WINDOW_CLASS: *const AnyClass = ptr::null();
 static mut PANEL_CLASS: *const AnyClass = ptr::null();
 static mut VIEW_CLASS: *const AnyClass = ptr::null();
 static mut BLURRED_VIEW_CLASS: *const AnyClass = ptr::null();
+static mut COMPOSITION_VIEW_CLASS: *const AnyClass = ptr::null();
 
 #[allow(non_upper_case_globals)]
 const VIEW_WIDTH_SIZABLE: NSUInteger = 1 << 1;
@@ -503,6 +509,32 @@ unsafe fn build_classes() {
             decl.add_method(
                 sel!(characterIndexForPoint:),
                 character_index_for_point as unsafe extern "C" fn(_, _, _) -> _,
+            );
+            decl.register() as *const AnyClass
+        };
+        COMPOSITION_VIEW_CLASS = {
+            let mut decl = ClassBuilder::new(
+                CString::new("GPUICompositionView").unwrap().as_c_str(),
+                class!(NSView),
+            )
+            .unwrap();
+            decl.add_ivar::<*mut c_void>(CString::new(COMPOSITION_LAYER_IVAR).unwrap().as_c_str());
+            decl.add_ivar::<*mut c_void>(
+                CString::new(COMPOSITION_VIEW_STATE_IVAR)
+                    .unwrap()
+                    .as_c_str(),
+            );
+            decl.add_method(
+                sel!(makeBackingLayer),
+                make_composition_backing_layer as unsafe extern "C" fn(_, _) -> ObjcId,
+            );
+            decl.add_method(
+                sel!(hitTest:),
+                composition_view_hit_test as unsafe extern "C" fn(_, _, _) -> ObjcId,
+            );
+            decl.add_method(
+                sel!(dealloc),
+                dealloc_composition_view as unsafe extern "C" fn(_, _),
             );
             decl.register() as *const AnyClass
         };
@@ -742,6 +774,42 @@ struct SimpleFullscreenAppState {
     saved_presentation_options: NSUInteger,
 }
 
+struct CompositionViewState {
+    root_view: ObjcId,
+    hit_regions: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+}
+
+struct CompositionOutput {
+    view: Retained<Objc2NSView>,
+    renderer: renderer::Renderer,
+    hit_regions: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+}
+
+struct CompositionPlacement {
+    id: CompositionSurfaceId,
+    parent: Option<CompositionSurfaceId>,
+    parent_index: Option<usize>,
+    view: Retained<Objc2NSView>,
+    _attachment: Option<Rc<dyn PlatformSurfaceAttachment>>,
+}
+
+struct MacCompositionAttachment {
+    view: Retained<Objc2NSView>,
+    _layer: metal::MetalLayer,
+}
+
+unsafe impl PlatformSurfaceAttachment for MacCompositionAttachment {
+    fn platform_handle(&self) -> PlatformSurfaceHandle<'_> {
+        let view = NonNull::new(Retained::as_ptr(&self.view).cast_mut().cast())
+            .expect("retained AppKit view");
+        unsafe {
+            PlatformSurfaceHandle::Window(rwh::WindowHandle::borrow_raw(
+                rwh::RawWindowHandle::AppKit(rwh::AppKitWindowHandle::new(view)),
+            ))
+        }
+    }
+}
+
 static SIMPLE_FULLSCREEN_APP_STATE: Mutex<Option<SimpleFullscreenAppState>> = Mutex::new(None);
 
 unsafe fn push_simple_fullscreen_presentation_options() {
@@ -820,6 +888,9 @@ struct MacWindowState {
     cursor_visible: Arc<AtomicBool>,
     frame_source: Option<WindowFrameSource>,
     renderer: renderer::Renderer,
+    composition_enabled: bool,
+    composition_outputs: HashMap<GpuiSurfaceId, CompositionOutput>,
+    composition_placements: Vec<CompositionPlacement>,
     /// Forces an uncached scene after GPU recovery or a transient presentation failure.
     force_render_pending: bool,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
@@ -863,6 +934,62 @@ struct MacWindowState {
 }
 
 impl MacWindowState {
+    fn ensure_composition_output(&mut self, surface: GpuiSurfaceId) -> anyhow::Result<()> {
+        if self.composition_outputs.contains_key(&surface) {
+            return Ok(());
+        }
+
+        let layer = gpui_apple::metal_renderer::new_window_layer(true);
+        let drawable_size = self.content_size().to_device_pixels(self.scale_factor());
+        #[cfg(feature = "wgpu")]
+        let mut output_renderer =
+            renderer::Renderer::new_composition_surface(&self.renderer, layer, drawable_size)?;
+        #[cfg(not(feature = "wgpu"))]
+        let mut output_renderer =
+            renderer::Renderer::new_composition_surface(&self.renderer, layer, true);
+
+        output_renderer.update_drawable_size(drawable_size);
+        let hit_regions = Rc::new(RefCell::new(Vec::new()));
+        let layer = output_renderer
+            .layer()
+            .expect("composition renderer has a CAMetalLayer")
+            .as_ptr()
+            .cast();
+        let content_size = self.content_size();
+        let view = new_composition_view(
+            Objc2NSRect::new(
+                Objc2NSPoint::new(0., 0.),
+                NSSize::new(content_size.width.to_f64(), content_size.height.to_f64()),
+            ),
+            layer,
+            Some(CompositionViewState {
+                root_view: self.native_view.as_ptr(),
+                hit_regions: Rc::clone(&hit_regions),
+            }),
+        );
+        unsafe {
+            Retained::as_ptr(&view)
+                .cast_mut()
+                .cast::<Objc2Object>()
+                .setAutoresizingMask_(VIEW_WIDTH_SIZABLE | VIEW_HEIGHT_SIZABLE);
+        }
+        self.composition_outputs.insert(
+            surface,
+            CompositionOutput {
+                view,
+                renderer: output_renderer,
+                hit_regions,
+            },
+        );
+        Ok(())
+    }
+
+    fn resize_composition_outputs(&mut self, size: Size<DevicePixels>) {
+        for output in self.composition_outputs.values_mut() {
+            output.renderer.update_drawable_size(size);
+        }
+    }
+
     fn next_frame_request(&mut self) -> RequestFrameOptions {
         RequestFrameOptions {
             force_render: mem::take(&mut self.force_render_pending),
@@ -1261,6 +1388,9 @@ impl MacWindow {
                 cursor_visible,
                 frame_source: None,
                 renderer,
+                composition_enabled: false,
+                composition_outputs: HashMap::new(),
+                composition_placements: Vec::new(),
                 force_render_pending: false,
                 request_frame_callback: None,
                 event_callback: None,
@@ -1881,10 +2011,15 @@ impl PlatformWindow for MacWindow {
 
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut this = self.0.as_ref().lock();
-        this.background_appearance = background_appearance;
-
         let opaque = background_appearance.is_opaque();
+        #[cfg(feature = "wgpu")]
+        if let Err(error) = this.renderer.update_transparency(!opaque) {
+            log::error!("updating WGPU window transparency: {error:#}");
+            return;
+        }
+        #[cfg(not(feature = "wgpu"))]
         this.renderer.update_transparency(!opaque);
+        this.background_appearance = background_appearance;
 
         unsafe {
             this.native_window.setOpaque_(Bool::new(opaque));
@@ -2155,6 +2290,245 @@ impl PlatformWindow for MacWindow {
         }
         #[cfg(not(feature = "wgpu"))]
         this.renderer.draw(scene);
+    }
+
+    fn enable_composition(&self) -> anyhow::Result<()> {
+        self.0.lock().composition_enabled = true;
+        Ok(())
+    }
+
+    fn create_composition_surface(&self) -> anyhow::Result<Rc<dyn PlatformSurfaceAttachment>> {
+        Ok(MacCompositionAttachment::new())
+    }
+
+    fn present_composition(&self, frame: CompositionFrame<'_>) -> anyhow::Result<()> {
+        let mut this = self.0.lock();
+        anyhow::ensure!(
+            this.composition_enabled,
+            "enable composition before presenting"
+        );
+
+        let content_size = this.content_size();
+        let scale_factor = this.scale_factor();
+        let window_bounds = Bounds::new(point(px(0.), px(0.)), content_size);
+        let base = frame
+            .surfaces
+            .iter()
+            .find_map(|surface| match surface.content {
+                CompositionContent::Gpui {
+                    id,
+                    role: GpuiSurfaceRole::Base,
+                } => Some(id),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("composition frame has no GPUI base surface"))?;
+        let base_surface = base.into();
+
+        for output in this.composition_outputs.values_mut() {
+            output.hit_regions.borrow_mut().clear();
+        }
+
+        // Composition surfaces are already a bottom-to-top preorder. Keep that order as the
+        // AppKit graph representation so steady-state presents need no tree snapshots or maps.
+        let mut placements_match =
+            this.composition_placements.len() == frame.surfaces.len().saturating_sub(1);
+        let mut placement_index = 0;
+        for surface in frame.surfaces.iter() {
+            let surface_id = surface.id();
+            let (view, attachment) = match surface.content {
+                CompositionContent::Gpui {
+                    role: GpuiSurfaceRole::Base,
+                    ..
+                } => continue,
+                CompositionContent::Gpui { id, .. } => {
+                    this.ensure_composition_output(id)?;
+                    let output = this.composition_outputs.get(&id).ok_or_else(|| {
+                        anyhow::anyhow!("missing GPUI composition output for {id:?}")
+                    })?;
+                    (
+                        Retained::as_ptr(&output.view)
+                            .cast_mut()
+                            .cast::<Objc2Object>(),
+                        None,
+                    )
+                }
+                CompositionContent::Native { attachment, .. } => (
+                    appkit_view(attachment.as_ref())?,
+                    Some(Rc::clone(attachment)),
+                ),
+                CompositionContent::ExternalGpu { attachment, .. } => (
+                    appkit_view(attachment.as_ref())?,
+                    Some(Rc::clone(attachment)),
+                ),
+            };
+            let parent = surface.parent.filter(|parent| *parent != base_surface);
+            let current_matches = this
+                .composition_placements
+                .get(placement_index)
+                .is_some_and(|placement| {
+                    placement.id == surface_id
+                        && placement.parent == parent
+                        && Retained::as_ptr(&placement.view)
+                            .cast_mut()
+                            .cast::<Objc2Object>()
+                            == view
+                });
+            placements_match &= current_matches;
+
+            if placements_match {
+                let index = placement_index;
+                let frame = composition_surface_frame(surface, window_bounds, scale_factor);
+                this.composition_placements[index]._attachment = attachment;
+                set_view_frame_if_changed(view, frame);
+                let layer: ObjcId = unsafe { msg_send![view, layer] };
+                if !layer.is_null() {
+                    let _: () = unsafe { msg_send![layer, setContentsScale: scale_factor as f64] };
+                }
+            }
+            placement_index += 1;
+        }
+
+        for region in frame.hit_regions {
+            if let Some(output) = this.composition_outputs.get(&region.surface) {
+                output.hit_regions.borrow_mut().push(region.bounds);
+            }
+        }
+
+        if !placements_match {
+            // Topology or a native attachment changed. Rebuild the ordered graph once, retaining
+            // each borrowed native owner for as long as its view is installed in AppKit.
+            let mut placements = Vec::with_capacity(frame.surfaces.len().saturating_sub(1));
+            for surface in frame.surfaces.iter() {
+                if matches!(
+                    surface.content,
+                    CompositionContent::Gpui {
+                        role: GpuiSurfaceRole::Base,
+                        ..
+                    }
+                ) {
+                    continue;
+                }
+
+                let surface_id = surface.id();
+                let parent = surface.parent.filter(|parent| *parent != base_surface);
+                let parent_index = parent.and_then(|parent| {
+                    placements
+                        .iter()
+                        .position(|placement: &CompositionPlacement| placement.id == parent)
+                });
+                anyhow::ensure!(
+                    parent.is_none() || parent_index.is_some(),
+                    "composition surface parent is absent from preorder"
+                );
+                let frame = composition_surface_frame(surface, window_bounds, scale_factor);
+                let (view, attachment) = match surface.content {
+                    CompositionContent::Gpui { id, .. } => {
+                        let view = this
+                            .composition_outputs
+                            .get(&id)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("missing GPUI composition output for {id:?}")
+                            })?
+                            .view
+                            .clone();
+                        (view, None)
+                    }
+                    CompositionContent::Native { attachment, .. }
+                    | CompositionContent::ExternalGpu { attachment, .. } => {
+                        let native_view = appkit_view(attachment.as_ref())?;
+                        let view =
+                            unsafe { Retained::retain(native_view.cast()) }.ok_or_else(|| {
+                                anyhow::anyhow!("composition attachment view was released")
+                            })?;
+                        (view, Some(Rc::clone(attachment)))
+                    }
+                };
+                let view_ptr = Retained::as_ptr(&view).cast_mut().cast::<Objc2Object>();
+                set_view_frame_if_changed(view_ptr, frame);
+                let layer: ObjcId = unsafe { msg_send![view_ptr, layer] };
+                if !layer.is_null() {
+                    let _: () = unsafe { msg_send![layer, setContentsScale: scale_factor as f64] };
+                }
+                placements.push(CompositionPlacement {
+                    id: surface_id,
+                    parent,
+                    parent_index,
+                    view,
+                    _attachment: attachment,
+                });
+            }
+
+            for old in &this.composition_placements {
+                let old_view = Retained::as_ptr(&old.view).cast_mut().cast::<Objc2Object>();
+                if !placements.iter().any(|placement| {
+                    Retained::as_ptr(&placement.view)
+                        .cast_mut()
+                        .cast::<Objc2Object>()
+                        == old_view
+                }) {
+                    unsafe {
+                        let _: () = msg_send![old_view, removeFromSuperview];
+                    }
+                }
+            }
+            for placement in &placements {
+                let view = Retained::as_ptr(&placement.view)
+                    .cast_mut()
+                    .cast::<Objc2Object>();
+                let parent_view = placement
+                    .parent_index
+                    .map(|parent| {
+                        Retained::as_ptr(&placements[parent].view)
+                            .cast_mut()
+                            .cast::<Objc2Object>()
+                    })
+                    .unwrap_or(this.native_view.as_ptr());
+                let old_parent: ObjcId = unsafe { msg_send![view, superview] };
+                if old_parent != parent_view {
+                    unsafe {
+                        let _: () = msg_send![view, removeFromSuperview];
+                    }
+                }
+                unsafe { parent_view.addSubview_(view) };
+            }
+            this.composition_placements = placements;
+        }
+
+        this.composition_outputs.retain(|id, _| {
+            frame
+                .surfaces
+                .iter()
+                .any(|surface| surface.id() == CompositionSurfaceId::Gpui(*id))
+        });
+
+        let mut empty_scene = gpui::Scene::default();
+        empty_scene.finish();
+        for surface in frame.surfaces {
+            let CompositionContent::Gpui { id, .. } = surface.content else {
+                continue;
+            };
+            let scene = frame.scene.layer(id).unwrap_or(&empty_scene);
+            if id == base {
+                #[cfg(feature = "wgpu")]
+                if this.renderer.draw(scene) {
+                    this.force_render_pending = true;
+                }
+                #[cfg(not(feature = "wgpu"))]
+                this.renderer.draw(scene);
+            } else {
+                let output = this
+                    .composition_outputs
+                    .get_mut(&id)
+                    .expect("output retained while its surface exists");
+                #[cfg(feature = "wgpu")]
+                if output.renderer.draw(scene) {
+                    this.force_render_pending = true;
+                }
+                #[cfg(not(feature = "wgpu"))]
+                output.renderer.draw(scene);
+            }
+        }
+        Ok(())
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
@@ -2557,6 +2931,178 @@ unsafe fn drop_window_state(object: &Objc2Object) {
     }
 }
 
+unsafe fn composition_view_state(object: &Objc2Object) -> *mut CompositionViewState {
+    unsafe {
+        let ivar = object
+            .class()
+            .instance_variable(
+                CString::new(COMPOSITION_VIEW_STATE_IVAR)
+                    .unwrap()
+                    .as_c_str(),
+            )
+            .unwrap();
+        *ivar.load::<*mut c_void>(object) as *mut CompositionViewState
+    }
+}
+
+unsafe extern "C" fn make_composition_backing_layer(this: &Objc2Object, _: Sel) -> ObjcId {
+    unsafe {
+        let ivar = this
+            .class()
+            .instance_variable(CString::new(COMPOSITION_LAYER_IVAR).unwrap().as_c_str())
+            .unwrap();
+        *ivar.load::<*mut c_void>(this) as ObjcId
+    }
+}
+
+unsafe extern "C" fn composition_view_hit_test(
+    this: &Objc2Object,
+    _: Sel,
+    native_point: Objc2NSPoint,
+) -> ObjcId {
+    unsafe {
+        let state = composition_view_state(this);
+        if state.is_null() {
+            return msg_send![super(this, class!(NSView)), hitTest: native_point];
+        }
+
+        let state = &*state;
+        let root_point: Objc2NSPoint =
+            msg_send![this, convertPoint: native_point, toView: state.root_view];
+        let root_bounds: Objc2NSRect = msg_send![state.root_view, bounds];
+        let window_point = composition_window_point(root_bounds, root_point);
+        if !composition_hit_regions_contain(&state.hit_regions.borrow(), window_point) {
+            return NIL;
+        }
+
+        let window: ObjcId = msg_send![state.root_view, window];
+        if !window.is_null() {
+            window.makeFirstResponder_(state.root_view);
+        }
+        state.root_view
+    }
+}
+
+unsafe extern "C" fn dealloc_composition_view(this: &Objc2Object, _: Sel) {
+    unsafe {
+        let state = composition_view_state(this);
+        if !state.is_null() {
+            drop(Box::from_raw(state));
+        }
+        let _: () = msg_send![super(this, class!(NSView)), dealloc];
+    }
+}
+
+fn new_composition_view(
+    frame: Objc2NSRect,
+    layer: *mut c_void,
+    state: Option<CompositionViewState>,
+) -> Retained<Objc2NSView> {
+    unsafe {
+        let view: ObjcId = msg_send![&*COMPOSITION_VIEW_CLASS, alloc];
+        let view: ObjcId = msg_send![view, initWithFrame: frame];
+        assert!(
+            !view.is_null(),
+            "AppKit failed to create a composition view"
+        );
+
+        let object = &mut *view;
+        let layer_ivar = object
+            .class()
+            .instance_variable(CString::new(COMPOSITION_LAYER_IVAR).unwrap().as_c_str())
+            .unwrap();
+        *layer_ivar.load_mut::<*mut c_void>(object) = layer;
+        let state_ivar = object
+            .class()
+            .instance_variable(
+                CString::new(COMPOSITION_VIEW_STATE_IVAR)
+                    .unwrap()
+                    .as_c_str(),
+            )
+            .unwrap();
+        *state_ivar.load_mut::<*mut c_void>(object) = state
+            .map(Box::new)
+            .map(Box::into_raw)
+            .map_or(ptr::null_mut(), |state| state.cast());
+        let _: () = msg_send![view, setWantsLayer: Bool::new(true)];
+
+        Retained::from_raw(view.cast()).expect("initialized composition view")
+    }
+}
+
+impl MacCompositionAttachment {
+    fn new() -> Rc<dyn PlatformSurfaceAttachment> {
+        let layer = gpui_apple::metal_renderer::new_window_layer(true);
+        let view = new_composition_view(
+            Objc2NSRect::new(Objc2NSPoint::new(0., 0.), NSSize::new(1., 1.)),
+            layer.as_ptr().cast(),
+            None,
+        );
+        Rc::new(Self {
+            view,
+            _layer: layer,
+        })
+    }
+}
+
+fn appkit_view(attachment: &dyn PlatformSurfaceAttachment) -> anyhow::Result<ObjcId> {
+    let PlatformSurfaceHandle::Window(handle) = attachment.platform_handle();
+    let rwh::RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        anyhow::bail!("macOS composition attachments must provide an AppKit NSView");
+    };
+    Ok(handle.ns_view.as_ptr().cast())
+}
+
+fn composition_child_frame(child: Bounds<Pixels>, parent: Bounds<Pixels>) -> Objc2NSRect {
+    Objc2NSRect::new(
+        Objc2NSPoint::new(
+            (child.origin.x - parent.origin.x).to_f64(),
+            (parent.origin.y + parent.size.height - child.origin.y - child.size.height).to_f64(),
+        ),
+        NSSize::new(child.size.width.to_f64(), child.size.height.to_f64()),
+    )
+}
+
+fn composition_surface_frame(
+    surface: CompositionSurface<'_>,
+    window_bounds: Bounds<Pixels>,
+    scale_factor: f32,
+) -> Objc2NSRect {
+    let child_bounds = surface
+        .bounds()
+        .map(|bounds| bounds.to_pixels(scale_factor))
+        .unwrap_or(window_bounds);
+    let parent_bounds = surface
+        .parent_bounds()
+        .map(|bounds| bounds.to_pixels(scale_factor))
+        .unwrap_or(window_bounds);
+    composition_child_frame(child_bounds, parent_bounds)
+}
+
+fn composition_window_point(root_bounds: Objc2NSRect, root_point: Objc2NSPoint) -> Point<Pixels> {
+    point(
+        px((root_point.x - root_bounds.origin.x) as f32),
+        px((root_bounds.origin.y + root_bounds.size.height - root_point.y) as f32),
+    )
+}
+
+fn composition_hit_regions_contain(regions: &[Bounds<Pixels>], point: Point<Pixels>) -> bool {
+    regions.iter().any(|bounds| bounds.contains(&point))
+}
+
+fn set_view_frame_if_changed(view: ObjcId, frame: Objc2NSRect) {
+    unsafe {
+        let current: Objc2NSRect = msg_send![view, frame];
+        if current.origin.x != frame.origin.x
+            || current.origin.y != frame.origin.y
+            || current.size.width != frame.size.width
+            || current.size.height != frame.size.height
+        {
+            let _: () = msg_send![view, setFrame: frame];
+        }
+    }
+}
+
 unsafe extern "C" fn yes(_: &Objc2Object, _: Sel) -> Bool {
     Bool::new(true)
 }
@@ -2866,6 +3412,9 @@ unsafe extern "C" fn handle_view_event(this: &Objc2Object, _: Sel, native_event:
     let native_event_type = unsafe { native_event.eventType() };
     match native_event_type {
         NSEventType::LeftMouseDown => {
+            let native_window = lock.native_window;
+            let native_view = lock.native_view.as_ptr();
+            unsafe { native_window.makeFirstResponder_(native_view) };
             // AppKit owns `native_event` for the callback; retain it so the drag session can still
             // be started later, once the pointer leaves the window.
             lock.last_left_mouse_down_event =
@@ -3117,6 +3666,7 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     }
 
     lock.renderer.update_drawable_size(drawable_size);
+    lock.resize_composition_outputs(drawable_size);
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();
@@ -3296,6 +3846,7 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
     let scale_factor = lock.scale_factor();
     let drawable_size = new_size.to_device_pixels(scale_factor);
     lock.renderer.update_drawable_size(drawable_size);
+    lock.resize_composition_outputs(drawable_size);
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();
