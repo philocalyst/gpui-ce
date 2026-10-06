@@ -35,7 +35,7 @@ use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
     protocol::{
         wl_buffer, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm,
-        wl_shm_pool, wl_surface,
+        wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface,
     },
 };
 use wayland_protocols::wp::primary_selection::zv1::client::{
@@ -218,6 +218,7 @@ pub struct Globals {
     pub qh: QueueHandle<WaylandClientStatePtr>,
     pub activation: Option<xdg_activation_v1::XdgActivationV1>,
     pub compositor: wl_compositor::WlCompositor,
+    pub subcompositor: Option<wl_subcompositor::WlSubcompositor>,
     pub cursor_shape_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     pub data_device_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
     pub primary_selection_manager:
@@ -259,6 +260,7 @@ impl Globals {
                     (),
                 )
                 .unwrap(),
+            subcompositor: globals.bind(&qh, 1..=1, ()).ok(),
             cursor_shape_manager: globals.bind(&qh, 1..=1, ()).ok(),
             data_device_manager: globals
                 .bind(
@@ -343,6 +345,8 @@ pub(crate) struct WaylandClientState {
     last_ime_cursor_rectangle: Option<ImeCursorRectangle>,
     // Surface to Window mapping
     windows: HashMap<ObjectId, WaylandWindowStatePtr>,
+    // GPUI subsurfaces receive pointer coordinates relative to themselves.
+    composition_input_surfaces: HashMap<ObjectId, (WaylandWindowStatePtr, Point<Pixels>)>,
     // Output to scale mapping
     outputs: HashMap<ObjectId, Output>,
     in_progress_outputs: HashMap<ObjectId, InProgressOutput>,
@@ -367,6 +371,7 @@ pub(crate) struct WaylandClientState {
     enter_token: Option<()>,
     button_pressed: Option<MouseButton>,
     mouse_focused_window: Option<WaylandWindowStatePtr>,
+    mouse_focused_surface: Option<ObjectId>,
     keyboard_focused_window: Option<WaylandWindowStatePtr>,
     loop_handle: LoopHandle<'static, WaylandClientStatePtr>,
     cursor_style: Option<CursorStyle>,
@@ -387,6 +392,7 @@ pub struct DragState {
     data_offer: Option<wl_data_offer::WlDataOffer>,
     window: Option<WaylandWindowStatePtr>,
     position: Point<Pixels>,
+    surface: Option<ObjectId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -590,6 +596,25 @@ impl WaylandClientStatePtr {
         client.borrow().ime_enabled
     }
 
+    pub fn register_composition_input_surface(
+        &self,
+        surface_id: ObjectId,
+        window: WaylandWindowStatePtr,
+        origin: Point<Pixels>,
+    ) {
+        self.get_client()
+            .borrow_mut()
+            .composition_input_surfaces
+            .insert(surface_id, (window, origin));
+    }
+
+    pub fn unregister_composition_input_surface(&self, surface_id: &ObjectId) {
+        self.get_client()
+            .borrow_mut()
+            .composition_input_surfaces
+            .remove(surface_id);
+    }
+
     pub fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let client = self.get_client();
         let mut state = client.borrow_mut();
@@ -635,6 +660,9 @@ impl WaylandClientStatePtr {
         let client = self.get_client();
         let mut state = client.borrow_mut();
         let closed_window = state.windows.remove(surface_id).unwrap();
+        state
+            .composition_input_surfaces
+            .retain(|_, (window, _)| !window.ptr_eq(&closed_window));
         if let Some(window) = state.mouse_focused_window.take()
             && !window.ptr_eq(&closed_window)
         {
@@ -932,6 +960,7 @@ impl WaylandClient {
             in_progress_outputs,
             wl_outputs,
             windows: HashMap::default(),
+            composition_input_surfaces: HashMap::default(),
             common,
             keyboard_layout: LinuxKeyboardLayout::new(UNKNOWN_KEYBOARD_LAYOUT_NAME),
             keymap_state: None,
@@ -940,6 +969,7 @@ impl WaylandClient {
                 data_offer: None,
                 window: None,
                 position: Point::default(),
+                surface: None,
             },
             external_drag: None,
             click: ClickState {
@@ -972,6 +1002,7 @@ impl WaylandClient {
             horizontal_modifier: -1.0,
             button_pressed: None,
             mouse_focused_window: None,
+            mouse_focused_surface: None,
             keyboard_focused_window: None,
             loop_handle: handle.clone(),
             enter_token: None,
@@ -1430,6 +1461,8 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
 delegate_noop!(WaylandClientStatePtr: ignore xdg_activation_v1::XdgActivationV1);
 delegate_noop!(WaylandClientStatePtr: ignore xdg_system_bell_v1::XdgSystemBellV1);
 delegate_noop!(WaylandClientStatePtr: ignore wl_compositor::WlCompositor);
+delegate_noop!(WaylandClientStatePtr: ignore wl_subcompositor::WlSubcompositor);
+delegate_noop!(WaylandClientStatePtr: ignore wl_subsurface::WlSubsurface);
 delegate_noop!(WaylandClientStatePtr: ignore wp_cursor_shape_device_v1::WpCursorShapeDeviceV1);
 delegate_noop!(WaylandClientStatePtr: ignore wp_cursor_shape_manager_v1::WpCursorShapeManagerV1);
 delegate_noop!(WaylandClientStatePtr: ignore wl_data_device_manager::WlDataDeviceManager);
@@ -1483,6 +1516,15 @@ pub(crate) fn get_window(
     surface_id: &ObjectId,
 ) -> Option<WaylandWindowStatePtr> {
     state.windows.get(surface_id).cloned()
+}
+
+fn get_input_target(
+    state: &mut RefMut<WaylandClientState>,
+    surface_id: &ObjectId,
+) -> Option<(WaylandWindowStatePtr, Point<Pixels>)> {
+    get_window(state, surface_id)
+        .map(|window| (window, Point::default()))
+        .or_else(|| state.composition_input_surfaces.get(surface_id).cloned())
 }
 
 impl Dispatch<wl_surface::WlSurface, ()> for WaylandClientStatePtr {
