@@ -4504,6 +4504,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn composition_child_frames_keep_window_content_offsets() {
+        let parent = Bounds::new(point(px(120.), px(80.)), size(px(400.), px(300.)));
+        let child = Bounds::new(point(px(170.), px(105.)), size(px(100.), px(40.)));
+
+        let frame = composition_child_frame(child, parent);
+
+        assert_eq!(frame.origin.x, 50.);
+        assert_eq!(frame.origin.y, 235.);
+        assert_eq!(frame.size.width, 100.);
+        assert_eq!(frame.size.height, 40.);
+    }
+
+    #[test]
+    fn composition_hit_testing_routes_covered_overlay_regions_only() {
+        let regions = [Bounds::new(point(px(40.), px(50.)), size(px(80.), px(20.)))];
+
+        assert!(composition_hit_regions_contain(
+            &regions,
+            point(px(45.), px(55.))
+        ));
+        assert!(!composition_hit_regions_contain(
+            &regions,
+            point(px(39.), px(55.))
+        ));
+        assert!(!composition_hit_regions_contain(
+            &[],
+            point(px(45.), px(55.))
+        ));
+    }
+
+    #[test]
+    fn composition_hit_testing_translates_appkit_coordinates_to_window_content() {
+        let root_bounds = Objc2NSRect::new(Objc2NSPoint::new(9., 17.), NSSize::new(400., 300.));
+        let native_point = Objc2NSPoint::new(59., 267.);
+
+        assert_eq!(
+            composition_window_point(root_bounds, native_point),
+            point(px(50.), px(50.))
+        );
+    }
+
+    #[test]
     fn display_id_for_screen_returns_none_for_null_screen() {
         assert_eq!(display_id_for_screen(NIL), None);
     }
