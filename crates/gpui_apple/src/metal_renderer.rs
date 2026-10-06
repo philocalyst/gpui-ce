@@ -37,7 +37,7 @@ use parking_lot::Mutex;
 use smallvec::SmallVec;
 use wgsl_rs::std::{vec2f, vec4f};
 
-use std::{cell::Cell, mem, ptr, sync::Arc};
+use std::{cell::Cell, mem, ptr, rc::Rc, sync::Arc};
 
 // Use 4x MSAA, all devices support it.
 // https://developer.apple.com/documentation/metal/mtldevice/1433355-supportstexturesamplecount
@@ -230,14 +230,10 @@ impl InstanceBufferPool {
     }
 }
 
-pub struct MetalRenderer {
+struct SharedRendererResources {
     device: metal::Device,
-    layer: Option<metal::MetalLayer>,
     is_apple_gpu: bool,
     is_unified_memory: bool,
-    presents_with_transaction: bool,
-    /// For headless rendering, tracks whether output should be opaque
-    opaque: bool,
     command_queue: CommandQueue,
     paths_rasterization_pipeline_state: metal::RenderPipelineState,
     path_sprites_pipeline_state: metal::RenderPipelineState,
@@ -261,6 +257,14 @@ pub struct MetalRenderer {
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     sprite_atlas: Arc<MetalAtlas>,
     core_video_texture_cache: core_video::metal_texture_cache::CVMetalTextureCache,
+}
+
+pub struct MetalRenderer {
+    shared: Rc<SharedRendererResources>,
+    layer: Option<metal::MetalLayer>,
+    presents_with_transaction: bool,
+    /// For headless rendering, tracks whether output should be opaque
+    opaque: bool,
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
     // Offscreen scene target (the scene is rendered here, then blitted to the drawable, so blur
@@ -295,7 +299,31 @@ impl MetalRenderer {
         #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
         layer.set_framebuffer_only(false);
 
-        Self::new_internal(device, Some(layer), !transparent, instance_buffer_pool)
+        Self::new_internal(
+            device,
+            Some(layer),
+            !transparent,
+            instance_buffer_pool,
+            None,
+        )
+    }
+
+    /// Creates another output on the base renderer's device and shared resource set.
+    pub fn new_composition_surface(
+        base: &Self,
+        layer: metal::MetalLayer,
+        transparent: bool,
+    ) -> Self {
+        layer.set_device(&base.shared.device);
+        layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        layer.set_maximum_drawable_count(3);
+        Self::new_internal(
+            base.shared.device.clone(),
+            Some(layer),
+            !transparent,
+            Arc::clone(&base.shared.instance_buffer_pool),
+            Some(Rc::clone(&base.shared)),
+        )
     }
 
     /// Creates a new headless MetalRenderer for offscreen rendering without a window.
@@ -305,7 +333,7 @@ impl MetalRenderer {
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     pub fn new_headless(instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>) -> Self {
         let device = Self::create_device();
-        Self::new_internal(device, None, true, instance_buffer_pool)
+        Self::new_internal(device, None, true, instance_buffer_pool, None)
     }
 
     fn create_device() -> metal::Device {
@@ -335,187 +363,194 @@ impl MetalRenderer {
         layer: Option<metal::MetalLayer>,
         opaque: bool,
         instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
+        shared: Option<Rc<SharedRendererResources>>,
     ) -> Self {
-        // Shared memory can be used only if CPU and GPU share the same memory space.
-        // https://developer.apple.com/documentation/metal/setting-resource-storage-modes
-        let is_unified_memory = device.has_unified_memory();
-        // Apple GPU families support memoryless textures, which can significantly reduce
-        // memory usage by keeping render targets in on-chip tile memory instead of
-        // allocating backing store in system memory.
-        // https://developer.apple.com/documentation/metal/mtlgpufamily
-        let is_apple_gpu = device.supports_family(MTLGPUFamily::Apple1);
+        let shared = shared.unwrap_or_else(|| {
+            // Shared memory can be used only if CPU and GPU share the same memory space.
+            // https://developer.apple.com/documentation/metal/setting-resource-storage-modes
+            let is_unified_memory = device.has_unified_memory();
+            // Apple GPU families support memoryless textures, which can significantly reduce
+            // memory usage by keeping render targets in on-chip tile memory instead of
+            // allocating backing store in system memory.
+            // https://developer.apple.com/documentation/metal/mtlgpufamily
+            let is_apple_gpu = device.supports_family(MTLGPUFamily::Apple1);
 
-        // Compile the Naga-generated MSL with the device's runtime compiler, deduplicating
-        // per source so each module compiles exactly once.
-        let mut libraries: Vec<(&'static str, metal::Library)> = Vec::new();
-        let mut library_for = |source: &'static str| -> metal::Library {
-            if let Some((_, library)) = libraries
-                .iter()
-                .find(|(registered, _)| *registered == source)
-            {
-                return library.clone();
-            }
-            let library = device
-                .new_library_with_source(source, &metal::CompileOptions::new())
-                .unwrap_or_else(|error| panic!("error building metal library: {error}"));
-            libraries.push((source, library.clone()));
-            library
-        };
+            // Compile the Naga-generated MSL with the device's runtime compiler, deduplicating
+            // per source so each module compiles exactly once.
+            let mut libraries: Vec<(&'static str, metal::Library)> = Vec::new();
+            let mut library_for = |source: &'static str| -> metal::Library {
+                if let Some((_, library)) = libraries
+                    .iter()
+                    .find(|(registered, _)| *registered == source)
+                {
+                    return library.clone();
+                }
+                let library = device
+                    .new_library_with_source(source, &metal::CompileOptions::new())
+                    .unwrap_or_else(|error| panic!("error building metal library: {error}"));
+                libraries.push((source, library.clone()));
+                library
+            };
 
-        let mut pipeline = |label: &str| -> (&'static NativeShader, metal::Library) {
-            let shader = native_shader(label);
-            (shader, library_for(shader.msl))
-        };
+            let mut pipeline = |label: &str| -> (&'static NativeShader, metal::Library) {
+                let shader = native_shader(label);
+                (shader, library_for(shader.msl))
+            };
 
-        let (path_rasterization_shader, path_rasterization_library) =
-            pipeline("path_rasterization");
-        let paths_rasterization_pipeline_state = build_path_rasterization_pipeline_state(
-            &device,
-            &path_rasterization_library,
-            path_rasterization_shader,
-            MTLPixelFormat::BGRA8Unorm,
-            PATH_SAMPLE_COUNT,
-        );
-        let (paths_shader, paths_library) = pipeline("paths");
-        let path_sprites_pipeline_state = build_path_sprite_pipeline_state(
-            &device,
-            &paths_library,
-            paths_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
-        let (shadows_shader, shadows_library) = pipeline("shadows");
-        let shadows_pipeline_state = build_pipeline_state(
-            &device,
-            &shadows_library,
-            shadows_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
-        let (smoothed_shadows_shader, smoothed_shadows_library) = pipeline("smoothed_shadows");
-        let smoothed_shadows_pipeline_state = build_pipeline_state(
-            &device,
-            &smoothed_shadows_library,
-            smoothed_shadows_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
-        let (quads_shader, quads_library) = pipeline("quads");
-        let quads_pipeline_state = build_pipeline_state(
-            &device,
-            &quads_library,
-            quads_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
-        let (smoothed_quads_shader, smoothed_quads_library) = pipeline("smoothed_quads");
-        let smoothed_quads_pipeline_state = build_pipeline_state(
-            &device,
-            &smoothed_quads_library,
-            smoothed_quads_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
-        let (underlines_shader, underlines_library) = pipeline("underlines");
-        let underlines_pipeline_state = build_pipeline_state(
-            &device,
-            &underlines_library,
-            underlines_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
-        let (monochrome_shader, monochrome_library) = pipeline("monochrome_sprites");
-        let monochrome_sprites_pipeline_state = build_pipeline_state(
-            &device,
-            &monochrome_library,
-            monochrome_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
-        let (polychrome_shader, polychrome_library) = pipeline("polychrome_sprites");
-        let polychrome_sprites_pipeline_state = build_pipeline_state(
-            &device,
-            &polychrome_library,
-            polychrome_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
-        let (smoothed_polychrome_shader, smoothed_polychrome_library) =
-            pipeline("smoothed_polychrome_sprites");
-        let smoothed_polychrome_sprites_pipeline_state = build_pipeline_state(
-            &device,
-            &smoothed_polychrome_library,
-            smoothed_polychrome_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
-        let (surfaces_shader, surfaces_library) = pipeline("surfaces");
-        let surfaces_pipeline_state = build_pipeline_state(
-            &device,
-            &surfaces_library,
-            surfaces_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
-        let (blur_downsample_shader, blur_downsample_library) = pipeline("blur_downsample");
-        let blur_downsample_pipeline_state = build_blur_pipeline_state(
-            &device,
-            &blur_downsample_library,
-            blur_downsample_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
-        let (blur_shader, blur_library) = pipeline("blur");
-        let blur_pipeline_state = build_blur_pipeline_state(
-            &device,
-            &blur_library,
-            blur_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
-        // Premultiplied blend (One / OneMinusSourceAlpha) — the composite outputs a premultiplied
-        // blurred sample; straight-alpha blending would darken the faded edges.
-        let (blur_composite_shader, blur_composite_library) = pipeline("blur_composite");
-        let blur_composite_pipeline_state = build_path_sprite_pipeline_state(
-            &device,
-            &blur_composite_library,
-            blur_composite_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
-        let (smoothed_blur_composite_shader, smoothed_blur_composite_library) =
-            pipeline("smoothed_blur_composite");
-        let smoothed_blur_composite_pipeline_state = build_path_sprite_pipeline_state(
-            &device,
-            &smoothed_blur_composite_library,
-            smoothed_blur_composite_shader,
-            MTLPixelFormat::BGRA8Unorm,
-        );
+            let (path_rasterization_shader, path_rasterization_library) =
+                pipeline("path_rasterization");
+            let paths_rasterization_pipeline_state = build_path_rasterization_pipeline_state(
+                &device,
+                &path_rasterization_library,
+                path_rasterization_shader,
+                MTLPixelFormat::BGRA8Unorm,
+                PATH_SAMPLE_COUNT,
+            );
+            let (paths_shader, paths_library) = pipeline("paths");
+            let path_sprites_pipeline_state = build_path_sprite_pipeline_state(
+                &device,
+                &paths_library,
+                paths_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
+            let (shadows_shader, shadows_library) = pipeline("shadows");
+            let shadows_pipeline_state = build_pipeline_state(
+                &device,
+                &shadows_library,
+                shadows_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
+            let (smoothed_shadows_shader, smoothed_shadows_library) = pipeline("smoothed_shadows");
+            let smoothed_shadows_pipeline_state = build_pipeline_state(
+                &device,
+                &smoothed_shadows_library,
+                smoothed_shadows_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
+            let (quads_shader, quads_library) = pipeline("quads");
+            let quads_pipeline_state = build_pipeline_state(
+                &device,
+                &quads_library,
+                quads_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
+            let (smoothed_quads_shader, smoothed_quads_library) = pipeline("smoothed_quads");
+            let smoothed_quads_pipeline_state = build_pipeline_state(
+                &device,
+                &smoothed_quads_library,
+                smoothed_quads_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
+            let (underlines_shader, underlines_library) = pipeline("underlines");
+            let underlines_pipeline_state = build_pipeline_state(
+                &device,
+                &underlines_library,
+                underlines_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
+            let (monochrome_shader, monochrome_library) = pipeline("monochrome_sprites");
+            let monochrome_sprites_pipeline_state = build_pipeline_state(
+                &device,
+                &monochrome_library,
+                monochrome_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
+            let (polychrome_shader, polychrome_library) = pipeline("polychrome_sprites");
+            let polychrome_sprites_pipeline_state = build_pipeline_state(
+                &device,
+                &polychrome_library,
+                polychrome_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
+            let (smoothed_polychrome_shader, smoothed_polychrome_library) =
+                pipeline("smoothed_polychrome_sprites");
+            let smoothed_polychrome_sprites_pipeline_state = build_pipeline_state(
+                &device,
+                &smoothed_polychrome_library,
+                smoothed_polychrome_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
+            let (surfaces_shader, surfaces_library) = pipeline("surfaces");
+            let surfaces_pipeline_state = build_pipeline_state(
+                &device,
+                &surfaces_library,
+                surfaces_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
+            let (blur_downsample_shader, blur_downsample_library) = pipeline("blur_downsample");
+            let blur_downsample_pipeline_state = build_blur_pipeline_state(
+                &device,
+                &blur_downsample_library,
+                blur_downsample_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
+            let (blur_shader, blur_library) = pipeline("blur");
+            let blur_pipeline_state = build_blur_pipeline_state(
+                &device,
+                &blur_library,
+                blur_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
+            // Premultiplied blend (One / OneMinusSourceAlpha) — the composite outputs a premultiplied
+            // blurred sample; straight-alpha blending would darken the faded edges.
+            let (blur_composite_shader, blur_composite_library) = pipeline("blur_composite");
+            let blur_composite_pipeline_state = build_path_sprite_pipeline_state(
+                &device,
+                &blur_composite_library,
+                blur_composite_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
+            let (smoothed_blur_composite_shader, smoothed_blur_composite_library) =
+                pipeline("smoothed_blur_composite");
+            let smoothed_blur_composite_pipeline_state = build_path_sprite_pipeline_state(
+                &device,
+                &smoothed_blur_composite_library,
+                smoothed_blur_composite_shader,
+                MTLPixelFormat::BGRA8Unorm,
+            );
 
-        let sampler_descriptor = SamplerDescriptor::new();
-        sampler_descriptor.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
-        sampler_descriptor.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
-        let sampler = device.new_sampler(&sampler_descriptor);
+            let sampler_descriptor = SamplerDescriptor::new();
+            sampler_descriptor.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
+            sampler_descriptor.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
+            let sampler = device.new_sampler(&sampler_descriptor);
 
-        let command_queue = device.new_command_queue();
-        let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
-        let core_video_texture_cache =
-            CVMetalTextureCache::new(None, device.clone(), None).unwrap();
+            let command_queue = device.new_command_queue();
+            let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
+            let core_video_texture_cache =
+                CVMetalTextureCache::new(None, device.clone(), None).unwrap();
+
+            Rc::new(SharedRendererResources {
+                device,
+                is_apple_gpu,
+                is_unified_memory,
+                command_queue,
+                paths_rasterization_pipeline_state,
+                path_sprites_pipeline_state,
+                shadows_pipeline_state,
+                smoothed_shadows_pipeline_state,
+                quads_pipeline_state,
+                smoothed_quads_pipeline_state,
+                underlines_pipeline_state,
+                monochrome_sprites_pipeline_state,
+                polychrome_sprites_pipeline_state,
+                smoothed_polychrome_sprites_pipeline_state,
+                surfaces_pipeline_state,
+                blur_downsample_pipeline_state,
+                blur_pipeline_state,
+                blur_composite_pipeline_state,
+                smoothed_blur_composite_pipeline_state,
+                sampler,
+                instance_buffer_pool,
+                sprite_atlas,
+                core_video_texture_cache,
+            })
+        });
 
         Self {
-            device,
+            shared,
             layer,
             presents_with_transaction: false,
-            is_apple_gpu,
-            is_unified_memory,
             opaque,
-            command_queue,
-            paths_rasterization_pipeline_state,
-            path_sprites_pipeline_state,
-            shadows_pipeline_state,
-            smoothed_shadows_pipeline_state,
-            quads_pipeline_state,
-            smoothed_quads_pipeline_state,
-            underlines_pipeline_state,
-            monochrome_sprites_pipeline_state,
-            polychrome_sprites_pipeline_state,
-            smoothed_polychrome_sprites_pipeline_state,
-            surfaces_pipeline_state,
-            blur_downsample_pipeline_state,
-            blur_pipeline_state,
-            blur_composite_pipeline_state,
-            smoothed_blur_composite_pipeline_state,
-            sampler,
-            instance_buffer_pool,
-            sprite_atlas,
-            core_video_texture_cache,
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             scene_color_texture: None,
@@ -541,7 +576,7 @@ impl MetalRenderer {
     }
 
     pub fn sprite_atlas(&self) -> &Arc<MetalAtlas> {
-        &self.sprite_atlas
+        &self.shared.sprite_atlas
     }
 
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
@@ -579,6 +614,8 @@ impl MetalRenderer {
         let requirements = scene.render_plan().requirements();
         let full_w = size.width.0 as u64;
         let full_h = size.height.0 as u64;
+        let device = self.shared.device.clone();
+        let is_apple_gpu = self.shared.is_apple_gpu;
 
         let make_color_texture = |width: u64, height: u64| {
             let descriptor = metal::TextureDescriptor::new();
@@ -589,7 +626,7 @@ impl MetalRenderer {
             descriptor.set_usage(
                 metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
             );
-            self.device.new_texture(&descriptor)
+            device.new_texture(&descriptor)
         };
 
         if requirements.uses_path_target && self.path_intermediate_texture.is_none() {
@@ -601,13 +638,13 @@ impl MetalRenderer {
             texture_descriptor.set_usage(
                 metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
             );
-            self.path_intermediate_texture = Some(self.device.new_texture(&texture_descriptor));
+            self.path_intermediate_texture = Some(device.new_texture(&texture_descriptor));
 
             // Storage mode guidance:
             // https://developer.apple.com/documentation/metal/choosing-a-resource-storage-mode-for-apple-gpus
             // Rendering MSAA textures are done in a single pass, so we can use memory-less storage on Apple Silicon
             if self.path_sample_count > 1 {
-                let storage_mode = if self.is_apple_gpu {
+                let storage_mode = if is_apple_gpu {
                     metal::MTLStorageMode::Memoryless
                 } else {
                     metal::MTLStorageMode::Private
@@ -616,8 +653,7 @@ impl MetalRenderer {
                 msaa_descriptor.set_texture_type(metal::MTLTextureType::D2Multisample);
                 msaa_descriptor.set_storage_mode(storage_mode);
                 msaa_descriptor.set_sample_count(self.path_sample_count as _);
-                self.path_intermediate_msaa_texture =
-                    Some(self.device.new_texture(&msaa_descriptor));
+                self.path_intermediate_msaa_texture = Some(device.new_texture(&msaa_descriptor));
             }
         }
 
@@ -720,7 +756,10 @@ impl MetalRenderer {
 
         command_buffer.commit();
         command_buffer.wait_until_completed();
-        self.instance_buffer_pool.lock().release(instance_buffer);
+        self.shared
+            .instance_buffer_pool
+            .lock()
+            .release(instance_buffer);
 
         let texture = drawable.texture();
         let width = texture.width() as u32;
@@ -771,20 +810,23 @@ impl MetalRenderer {
         texture_descriptor
             .set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
         texture_descriptor.set_storage_mode(metal::MTLStorageMode::Managed);
-        let target_texture = self.device.new_texture(&texture_descriptor);
+        let target_texture = self.shared.device.new_texture(&texture_descriptor);
 
         let mut instance_buffer = self.acquire_instance_buffer(scene);
         let command_buffer =
             self.draw_primitives_to_texture(scene, &mut instance_buffer, &target_texture, size)?;
 
-        if !self.is_unified_memory {
+        if !self.shared.is_unified_memory {
             let blit = command_buffer.new_blit_command_encoder();
             blit.synchronize_resource(&target_texture);
             blit.end_encoding();
         }
         command_buffer.commit();
         command_buffer.wait_until_completed();
-        self.instance_buffer_pool.lock().release(instance_buffer);
+        self.shared
+            .instance_buffer_pool
+            .lock()
+            .release(instance_buffer);
 
         let width = size.width.0 as u32;
         let height = size.height.0 as u32;
@@ -837,7 +879,7 @@ impl MetalRenderer {
                 metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead,
             );
             texture_descriptor.set_storage_mode(metal::MTLStorageMode::Private);
-            self.headless_render_target = Some(self.device.new_texture(&texture_descriptor));
+            self.headless_render_target = Some(self.shared.device.new_texture(&texture_descriptor));
         }
         let target_texture = self
             .headless_render_target
@@ -853,9 +895,9 @@ impl MetalRenderer {
     }
 
     fn acquire_instance_buffer(&self, scene: &Scene) -> InstanceBuffer {
-        self.instance_buffer_pool.lock().acquire(
-            &self.device,
-            self.is_unified_memory,
+        self.shared.instance_buffer_pool.lock().acquire(
+            &self.shared.device,
+            self.shared.is_unified_memory,
             required_instance_buffer_size(scene),
         )
     }
@@ -865,7 +907,7 @@ impl MetalRenderer {
         command_buffer: &metal::CommandBufferRef,
         instance_buffer: InstanceBuffer,
     ) {
-        let instance_buffer_pool = self.instance_buffer_pool.clone();
+        let instance_buffer_pool = self.shared.instance_buffer_pool.clone();
         let instance_buffer = Cell::new(Some(instance_buffer));
         let block = ConcreteBlock::new(move |_| {
             if let Some(instance_buffer) = instance_buffer.take() {
@@ -893,7 +935,7 @@ impl MetalRenderer {
         viewport_size: Size<DevicePixels>,
     ) -> Result<metal::CommandBuffer> {
         self.prepare_intermediate_textures(scene, viewport_size);
-        let command_queue = self.command_queue.clone();
+        let command_queue = self.shared.command_queue.clone();
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.opaque { 1. } else { 0. };
         let mut instance_offset = 0;
@@ -1158,7 +1200,7 @@ impl MetalRenderer {
         if use_offscreen && scene_color_owned.is_some() {
             self.run_metal_blur_pass(
                 command_buffer,
-                &self.blur_downsample_pipeline_state,
+                &self.shared.blur_downsample_pipeline_state,
                 texture,
                 scene_color,
                 viewport_size,
@@ -1179,7 +1221,7 @@ impl MetalRenderer {
             );
         }
 
-        if !self.is_unified_memory {
+        if !self.shared.is_unified_memory {
             // Sync the instance buffer to the GPU
             instance_buffer.metal_buffer.did_modify_range(NSRange {
                 location: 0,
@@ -1240,7 +1282,7 @@ impl MetalRenderer {
             &params as *const BlurUniforms as *const _,
         );
         encoder.set_fragment_texture(PRIMARY_TEXTURE_SLOT, Some(source));
-        encoder.set_fragment_sampler_state(SAMPLER_SLOT, Some(&self.sampler));
+        encoder.set_fragment_sampler_state(SAMPLER_SLOT, Some(&self.shared.sampler));
         encoder.draw_primitives(primitive, 0, vertex_count);
         encoder.end_encoding();
     }
@@ -1296,7 +1338,7 @@ impl MetalRenderer {
         // Downsample source -> ping, then separable gaussian ping -> pong -> ping.
         self.run_metal_blur_pass(
             command_buffer,
-            &self.blur_downsample_pipeline_state,
+            &self.shared.blur_downsample_pipeline_state,
             ping,
             source,
             blur_viewport_size,
@@ -1309,7 +1351,7 @@ impl MetalRenderer {
         );
         self.run_metal_blur_pass(
             command_buffer,
-            &self.blur_pipeline_state,
+            &self.shared.blur_pipeline_state,
             pong,
             ping,
             blur_viewport_size,
@@ -1322,7 +1364,7 @@ impl MetalRenderer {
         );
         self.run_metal_blur_pass(
             command_buffer,
-            &self.blur_pipeline_state,
+            &self.shared.blur_pipeline_state,
             ping,
             pong,
             blur_viewport_size,
@@ -1359,9 +1401,9 @@ impl MetalRenderer {
             },
         );
         let pipeline = if composite_uniforms.corner_smoothing > 0.0 {
-            &self.smoothed_blur_composite_pipeline_state
+            &self.shared.smoothed_blur_composite_pipeline_state
         } else {
-            &self.blur_composite_pipeline_state
+            &self.shared.blur_composite_pipeline_state
         };
         encoder.set_render_pipeline_state(pipeline);
         bind_scene_uniforms(encoder, scene_uniforms);
@@ -1376,7 +1418,7 @@ impl MetalRenderer {
             &composite_uniforms as *const BlurUniforms as *const _,
         );
         encoder.set_fragment_texture(PRIMARY_TEXTURE_SLOT, Some(ping));
-        encoder.set_fragment_sampler_state(SAMPLER_SLOT, Some(&self.sampler));
+        encoder.set_fragment_sampler_state(SAMPLER_SLOT, Some(&self.shared.sampler));
         encoder.draw_primitives(metal::MTLPrimitiveType::TriangleStrip, 0, 4);
         encoder.end_encoding();
     }
@@ -1415,7 +1457,7 @@ impl MetalRenderer {
         }
 
         let command_encoder = command_buffer.new_render_command_encoder(render_pass_descriptor);
-        command_encoder.set_render_pipeline_state(&self.paths_rasterization_pipeline_state);
+        command_encoder.set_render_pipeline_state(&self.shared.paths_rasterization_pipeline_state);
         bind_scene_uniforms(command_encoder, scene_uniforms);
 
         align_offset(instance_offset);
@@ -1479,9 +1521,9 @@ impl MetalRenderer {
         }
 
         let pipeline = if smoothed {
-            &self.smoothed_shadows_pipeline_state
+            &self.shared.smoothed_shadows_pipeline_state
         } else {
-            &self.shadows_pipeline_state
+            &self.shared.shadows_pipeline_state
         };
         command_encoder.set_render_pipeline_state(pipeline);
         bind_scene_uniforms(command_encoder, scene_uniforms);
@@ -1533,9 +1575,9 @@ impl MetalRenderer {
         }
 
         let pipeline = if smoothed {
-            &self.smoothed_quads_pipeline_state
+            &self.shared.smoothed_quads_pipeline_state
         } else {
-            &self.quads_pipeline_state
+            &self.shared.quads_pipeline_state
         };
         command_encoder.set_render_pipeline_state(pipeline);
         bind_scene_uniforms(command_encoder, scene_uniforms);
@@ -1593,10 +1635,10 @@ impl MetalRenderer {
             return false;
         }
 
-        command_encoder.set_render_pipeline_state(&self.path_sprites_pipeline_state);
+        command_encoder.set_render_pipeline_state(&self.shared.path_sprites_pipeline_state);
         bind_scene_uniforms(command_encoder, scene_uniforms);
         command_encoder.set_fragment_texture(PRIMARY_TEXTURE_SLOT, Some(intermediate_texture));
-        command_encoder.set_fragment_sampler_state(SAMPLER_SLOT, Some(&self.sampler));
+        command_encoder.set_fragment_sampler_state(SAMPLER_SLOT, Some(&self.shared.sampler));
 
         let buffer_contents =
             unsafe { (instance_buffer.metal_buffer.contents() as *mut u8).add(*instance_offset) }
@@ -1648,7 +1690,7 @@ impl MetalRenderer {
             return false;
         }
 
-        command_encoder.set_render_pipeline_state(&self.underlines_pipeline_state);
+        command_encoder.set_render_pipeline_state(&self.shared.underlines_pipeline_state);
         bind_scene_uniforms(command_encoder, scene_uniforms);
 
         let buffer_contents =
@@ -1697,8 +1739,8 @@ impl MetalRenderer {
             return false;
         }
 
-        let texture = self.sprite_atlas.metal_texture(texture_id);
-        command_encoder.set_render_pipeline_state(&self.monochrome_sprites_pipeline_state);
+        let texture = self.shared.sprite_atlas.metal_texture(texture_id);
+        command_encoder.set_render_pipeline_state(&self.shared.monochrome_sprites_pipeline_state);
         bind_scene_uniforms(command_encoder, scene_uniforms);
 
         let buffer_contents =
@@ -1720,7 +1762,7 @@ impl MetalRenderer {
         // vertex stage; bind the same texture to both stages, as WGPU and DirectX do.
         command_encoder.set_vertex_texture(PRIMARY_TEXTURE_SLOT, Some(&texture));
         command_encoder.set_fragment_texture(PRIMARY_TEXTURE_SLOT, Some(&texture));
-        command_encoder.set_fragment_sampler_state(SAMPLER_SLOT, Some(&self.sampler));
+        command_encoder.set_fragment_sampler_state(SAMPLER_SLOT, Some(&self.shared.sampler));
 
         command_encoder.draw_primitives_instanced(
             metal::MTLPrimitiveType::TriangleStrip,
@@ -1753,11 +1795,11 @@ impl MetalRenderer {
             return false;
         }
 
-        let texture = self.sprite_atlas.metal_texture(texture_id);
+        let texture = self.shared.sprite_atlas.metal_texture(texture_id);
         let pipeline = if smoothed {
-            &self.smoothed_polychrome_sprites_pipeline_state
+            &self.shared.smoothed_polychrome_sprites_pipeline_state
         } else {
-            &self.polychrome_sprites_pipeline_state
+            &self.shared.polychrome_sprites_pipeline_state
         };
         command_encoder.set_render_pipeline_state(pipeline);
         bind_scene_uniforms(command_encoder, scene_uniforms);
@@ -1779,7 +1821,7 @@ impl MetalRenderer {
         );
         command_encoder.set_vertex_texture(PRIMARY_TEXTURE_SLOT, Some(&texture));
         command_encoder.set_fragment_texture(PRIMARY_TEXTURE_SLOT, Some(&texture));
-        command_encoder.set_fragment_sampler_state(SAMPLER_SLOT, Some(&self.sampler));
+        command_encoder.set_fragment_sampler_state(SAMPLER_SLOT, Some(&self.shared.sampler));
 
         command_encoder.draw_primitives_instanced(
             metal::MTLPrimitiveType::TriangleStrip,
@@ -1798,9 +1840,9 @@ impl MetalRenderer {
         scene_uniforms: &SceneUniforms,
         command_encoder: &metal::RenderCommandEncoderRef,
     ) -> bool {
-        command_encoder.set_render_pipeline_state(&self.surfaces_pipeline_state);
+        command_encoder.set_render_pipeline_state(&self.shared.surfaces_pipeline_state);
         bind_scene_uniforms(command_encoder, scene_uniforms);
-        command_encoder.set_fragment_sampler_state(SAMPLER_SLOT, Some(&self.sampler));
+        command_encoder.set_fragment_sampler_state(SAMPLER_SLOT, Some(&self.shared.sampler));
 
         for (index, surface) in surfaces.iter().enumerate() {
             let image_buffer = match &surface.source {
@@ -1824,6 +1866,7 @@ impl MetalRenderer {
             );
 
             let y_texture = self
+                .shared
                 .core_video_texture_cache
                 .create_texture_from_image(
                     image_buffer.as_concrete_TypeRef(),
@@ -1835,6 +1878,7 @@ impl MetalRenderer {
                 )
                 .unwrap();
             let cb_cr_texture = self
+                .shared
                 .core_video_texture_cache
                 .create_texture_from_image(
                     image_buffer.as_concrete_TypeRef(),
