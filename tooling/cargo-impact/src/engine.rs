@@ -74,8 +74,9 @@ pub fn analyze_with_discovery(
     let mut report = ImpactReport {
         schema_version: 1,
         library: request.library.clone(),
-        baseline_fingerprint,
-        candidate_fingerprint,
+        baseline_fingerprint: Some(baseline_fingerprint),
+        candidate_fingerprint: Some(candidate_fingerprint),
+        error: None,
         gate,
         discovery: Discovery::default(),
         downstreams: Vec::new(),

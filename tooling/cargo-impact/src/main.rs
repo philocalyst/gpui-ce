@@ -14,6 +14,8 @@ use cargo_impact::{
 use clap::{Parser, Subcommand};
 use url::Url;
 
+mod setup;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Parser)]
@@ -73,6 +75,19 @@ enum Command {
         name: String,
         #[arg(long)]
         acknowledge: bool,
+    },
+    /// Publish a saved report only if the PR still points at the tested head.
+    Publish {
+        #[arg(long, env = "GITHUB_REPOSITORY")]
+        repository: String,
+        #[arg(long)]
+        pull_request: u64,
+        #[arg(long)]
+        candidate_sha: String,
+        #[arg(long)]
+        report: PathBuf,
+        #[arg(long)]
+        run_url: Url,
     },
     /// Write a minimal config and workflows without overwriting existing files.
     Init {
@@ -157,7 +172,10 @@ fn run(cli: Cli) -> Result<i32> {
                     discover(&request.library, &config.discovery).map_err(|e| e.to_string())?;
                 let specs = candidates(&mut discovery, &config);
                 Ok((specs, discovery))
-            })?;
+            })
+            .unwrap_or_else(|error| {
+                cargo_impact::ImpactReport::failed(&request.library, &error.to_string())
+            });
             fs::create_dir_all(&report_dir)?;
             fs::write(
                 report_dir.join("report.json"),
@@ -203,19 +221,42 @@ fn run(cli: Cli) -> Result<i32> {
             name,
             acknowledge,
         } => {
+            if std::env::var("GITHUB_ACTIONS").as_deref() != Ok("true") {
+                return Err("bot requires a trusted GitHub Actions event file".into());
+            }
             let api = github_api()?;
             let event: bot::CommentEvent = serde_json::from_slice(&fs::read(event)?)?;
             let plan = bot::plan(&api, &event, &repository, &name)?;
-            if acknowledge {
-                if let Some(plan) = &plan {
-                    bot::acknowledge(&api, plan)?;
-                }
+            if acknowledge && let Some(plan) = &plan {
+                bot::acknowledge(&api, plan)?;
             }
             println!("{}", serde_json::to_string(&plan)?);
             Ok(0)
         }
+        Command::Publish {
+            repository,
+            pull_request,
+            candidate_sha,
+            report,
+            run_url,
+        } => {
+            let report = serde_json::from_slice(&fs::read(report)?)?;
+            if bot::publish(
+                &github_api()?,
+                &repository,
+                pull_request,
+                &candidate_sha,
+                &report,
+                &run_url,
+            )? {
+                println!("Published report for {candidate_sha}");
+            } else {
+                println!("PR moved or closed; retained the report without commenting");
+            }
+            Ok(0)
+        }
         Command::Init { library, directory } => {
-            initialize(&directory, &library)?;
+            setup::initialize(&directory, &library)?;
             println!(
                 "Created impact.toml and example workflows in {}",
                 directory.display()
@@ -286,9 +327,16 @@ fn candidates(discovery: &mut Discovery, config: &Config) -> Vec<DownstreamSpec>
                 source: DownstreamSource::Git {
                     url: candidate.repository.url().to_string(),
                     revision: "HEAD".into(),
+                    forge: Some(candidate.repository.forge()),
                 },
                 manifest: manifest.into(),
-                recipe: None,
+                recipe: if candidate.packages.is_empty() {
+                    None
+                } else {
+                    let mut recipe = config.recipe.clone();
+                    recipe.packages = candidate.packages.iter().cloned().collect();
+                    Some(recipe)
+                },
             };
             config.apply_override(&mut spec);
             specs.push(spec);
@@ -314,42 +362,4 @@ fn github_api() -> Result<Api> {
         return Err("GitHub API requires an HTTPS URL without credentials".into());
     }
     Ok(Api::new(base, token)?)
-}
-
-fn initialize(directory: &Path, library: &str) -> Result<()> {
-    if library.is_empty()
-        || !library
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err("invalid library name".into());
-    }
-    let files = [
-        (
-            "impact.toml",
-            format!(
-                "library = {library:?}\n\n[discovery]\ncrates_io = true\nmax_repositories = 20\n"
-            )
-            .into_bytes(),
-        ),
-        (
-            ".github/workflows/impact.yml",
-            include_bytes!("../examples/impact.yml").to_vec(),
-        ),
-        (
-            ".github/workflows/impact-comment.yml",
-            include_bytes!("../examples/impact-comment.yml").to_vec(),
-        ),
-    ];
-    for (path, _) in &files {
-        if directory.join(path).exists() {
-            return Err(format!("{} already exists", directory.join(path).display()).into());
-        }
-    }
-    for (path, bytes) in files {
-        let path = directory.join(path);
-        fs::create_dir_all(path.parent().ok_or("missing output parent")?)?;
-        fs::write(path, bytes)?;
-    }
-    Ok(())
 }

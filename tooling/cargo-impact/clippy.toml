@@ -1,0 +1,2 @@
+# This standalone synchronous CLI does not use GPUI's async process executor.
+disallowed-methods = []

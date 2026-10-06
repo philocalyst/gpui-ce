@@ -1,28 +1,62 @@
-//! Human reports are a small view over the lossless structured report.
+//! Human reports are a concise view over the complete structured evidence.
 
 use std::fmt::Write;
 
-use crate::model::{Classification, ImpactReport};
+use crate::{
+    discovery::Discovery,
+    forge::Repository,
+    model::{
+        BuildResult, Classification, DownstreamResult, DownstreamSource, GateResult, ImpactReport,
+    },
+};
 
 impl ImpactReport {
+    pub fn failed(library: &str, error: &str) -> Self {
+        Self {
+            schema_version: 1,
+            library: library.into(),
+            baseline_fingerprint: None,
+            candidate_fingerprint: None,
+            error: Some(error.into()),
+            gate: GateResult {
+                ran: false,
+                required_bump: None,
+                reason: "The experiment did not complete; its result is inconclusive.".into(),
+                log: error.into(),
+            },
+            discovery: Discovery::default(),
+            downstreams: Vec::new(),
+        }
+    }
     pub fn has_regressions(&self) -> bool {
         self.downstreams
             .iter()
             .any(|r| r.classification == Classification::Regression)
     }
-
     pub fn has_harness_failures(&self) -> bool {
-        self.downstreams
-            .iter()
-            .any(|r| r.classification == Classification::HarnessFailure)
+        self.error.is_some()
+            || self
+                .downstreams
+                .iter()
+                .any(|r| r.classification == Classification::HarnessFailure)
     }
-
     pub fn markdown(&self) -> String {
         let mut output = format!(
             "# Downstream impact: {}\n\n{}\n\n",
             escape(&self.library),
             escape(&self.gate.reason)
         );
+        if let Some(error) = &self.error {
+            fenced(&mut output, error);
+            output.push_str("Adjust the library build recipe (runner, features, target, or system dependencies) and retry.\n\n");
+        }
+        if !self.discovery.notes.is_empty() {
+            output.push_str("## Coverage and configuration\n\n");
+            for note in &self.discovery.notes {
+                let _ = writeln!(output, "- {}", escape(note));
+            }
+            output.push('\n');
+        }
         if self.downstreams.is_empty() {
             output.push_str("No downstream builds were recorded. This does not establish ecosystem compatibility.\n");
             return output;
@@ -30,10 +64,10 @@ impl ImpactReport {
         output.push_str("| Downstream | Result |\n| --- | --- |\n");
         for result in &self.downstreams {
             let label = match result.classification {
-                Classification::Compatible => "Compiled with candidate",
+                Classification::Compatible => "Both versions compiled",
                 Classification::Regression => "Regression",
-                Classification::PreExistingFailure => "Baseline already failed",
-                Classification::HarnessFailure => "Harness failure; inconclusive",
+                Classification::PreExistingFailure => "Baseline already failed; inconclusive",
+                Classification::HarnessFailure => "Harness failure; retry with a recipe override",
                 Classification::NotExercised => "Library was not exercised",
             };
             let _ = writeln!(output, "| {} | {label} |", escape(&result.name));
@@ -46,56 +80,97 @@ impl ImpactReport {
             if let Some(message) = &result.message {
                 let _ = writeln!(output, "{}\n", escape(message));
             }
-            for diagnostic in result
-                .candidate
-                .diagnostics
-                .iter()
-                .filter(|d| matches!(d.level, cargo_metadata::diagnostic::DiagnosticLevel::Error))
-                .take(8)
-            {
-                let _ = writeln!(
-                    output,
-                    "{}: {}\n",
-                    escape(
-                        diagnostic
-                            .code
-                            .as_ref()
-                            .map(|c| c.code.as_str())
-                            .unwrap_or("error")
-                    ),
-                    escape(&diagnostic.message)
-                );
-                if let Some(span) = diagnostic.spans.iter().find(|s| s.is_primary) {
-                    let _ = writeln!(
-                        output,
-                        "{}:{}:{}\n",
-                        escape(&span.file_name),
-                        span.line_start,
-                        span.column_start
-                    );
-                }
-                if let Some(rendered) = &diagnostic.rendered {
-                    fenced(&mut output, rendered);
+            if let Some(revision) = &result.revision {
+                let _ = writeln!(output, "Downstream revision: {}\n", escape(revision));
+            }
+            let build = if result.classification == Classification::PreExistingFailure {
+                &result.baseline
+            } else {
+                &result.candidate
+            };
+            render_diagnostics(&mut output, result, build);
+            if result.classification == Classification::HarnessFailure {
+                for (label, build) in [
+                    ("Baseline", &result.baseline),
+                    ("Candidate", &result.candidate),
+                ] {
+                    if !build.log.trim().is_empty() {
+                        let _ = writeln!(output, "{label} harness output:\n");
+                        // The concise Markdown view is bounded independently of retained JSON logs.
+                        fenced(
+                            &mut output,
+                            &build.log.chars().take(4000).collect::<String>(),
+                        );
+                    }
                 }
             }
-            output.push_str(
-                "Full diagnostics, child notes, spans, and bounded logs are in report.json.\n",
-            );
+            output.push_str("Complete diagnostics, suggestions, macro expansions, byte ranges, snippets, and bounded logs are in report.json.\n");
         }
         output
     }
 }
 
-// Reports can contain arbitrary source code, compiler output, and repository names.
-// Neutralize mentions and HTML; choose a fence longer than any content backtick run.
+fn render_diagnostics(output: &mut String, result: &DownstreamResult, build: &BuildResult) {
+    for diagnostic in build
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(d.level, cargo_metadata::diagnostic::DiagnosticLevel::Error))
+        .take(8)
+    {
+        let code = diagnostic
+            .code
+            .as_ref()
+            .map(|c| c.code.as_str())
+            .unwrap_or("error");
+        let _ = writeln!(
+            output,
+            "{}: {}\n",
+            escape(code),
+            escape(&diagnostic.message)
+        );
+        if let Some(span) = diagnostic.spans.iter().find(|s| s.is_primary) {
+            let label = format!(
+                "{}:{}:{}",
+                escape(&span.file_name),
+                span.line_start,
+                span.column_start
+            );
+            let link = match (&result.source, &result.revision) {
+                (DownstreamSource::Git { url, forge, .. }, Some(revision)) => {
+                    Repository::parse(url, *forge).ok().and_then(|repo| {
+                        repo.source_link(revision, &span.file_name, span.line_start)
+                    })
+                }
+                _ => None,
+            };
+            if let Some(link) = link {
+                let _ = writeln!(output, "[{label}]({link})\n");
+            } else {
+                let _ = writeln!(output, "{label}\n");
+            }
+        }
+        if let Some(rendered) = &diagnostic.rendered {
+            fenced(output, &rendered.chars().take(8000).collect::<String>());
+        }
+    }
+}
+
+// Neutralize mentions, HTML, and Markdown injection from arbitrary source/forge data.
 fn escape(value: &str) -> String {
-    value
+    let value = value
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('@', "@\u{200b}")
-        .replace('|', "\\|")
-        .replace('\n', " ")
+        .replace('\n', " ");
+    let mut output = String::new();
+    for character in value.chars() {
+        if "\\`*[]_|".contains(character) {
+            output.push('\\');
+        }
+        output.push(character);
+    }
+    output
 }
 
 fn fenced(output: &mut String, value: &str) {

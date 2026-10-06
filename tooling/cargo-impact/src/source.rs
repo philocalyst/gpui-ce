@@ -25,7 +25,7 @@ pub(crate) fn checkout(
     destination: &Path,
     timeout: Duration,
 ) -> io::Result<(PathBuf, Option<String>)> {
-    let DownstreamSource::Git { url, revision } = source else {
+    let DownstreamSource::Git { url, revision, .. } = source else {
         let DownstreamSource::Local { path } = source else {
             unreachable!()
         };
@@ -110,16 +110,15 @@ fn git(cwd: &Path, args: &[&str], timeout: Duration) -> io::Result<String> {
 
 pub(crate) fn snapshot(source: &Path, destination: &Path) -> io::Result<String> {
     let source = source.canonicalize()?;
-    if let Ok(relative) = destination.strip_prefix(&source) {
-        if relative
+    if let Ok(relative) = destination.strip_prefix(&source)
+        && relative
             .components()
             .next()
             .is_none_or(|c| c.as_os_str() != ".cargo-impact")
-        {
-            return Err(io::Error::other(
-                "work directory must be outside source trees, or named .cargo-impact",
-            ));
-        }
+    {
+        return Err(io::Error::other(
+            "work directory must be outside source trees, or named .cargo-impact",
+        ));
     }
     fs::create_dir_all(
         destination

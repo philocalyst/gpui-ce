@@ -88,10 +88,18 @@ impl Discover for CratesIo {
         result.notes.push("crates.io covers published direct dependents; unpublished and transitive consumers need additional indexes.".into());
         let mut observed = 0;
         for page in 1..=self.max_pages {
-            let response: ReverseDependencies = self.api.get(
+            let response = self.api.get::<ReverseDependencies>(
                 &format!("api/v1/crates/{library}/reverse_dependencies"),
                 &[("page", page.to_string()), ("per_page", "100".into())],
-            )?;
+            );
+            let response = match response {
+                Ok(response) => response,
+                Err(error) if page > 1 => {
+                    result.notes.push(format!("Discovery failed: crates.io page {page}: {error}; earlier candidates retained."));
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            };
             observed += response.dependencies.len();
             for version in response.versions {
                 if version.yanked {
@@ -167,14 +175,22 @@ impl Discover for GitHubSearch {
         let mut result = Discovery::default();
         result.notes.push("GitHub code search covers indexed default-branch manifests, caps at 1,000 hits, and returns candidates that still require Cargo graph verification.".into());
         for page in 1..=self.max_pages.min(10) {
-            let response: SearchResponse = self.api.get(
+            let response = self.api.get::<SearchResponse>(
                 "search/code",
                 &[
                     ("q", format!("{library} filename:Cargo.toml")),
                     ("page", page.to_string()),
                     ("per_page", "100".into()),
                 ],
-            )?;
+            );
+            let response = match response {
+                Ok(response) => response,
+                Err(error) if page > 1 => {
+                    result.notes.push(format!("Discovery failed: GitHub page {page}: {error}; earlier candidates retained."));
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            };
             let count = response.items.len();
             if response.incomplete_results {
                 result

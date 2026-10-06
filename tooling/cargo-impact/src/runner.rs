@@ -81,6 +81,8 @@ impl Builder<'_> {
         let cached = self.root.join("cache");
         fs::create_dir_all(cached.join("cargo"))?;
         fs::create_dir_all(cached.join("mbx"))?;
+        fs::create_dir_all(cached.join("mbx-shims"))?;
+        fs::create_dir_all(self.root.join("home"))?;
         fs::create_dir_all(&self.target)?;
         let driver = if matches!(self.recipe.driver, CargoDriver::Boxington)
             && args.first().is_some_and(|v| v == "check")
@@ -180,6 +182,7 @@ impl Builder<'_> {
             ("CARGO_PROFILE_DEV_DEBUG", "0".into()),
             ("CARGO_BUILD_JOBS", "2".into()),
             ("MBX_CACHE_DIR", cached.join("mbx").into_os_string()),
+            ("MBX_SHIMS_DIR", cached.join("mbx-shims").into_os_string()),
             ("MBX_DISPLAY", "plain".into()),
             ("MBX_TARGET_VIEWS", "0".into()),
             ("HOME", self.root.join("home").into_os_string()),

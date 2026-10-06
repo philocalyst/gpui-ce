@@ -73,6 +73,8 @@ pub enum DownstreamSource {
         url: String,
         #[serde(default = "default_revision")]
         revision: String,
+        #[serde(default)]
+        forge: Option<crate::forge::Forge>,
     },
 }
 
@@ -84,8 +86,9 @@ fn default_revision() -> String {
 pub struct ImpactReport {
     pub schema_version: u32,
     pub library: String,
-    pub baseline_fingerprint: String,
-    pub candidate_fingerprint: String,
+    pub baseline_fingerprint: Option<String>,
+    pub candidate_fingerprint: Option<String>,
+    pub error: Option<String>,
     pub gate: GateResult,
     pub discovery: Discovery,
     pub downstreams: Vec<DownstreamResult>,

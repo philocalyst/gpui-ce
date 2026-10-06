@@ -15,6 +15,8 @@ use cargo_impact::{
 use serde_json::json;
 use url::Url;
 
+type Response<'a> = (u16, serde_json::Value, Vec<(&'a str, &'a str)>);
+
 struct Server {
     base: Url,
     requests: Arc<Mutex<Vec<String>>>,
@@ -22,7 +24,7 @@ struct Server {
 }
 
 impl Server {
-    fn new(responses: Vec<(u16, serde_json::Value, Vec<(&str, &str)>)>) -> Self {
+    fn new(responses: Vec<Response<'_>>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
@@ -181,6 +183,91 @@ fn rate_limit_is_actionable_and_requests_do_not_retry_indefinitely() {
         }
     ));
     assert_eq!(server.finish().len(), 1);
+}
+
+#[test]
+fn later_discovery_failure_retains_earlier_candidates() {
+    let first = json!({"dependencies":[{}], "versions":[{"crate":"app", "num":"1.0.0", "repository":"https://codeberg.org/org/app"}], "meta":{"total":2}});
+    let server = Server::new(vec![
+        (200, first, vec![]),
+        (429, json!({}), vec![("Retry-After", "60")]),
+    ]);
+    let discovery = CratesIo {
+        api: server.api(),
+        max_pages: 3,
+    }
+    .discover("demo-lib")
+    .unwrap();
+    assert_eq!(discovery.candidates.len(), 1);
+    assert!(
+        discovery
+            .notes
+            .iter()
+            .any(|note| note.starts_with("Discovery failed:")
+                && note.contains("earlier candidates retained"))
+    );
+    assert_eq!(server.finish().len(), 2);
+}
+
+#[test]
+fn stale_bot_results_never_comment_on_a_new_head() {
+    let server = Server::new(vec![(
+        200,
+        json!({"state":"open","base":{"sha":"a".repeat(40),"repo":{"full_name":"org/lib"}},"head":{"sha":"c".repeat(40),"repo":{"full_name":"org/lib"}}}),
+        vec![],
+    )]);
+    let report = cargo_impact::ImpactReport::failed("demo", "missing system dependency");
+    assert!(
+        !bot::publish(
+            &server.api(),
+            "org/lib",
+            7,
+            &"b".repeat(40),
+            &report,
+            &Url::parse("https://github.com/org/lib/actions/runs/1").unwrap()
+        )
+        .unwrap()
+    );
+    assert_eq!(server.finish().len(), 1);
+}
+
+#[test]
+fn bot_reports_harness_failures_and_neutralizes_untrusted_mentions_and_fences() {
+    let sha = "b".repeat(40);
+    let server = Server::new(vec![
+        (
+            200,
+            json!({"state":"open","base":{"sha":"a".repeat(40),"repo":{"full_name":"org/lib"}},"head":{"sha":sha,"repo":{"full_name":"org/lib"}}}),
+            vec![],
+        ),
+        (201, json!({"id":1}), vec![]),
+    ]);
+    let report = cargo_impact::ImpactReport::failed(
+        "[demo](bad) @everyone <img>",
+        "```\n@everyone failed\n```",
+    );
+    assert!(report.has_harness_failures());
+    assert!(!report.has_regressions());
+    assert!(
+        bot::publish(
+            &server.api(),
+            "org/lib",
+            7,
+            &sha,
+            &report,
+            &Url::parse("https://github.com/org/lib/actions/runs/1").unwrap()
+        )
+        .unwrap()
+    );
+    let requests = server.finish();
+    let (_, body) = requests[1].split_once("\r\n\r\n").unwrap();
+    let body: serde_json::Value = serde_json::from_str(body).unwrap();
+    let text = body["body"].as_str().unwrap();
+    assert!(text.contains("@\u{200b}everyone"));
+    assert!(!text.contains("@everyone"));
+    assert!(text.contains("````text"));
+    assert!(text.contains("&lt;img&gt;"));
+    assert!(text.contains("result is inconclusive"));
 }
 
 fn event(body: &str) -> CommentEvent {

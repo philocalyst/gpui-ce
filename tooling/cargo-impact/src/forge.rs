@@ -80,7 +80,7 @@ impl Repository {
     }
 
     /// Pin links to the tested commit, rather than a branch that may move later.
-    pub fn source_link(&self, revision: &str, file: &str, line: u32) -> Option<Url> {
+    pub fn source_link(&self, revision: &str, file: &str, line: usize) -> Option<Url> {
         if self.forge == Forge::Generic
             || !revision.chars().all(|c| c.is_ascii_hexdigit())
             || !(7..=64).contains(&revision.len())

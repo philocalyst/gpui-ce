@@ -57,6 +57,95 @@ fn package(root: &Path, name: &str, version: &str, source: &str, extra: &str) {
 const DEP: &str = "[dependencies]\nchanged-lib='1'";
 
 #[test]
+fn unavailable_standard_library_is_an_environment_failure() {
+    let mut fixture = Fixture::new();
+    fixture.consumer("embedded", "pub fn api() { changed_lib::removed(); }", DEP);
+    // This embedded target has no std even if its core component is installed.
+    fixture.request.recipe.target = Some("thumbv7em-none-eabi".into());
+    let report = analyze(&fixture.request).unwrap();
+    let result = &report.downstreams[0];
+    assert_eq!(
+        result.classification,
+        Classification::HarnessFailure,
+        "{result:?}"
+    );
+    assert_eq!(result.baseline.failure, Some(HarnessFailure::Environment));
+    assert!(
+        result
+            .baseline
+            .diagnostics
+            .iter()
+            .any(|d| d.code.as_ref().is_some_and(|c| c.code == "E0463"))
+    );
+}
+
+#[test]
+fn unrelated_invalid_manifest_fixtures_do_not_break_a_valid_package() {
+    let mut fixture = Fixture::new();
+    let consumer = fixture.consumer(
+        "with-fixtures",
+        "pub fn api() { changed_lib::removed(); }",
+        DEP,
+    );
+    fs::create_dir_all(consumer.join("tests/fixtures/invalid")).unwrap();
+    fs::write(
+        consumer.join("tests/fixtures/invalid/Cargo.toml"),
+        "this intentionally isn't TOML!",
+    )
+    .unwrap();
+    let report = analyze(&fixture.request).unwrap();
+    assert_eq!(
+        report.downstreams[0].classification,
+        Classification::Regression
+    );
+}
+
+#[test]
+fn transitive_local_dependency_is_rewritten_inside_the_workspace_snapshot() {
+    let mut fixture = Fixture::new();
+    let root = fixture.dir.path().join("transitive");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers=['app','middle']\nresolver='2'",
+    )
+    .unwrap();
+    package(
+        &root.join("app"),
+        "app",
+        "1.0.0",
+        "pub fn api() { middle::api(); }",
+        "[dependencies]\nmiddle={path='../middle'}",
+    );
+    package(
+        &root.join("middle"),
+        "middle",
+        "1.0.0",
+        "pub fn api() { changed_lib::removed(); }",
+        DEP,
+    );
+    fixture
+        .request
+        .downstreams
+        .push(DownstreamSpec::local("transitive", &root));
+    let report = analyze(&fixture.request).unwrap();
+    let result = &report.downstreams[0];
+    assert_eq!(
+        result.classification,
+        Classification::Regression,
+        "{result:?}"
+    );
+    assert!(
+        result
+            .candidate
+            .diagnostics
+            .iter()
+            .any(|d| d.package_id.contains("middle")
+                && d.code.as_ref().is_some_and(|c| c.code == "E0425"))
+    );
+}
+
+#[test]
 fn closed_gate_skips_discovery_and_invalid_downstreams() {
     let mut fixture = Fixture::new();
     fixture.request.force = false;

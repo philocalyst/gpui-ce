@@ -120,13 +120,11 @@ pub(crate) fn check(
         d.code
             .as_ref()
             .is_some_and(|code| matches!(code.code.as_str(), "E0460" | "E0463" | "E0514" | "E0786"))
-    }) {
-        Some(HarnessFailure::Environment)
-    } else if !output.success
+    }) || (!output.success
         && !output.diagnostics.iter().any(|d| {
             matches!(d.level, cargo_metadata::diagnostic::DiagnosticLevel::Error)
                 && (d.code.is_some() || !d.spans.is_empty())
-        })
+        }))
     {
         Some(HarnessFailure::Environment)
     } else {

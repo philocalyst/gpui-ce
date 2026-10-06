@@ -4,8 +4,12 @@ use std::{
     collections::{BTreeSet, VecDeque},
     io::{self, Read},
     process::{Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::Deserialize;
@@ -59,8 +63,19 @@ pub(crate) fn run(
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("missing stderr pipe"))?;
-    let out_reader = thread::spawn(move || drain(stdout, capture));
-    let err_reader = thread::spawn(move || drain(stderr, Capture::Cargo));
+    #[cfg(unix)]
+    {
+        if let Err(error) = nonblocking(&stdout).and_then(|_| nonblocking(&stderr)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    }
+    let stopped = Arc::new(AtomicBool::new(false));
+    let out_stop = stopped.clone();
+    let err_stop = stopped.clone();
+    let out_reader = thread::spawn(move || drain(stdout, capture, &out_stop));
+    let err_reader = thread::spawn(move || drain(stderr, Capture::Cargo, &err_stop));
     let wait = child.wait_timeout(timeout);
     let timed_out = matches!(wait, Ok(None));
     // Background grandchildren must not hold log pipes open, even on normal parent exit.
@@ -72,6 +87,7 @@ pub(crate) fn run(
         let _ = child.kill();
     }
     let status = child.wait();
+    stopped.store(true, Ordering::Release);
     let stdout = out_reader
         .join()
         .map_err(|_| io::Error::other("stdout reader panicked"))??;
@@ -134,13 +150,30 @@ impl Tail {
     }
 }
 
-fn drain(mut reader: impl Read, capture: Capture) -> io::Result<Stream> {
+fn drain(mut reader: impl Read, capture: Capture, stopped: &AtomicBool) -> io::Result<Stream> {
     let mut stream = Stream::default();
     let mut buffer = [0; 8192];
     let mut line = Vec::new();
     let mut discard_line = false;
+    let mut stop_time = None;
     loop {
-        let size = reader.read(&mut buffer)?;
+        if stopped.load(Ordering::Acquire) {
+            let stop = stop_time.get_or_insert_with(Instant::now);
+            if stop.elapsed() > Duration::from_millis(200) {
+                // A detached descendant may retain the pipe. Do not let it hold the scan open.
+                stream.truncated = true;
+                break;
+            }
+        }
+        let size = match reader.read(&mut buffer) {
+            Ok(size) => size,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if size == 0 {
             break;
         }
@@ -197,10 +230,9 @@ impl Stream {
                     message.level,
                     cargo_metadata::diagnostic::DiagnosticLevel::Error
                         | cargo_metadata::diagnostic::DiagnosticLevel::Ice
-                ) {
-                    if let Some(rendered) = &message.rendered {
-                        self.log.append(rendered.as_bytes());
-                    }
+                ) && let Some(rendered) = &message.rendered
+                {
+                    self.log.append(rendered.as_bytes());
                 }
                 self.diagnostic_bytes += line.len();
                 self.diagnostics.push(CompilerDiagnostic {
@@ -250,6 +282,16 @@ enum CargoMessage {
     Other,
 }
 
+#[cfg(unix)]
+fn nonblocking(pipe: &impl std::os::fd::AsRawFd) -> io::Result<()> {
+    let fd = pipe.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,7 +301,7 @@ mod tests {
         let mut bytes = vec![b'x'; LOG_LIMIT * 3];
         bytes.push(b'\n');
         bytes.extend_from_slice(br#"{"reason":"compiler-message","package_id":"consumer","message":{"message":"removed API","code":{"code":"E0425","explanation":null},"level":"error","spans":[],"children":[],"rendered":"error[E0425]"}}"#);
-        let result = drain(&bytes[..], Capture::Cargo).unwrap();
+        let result = drain(&bytes[..], Capture::Cargo, &AtomicBool::new(false)).unwrap();
         assert!(result.log.truncated);
         assert!(!result.truncated);
         assert_eq!(result.diagnostics.len(), 1);
