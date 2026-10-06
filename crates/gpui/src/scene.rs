@@ -2763,6 +2763,186 @@ mod tests {
     }
 
     #[test]
+    fn replay_resolves_typed_indices_after_lane_sorting() {
+        let surface = crate::GpuiSurfaceId::fresh();
+        let mut scene = Scene::default();
+        scene.set_composition_target(surface).unwrap();
+        for smoothing in [0.1, 0.2, 0.3] {
+            let mut quad = quad();
+            quad.corner_smoothing = smoothing;
+            scene.insert_primitive(quad);
+        }
+        scene.insert_primitive(path_with_triangles(1));
+        scene.insert_primitive(path_with_triangles(2));
+        for tile_id in [8, 2, 5] {
+            let mut sprite = polychrome_sprite(0);
+            sprite.tile.tile_id = TileId(tile_id);
+            sprite.opacity = tile_id as f32 / 10.0;
+            scene.insert_primitive(sprite);
+        }
+        for (tag, opacity) in [(10, 0.1), (20, 0.2), (30, 0.3)] {
+            scene.insert_surface(tagged_surface(tag), opacity);
+        }
+        for opacity in [0.1, 0.2] {
+            let mut filter = backdrop();
+            filter.opacity = opacity;
+            scene.insert_primitive(filter);
+        }
+        for opacity in [0.25, 0.75] {
+            let mut start = boundary(true);
+            start.opacity = opacity;
+            scene.insert_primitive(start);
+            let mut end = boundary(false);
+            end.opacity = opacity;
+            scene.insert_primitive(end);
+        }
+
+        // Exercise indexed and strict-reverse lanes, stable equal keys, sprite tile sorting,
+        // path vertex ownership, and surface opacity pairing.
+        for (quad, order) in scene.quads.iter_mut().zip([2, 1, 2]) {
+            quad.order = order;
+        }
+        for (path, order) in scene.paths.iter_mut().zip([2, 1]) {
+            path.order = order;
+        }
+        for sprite in &mut scene.polychrome_sprites {
+            sprite.order = 7;
+        }
+        for (surface, order) in scene.surfaces.iter_mut().zip([3, 1, 2]) {
+            surface.order = order;
+        }
+        for (filter, order) in scene.backdrop_filters.iter_mut().zip([2, 1]) {
+            filter.order = order;
+        }
+        // Keep each filter pair together while reversing their relative ordering.
+        for (boundary, order) in scene.filter_boundaries.iter_mut().zip([2, 2, 1, 1]) {
+            boundary.order = order;
+        }
+        scene.finish();
+
+        assert_eq!(
+            scene
+                .quads
+                .iter()
+                .map(|quad| quad.corner_smoothing)
+                .collect::<Vec<_>>(),
+            [0.2, 0.1, 0.3]
+        );
+        assert_eq!(
+            scene
+                .paths
+                .iter()
+                .map(|path| (path.id, path.vertices.len()))
+                .collect::<Vec<_>>(),
+            [(PathId(1), 6), (PathId(0), 3)]
+        );
+        assert_eq!(
+            scene
+                .polychrome_sprites
+                .iter()
+                .map(|sprite| (sprite.tile.tile_id, sprite.opacity))
+                .collect::<Vec<_>>(),
+            [(TileId(2), 0.2), (TileId(5), 0.5), (TileId(8), 0.8)]
+        );
+        assert_eq!(scene.surface_opacities(), &[0.2, 0.3, 0.1]);
+        assert_eq!(
+            scene
+                .surfaces
+                .iter()
+                .map(|surface| match &surface.source {
+                    SurfaceSource::Unsupported(size) => size.width.0,
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>(),
+            [20, 30, 10]
+        );
+        assert_eq!(
+            scene
+                .backdrop_filters
+                .iter()
+                .map(|filter| filter.opacity)
+                .collect::<Vec<_>>(),
+            [0.2, 0.1]
+        );
+        assert_eq!(
+            scene
+                .filter_boundaries
+                .iter()
+                .map(|boundary| (boundary.is_start, boundary.opacity))
+                .collect::<Vec<_>>(),
+            [(true, 0.75), (false, 0.75), (true, 0.25), (false, 0.25)]
+        );
+
+        let mut replay = Scene::default();
+        replay.replay(0..scene.paint_operations.len(), &scene);
+        replay.finish();
+        assert_eq!(
+            replay
+                .quads
+                .iter()
+                .map(|quad| quad.corner_smoothing)
+                .collect::<Vec<_>>(),
+            [0.1, 0.2, 0.3]
+        );
+        assert_eq!(
+            replay
+                .paths
+                .iter()
+                .map(|path| (path.id, path.vertices.len()))
+                .collect::<Vec<_>>(),
+            [(PathId(0), 3), (PathId(1), 6)]
+        );
+        assert_eq!(
+            replay
+                .polychrome_sprites
+                .iter()
+                .map(|sprite| (sprite.tile.tile_id, sprite.opacity))
+                .collect::<Vec<_>>(),
+            [(TileId(8), 0.8), (TileId(2), 0.2), (TileId(5), 0.5)]
+        );
+        assert_eq!(replay.surface_opacities(), &[0.1, 0.2, 0.3]);
+        assert_eq!(
+            replay
+                .surfaces
+                .iter()
+                .map(|surface| match &surface.source {
+                    SurfaceSource::Unsupported(size) => size.width.0,
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>(),
+            [10, 20, 30]
+        );
+        assert_eq!(
+            replay
+                .backdrop_filters
+                .iter()
+                .map(|filter| filter.opacity)
+                .collect::<Vec<_>>(),
+            [0.1, 0.2]
+        );
+        assert_eq!(
+            replay
+                .filter_boundaries
+                .iter()
+                .map(|boundary| (boundary.is_start, boundary.opacity))
+                .collect::<Vec<_>>(),
+            [(true, 0.25), (false, 0.25), (true, 0.75), (false, 0.75)]
+        );
+
+        let routed = replay.composition_layer(surface).unwrap();
+        assert_eq!(routed.quads.len(), 3);
+        assert_eq!(
+            routed
+                .paths
+                .iter()
+                .map(|path| path.vertices.len())
+                .collect::<Vec<_>>(),
+            [3, 6]
+        );
+        assert_eq!(routed.surface_opacities(), &[0.1, 0.2, 0.3]);
+    }
+
+    #[test]
     fn render_plan_reuses_its_command_allocation_across_frames() {
         let mut scene = Scene::default();
         for _ in 0..32 {
