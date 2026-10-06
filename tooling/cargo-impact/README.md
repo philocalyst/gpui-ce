@@ -16,6 +16,9 @@ Install from this checkout with Rust 1.96 or newer:
 cargo install --locked --path tooling/cargo-impact
 ```
 
+Build workers require a Unix host (Linux or macOS). Windows workers return an
+unsupported-host error rather than running without process-tree termination.
+
 Compare two source directories, using Docker for all Cargo operations:
 
 ```sh
@@ -34,6 +37,11 @@ fatal preparation or gate errors. The JSON includes fingerprints, selected
 package IDs, recipes, immutable downstream revisions, full rustc diagnostic
 trees, suggestions, macro expansions, byte/line/column ranges, and source
 snippets. Markdown shows the useful errors and links to tested source commits.
+Each diagnostic retains its Cargo target and package origin (downstream,
+injected library, or external dependency). Source links use verified original
+checkout files, including nested workspace paths; generated and external files
+remain unlinked. A library compilation failure is inconclusive. Errors in a
+transitive consumer can still establish impact, with their origin shown explicitly.
 
 | Result | Evidence |
 | --- | --- |

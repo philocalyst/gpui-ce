@@ -142,6 +142,9 @@ impl Builder<'_> {
                     cmd.arg("--env")
                         .arg(format!("{key}={}", value.to_string_lossy()));
                 }
+                if args.first().is_some_and(|v| v == "rustdoc") {
+                    cmd.args(["--env", "RUSTC_BOOTSTRAP=1"]);
+                }
                 cmd.arg(image).arg(driver);
                 cmd
             }
@@ -151,16 +154,9 @@ impl Builder<'_> {
                 command.env(key, value);
             }
         }
-        if args.first().is_some_and(|v| v == "rustdoc") {
+        if args.first().is_some_and(|v| v == "rustdoc") && !self.recipe.runner.is_isolated() {
             // Stable rustdoc exposes JSON through this flag; do not relax downstream checks.
-            if self.recipe.runner.is_isolated() {
-                // Docker's env options must precede the image, so use a Cargo --config env entry.
-                command
-                    .arg("--config")
-                    .arg("env.RUSTC_BOOTSTRAP={value='1',force=true}");
-            } else {
-                command.env("RUSTC_BOOTSTRAP", "1");
-            }
+            command.env("RUSTC_BOOTSTRAP", "1");
         }
         command.args(args).current_dir(cwd);
         let result = process::run(&mut command, self.timeout, capture);
