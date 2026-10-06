@@ -8899,6 +8899,43 @@ mod tests {
         assert_eq!(test_window.composition_presentations().len(), 4);
     }
 
+    struct CompositionHitRegionView;
+
+    impl Render for CompositionHitRegionView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .on_mouse_down(MouseButton::Left, |_, _, _| {})
+                .child(deferred(
+                    anchored().position(point(px(20.), px(20.))).child(
+                        div()
+                            .w(px(80.))
+                            .h(px(60.))
+                            .on_mouse_down(MouseButton::Left, |_, _, _| {}),
+                    ),
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn composition_routes_base_and_deferred_overlay_hit_regions(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| CompositionHitRegionView);
+        let test_window = cx.test_window(window.into());
+        let (base, overlay) = window
+            .update(cx, |_, window, _| {
+                let composition = window.enable_window_composition().unwrap();
+                (composition.base_surface(), composition.overlay_surface())
+            })
+            .unwrap();
+
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+
+        let regions = test_window.composition_hit_regions();
+        let regions = regions.last().expect("composition frame was presented");
+        assert!(regions.iter().any(|region| region.surface == base));
+        assert!(regions.iter().any(|region| region.surface == overlay));
+    }
+
     /// A frame request that arrives while next-frame callbacks are pending
     /// must never strand them: either the frame runs them, or (when the
     /// inactive-window frame-rate throttle defers the frame) the waker fires
