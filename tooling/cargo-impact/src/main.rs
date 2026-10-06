@@ -5,13 +5,13 @@ use std::{
 };
 
 use cargo_impact::{
-    DownstreamSource, DownstreamSpec, ImpactRequest, analyze_with_discovery, bot,
+    DownstreamSource, DownstreamSpec, ImpactReport, ImpactRequest, analyze_with_discovery, bot,
     config::{Config, DiscoveryConfig},
     discovery::{CratesIo, Discover, Discovery, GitHubSearch},
     http::Api,
     runner::Runner,
 };
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use url::Url;
 
 mod setup;
@@ -30,34 +30,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    Check {
-        #[arg(long)]
-        library: Option<String>,
-        #[arg(long)]
-        baseline: PathBuf,
-        #[arg(long)]
-        candidate: PathBuf,
-        #[arg(long)]
-        config: Option<PathBuf>,
-        #[arg(long = "downstream", value_name = "NAME=PATH")]
-        downstreams: Vec<String>,
-        #[arg(long, default_value = ".cargo-impact")]
-        work_dir: PathBuf,
-        #[arg(long, default_value = "impact-report")]
-        report_dir: PathBuf,
-        #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..))]
-        timeout_seconds: u64,
-        #[arg(long)]
-        force: bool,
-        #[arg(long)]
-        no_discovery: bool,
-        /// Allow host execution for local/Nix recipes; never needed for Docker.
-        #[arg(long)]
-        allow_local: bool,
-        /// Choose a local recipe instead of the default Docker environment.
-        #[arg(long, requires = "allow_local")]
-        local: bool,
-    },
+    Check(CheckArgs),
     Discover {
         #[arg(long)]
         library: String,
@@ -98,6 +71,36 @@ enum Command {
     },
 }
 
+#[derive(Args)]
+struct CheckArgs {
+    #[arg(long)]
+    library: Option<String>,
+    #[arg(long)]
+    baseline: PathBuf,
+    #[arg(long)]
+    candidate: PathBuf,
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long = "downstream", value_name = "NAME=PATH")]
+    downstreams: Vec<String>,
+    #[arg(long, default_value = ".cargo-impact")]
+    work_dir: PathBuf,
+    #[arg(long, default_value = "impact-report")]
+    report_dir: PathBuf,
+    #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..))]
+    timeout_seconds: u64,
+    #[arg(long)]
+    force: bool,
+    #[arg(long)]
+    no_discovery: bool,
+    /// Allow host execution for local/Nix recipes; never needed for Docker.
+    #[arg(long)]
+    allow_local: bool,
+    /// Choose a local recipe instead of the default Docker environment.
+    #[arg(long, requires = "allow_local")]
+    local: bool,
+}
+
 fn main() {
     // Cargo passes its subcommand name as argv[1] when executing cargo-impact.
     let mut args: Vec<_> = std::env::args_os().collect();
@@ -116,89 +119,7 @@ fn main() {
 
 fn run(cli: Cli) -> Result<i32> {
     match cli.command {
-        Command::Check {
-            library,
-            baseline,
-            candidate,
-            config,
-            downstreams,
-            work_dir,
-            report_dir,
-            timeout_seconds,
-            force,
-            no_discovery,
-            allow_local,
-            local,
-        } => {
-            let config_path = config.or_else(|| {
-                Path::new("impact.toml")
-                    .is_file()
-                    .then(|| PathBuf::from("impact.toml"))
-            });
-            let mut config = config_path
-                .as_ref()
-                .map(|path| Config::load(path))
-                .transpose()?
-                .unwrap_or_default();
-            if local {
-                config.recipe.runner = Runner::Local;
-            }
-            if config.requires_local_execution() && !allow_local {
-                return Err("local and Nix recipes execute build scripts on the host; supply --allow-local for trusted inputs".into());
-            }
-            let library = library
-                .or_else(|| config.library.clone())
-                .ok_or("provide --library or set library in impact.toml")?;
-            let mut request = ImpactRequest::new(library, baseline, candidate);
-            request.recipe = config.recipe.clone();
-            request.force = force;
-            request.work_dir = Some(work_dir);
-            request.timeout = Duration::from_secs(timeout_seconds);
-            request.downstreams = config.downstreams.clone();
-            for value in downstreams {
-                let (name, path) = value
-                    .split_once('=')
-                    .ok_or("--downstream requires NAME=PATH")?;
-                request.downstreams.push(DownstreamSpec::local(name, path));
-            }
-            for spec in &mut request.downstreams {
-                config.apply_override(spec);
-            }
-            let report = analyze_with_discovery(&request, || {
-                if no_discovery {
-                    return Ok((Vec::new(), Discovery::default()));
-                }
-                let mut discovery =
-                    discover(&request.library, &config.discovery).map_err(|e| e.to_string())?;
-                let specs = candidates(&mut discovery, &config);
-                Ok((specs, discovery))
-            })
-            .unwrap_or_else(|error| {
-                cargo_impact::ImpactReport::failed(&request.library, &error.to_string())
-            });
-            fs::create_dir_all(&report_dir)?;
-            fs::write(
-                report_dir.join("report.json"),
-                serde_json::to_vec_pretty(&report)?,
-            )?;
-            fs::write(report_dir.join("report.md"), report.markdown())?;
-            println!("{}", report.markdown());
-            eprintln!("Reports: {}", report_dir.display());
-            // An API lint alone never fails CI. Actual regressions and inconclusive scans differ.
-            Ok(if report.has_regressions() {
-                1
-            } else if report.has_harness_failures()
-                || report
-                    .discovery
-                    .notes
-                    .iter()
-                    .any(|n| n.starts_with("Discovery failed:"))
-            {
-                2
-            } else {
-                0
-            })
-        }
+        Command::Check(args) => check(args),
         Command::Discover {
             library,
             github,
@@ -264,6 +185,128 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+fn check(args: CheckArgs) -> Result<i32> {
+    let CheckArgs {
+        library,
+        baseline,
+        candidate,
+        config: config_arg,
+        downstreams,
+        work_dir,
+        report_dir,
+        timeout_seconds,
+        force,
+        no_discovery,
+        allow_local,
+        local,
+    } = args;
+    let config_path = config_arg.or_else(|| {
+        Path::new("impact.toml")
+            .is_file()
+            .then(|| PathBuf::from("impact.toml"))
+    });
+    let mut config = match config_path.as_ref() {
+        Some(path) => match Config::load(path) {
+            Ok(config) => config,
+            Err(error) => {
+                return failed_check(
+                    &report_dir,
+                    library.as_deref().unwrap_or("unknown"),
+                    format!(
+                        "could not load configuration file {}: {error}",
+                        path.display()
+                    ),
+                );
+            }
+        },
+        None => Config::default(),
+    };
+    if local {
+        config.recipe.runner = Runner::Local;
+    }
+    let library = match library.or_else(|| config.library.clone()) {
+        Some(library) => library,
+        None => {
+            return failed_check(
+                &report_dir,
+                "unknown",
+                "provide --library or set library in impact.toml",
+            );
+        }
+    };
+    if config.requires_local_execution() && !allow_local {
+        return failed_check(
+            &report_dir,
+            &library,
+            "local and Nix recipes execute build scripts on the host; supply --allow-local for trusted inputs",
+        );
+    }
+
+    let mut request = ImpactRequest::new(library, baseline, candidate);
+    request.recipe = config.recipe.clone();
+    request.force = force;
+    request.work_dir = Some(work_dir);
+    request.timeout = Duration::from_secs(timeout_seconds);
+    request.downstreams = config.downstreams.clone();
+    for value in downstreams {
+        let Some((name, path)) = value.split_once('=') else {
+            return failed_check(
+                &report_dir,
+                &request.library,
+                "--downstream requires NAME=PATH",
+            );
+        };
+        request.downstreams.push(DownstreamSpec::local(name, path));
+    }
+    for spec in &mut request.downstreams {
+        config.apply_override(spec);
+    }
+    let report = analyze_with_discovery(&request, || {
+        if no_discovery {
+            return Ok((Vec::new(), Discovery::default()));
+        }
+        let mut discovery =
+            discover(&request.library, &config.discovery).map_err(|e| e.to_string())?;
+        let specs = candidates(&mut discovery, &config);
+        Ok((specs, discovery))
+    })
+    .unwrap_or_else(|error| ImpactReport::failed(&request.library, &error.to_string()));
+    emit_report(&report_dir, &report)?;
+    // An API lint alone never fails CI. Actual regressions and inconclusive scans differ.
+    Ok(if report.has_regressions() {
+        1
+    } else if report.has_harness_failures()
+        || report
+            .discovery
+            .notes
+            .iter()
+            .any(|n| n.starts_with("Discovery failed:"))
+    {
+        2
+    } else {
+        0
+    })
+}
+
+fn failed_check(report_dir: &Path, library: &str, error: impl ToString) -> Result<i32> {
+    let report = ImpactReport::failed(library, &error.to_string());
+    emit_report(report_dir, &report)?;
+    Ok(2)
+}
+
+fn emit_report(report_dir: &Path, report: &ImpactReport) -> Result<()> {
+    fs::create_dir_all(report_dir)?;
+    fs::write(
+        report_dir.join("report.json"),
+        serde_json::to_vec_pretty(report)?,
+    )?;
+    let markdown = report.markdown();
+    fs::write(report_dir.join("report.md"), &markdown)?;
+    println!("{markdown}");
+    eprintln!("Reports: {}", report_dir.display());
+    Ok(())
 }
 
 fn discover(library: &str, config: &DiscoveryConfig) -> Result<Discovery> {
