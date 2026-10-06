@@ -2663,6 +2663,106 @@ mod tests {
     }
 
     #[test]
+    fn lane_composition_handles_structural_sorts_and_public_lane_growth() {
+        fn assert_composes(
+            previous: LaneMapping,
+            current: LaneMapping,
+            source: &[usize],
+            expected: &[usize],
+        ) {
+            let mut output = Vec::new();
+            let composed = compose_lane(&previous, &current, source, &mut output);
+            assert_eq!(composed.source_len, expected.len());
+            for (old_index, &new_index) in expected.iter().enumerate() {
+                assert_eq!(
+                    map_index(old_index, &composed.sort, &output),
+                    new_index,
+                    "old index {old_index}"
+                );
+            }
+        }
+
+        let len = 5;
+        let identity = || LaneMapping {
+            source_len: len,
+            sort: LaneSort::Identity,
+        };
+        let swap = |position| LaneMapping {
+            source_len: len,
+            sort: LaneSort::Swap(position),
+        };
+        let reverse = || LaneMapping {
+            source_len: len,
+            sort: LaneSort::Reverse(len),
+        };
+        let swap_map = |position| {
+            (0..len)
+                .map(|index| match index {
+                    index if index == position => index + 1,
+                    index if index == position + 1 => index - 1,
+                    index => index,
+                })
+                .collect::<Vec<_>>()
+        };
+        let reverse_map = || (0..len).map(|index| len - 1 - index).collect::<Vec<_>>();
+        let run_map = [3, 4, 2, 0, 1];
+        let indexed_map = [2, 4, 0, 3, 1];
+
+        assert_composes(identity(), swap(1), &[], &swap_map(1));
+        assert_composes(swap(3), identity(), &[], &swap_map(3));
+        assert_composes(identity(), reverse(), &[], &reverse_map());
+        assert_composes(reverse(), identity(), &[], &reverse_map());
+        assert_composes(reverse(), reverse(), &[], &[0, 1, 2, 3, 4]);
+
+        let mut source = run_map.to_vec();
+        source.extend_from_slice(&indexed_map);
+        assert_composes(
+            LaneMapping {
+                source_len: len,
+                sort: LaneSort::ReverseRuns(0..len),
+            },
+            LaneMapping {
+                source_len: len,
+                sort: LaneSort::Indexed(len..2 * len),
+            },
+            &source,
+            &run_map.map(|index| indexed_map[index]),
+        );
+        assert_composes(
+            LaneMapping {
+                source_len: len,
+                sort: LaneSort::Identity,
+            },
+            LaneMapping {
+                source_len: len,
+                sort: LaneSort::ReverseRuns(0..len),
+            },
+            &run_map,
+            &run_map,
+        );
+
+        let six_item_map = [1, 5, 2, 4, 0, 3];
+        let mut output = Vec::new();
+        let composed = compose_lane(
+            &LaneMapping {
+                source_len: 4,
+                sort: LaneSort::Identity,
+            },
+            &LaneMapping {
+                source_len: 6,
+                sort: LaneSort::Indexed(0..6),
+            },
+            &six_item_map,
+            &mut output,
+        );
+        assert_eq!(composed.source_len, 4);
+        assert_eq!(output.len(), 4);
+        for (old_index, &new_index) in six_item_map[..4].iter().enumerate() {
+            assert_eq!(map_index(old_index, &composed.sort, &output), new_index);
+        }
+    }
+
+    #[test]
     fn render_plan_reuses_its_command_allocation_across_frames() {
         let mut scene = Scene::default();
         for _ in 0..32 {
