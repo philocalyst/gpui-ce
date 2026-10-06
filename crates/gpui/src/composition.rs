@@ -1123,4 +1123,54 @@ mod tests {
         assert_eq!(promoted.bounds(), Some(bounds(71, 60)));
     }
 
+    #[test]
+    fn borrowed_surfaces_derive_parent_bounds_and_widen_relative_origins() {
+        let mut tree = CompositionTree::new();
+        let parent = NativeSurfaceId::fresh();
+        let child = NativeSurfaceId::fresh();
+        let parent_bounds = Bounds {
+            origin: point(DevicePixels(i32::MIN), DevicePixels(-20)),
+            size: size(DevicePixels(30), DevicePixels(20)),
+        };
+        let child_bounds = Bounds {
+            origin: point(DevicePixels(i32::MAX), DevicePixels(10)),
+            size: size(DevicePixels(0), DevicePixels(0)),
+        };
+        let attachment: Rc<dyn PlatformSurfaceAttachment> = Rc::new(NoPlatformHandle);
+        tree.insert_native(
+            parent,
+            parent_bounds,
+            attachment.clone(),
+            Some(tree.base().into()),
+        )
+        .unwrap();
+        tree.insert_native(child, child_bounds, attachment, Some(parent.into()))
+            .unwrap();
+
+        let surfaces = tree.surfaces();
+        let root = surfaces
+            .iter()
+            .find(|surface| surface.id() == CompositionSurfaceId::Gpui(tree.base()))
+            .unwrap();
+        assert_eq!(root.parent_bounds(), None);
+        assert_eq!(root.local_origin(), point(0_i64, 0_i64));
+
+        let parent = surfaces
+            .iter()
+            .find(|surface| surface.id() == parent.into())
+            .unwrap();
+        assert_eq!(parent.bounds(), Some(parent_bounds));
+        assert_eq!(parent.parent_bounds(), None);
+        assert_eq!(parent.local_origin(), point(i64::from(i32::MIN), -20));
+
+        let child = surfaces
+            .iter()
+            .find(|surface| surface.id() == child.into())
+            .unwrap();
+        assert_eq!(child.parent_bounds(), Some(parent_bounds));
+        assert_eq!(
+            child.local_origin(),
+            point(i64::from(i32::MAX) - i64::from(i32::MIN), 30_i64)
+        );
+    }
 }
