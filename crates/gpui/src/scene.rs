@@ -2943,6 +2943,85 @@ mod tests {
     }
 
     #[test]
+    fn lane_sort_matches_stable_sort_for_all_short_key_sequences() {
+        let mut saw_identity = false;
+        let mut saw_swap = false;
+        let mut saw_reverse = false;
+        let mut saw_reverse_runs = false;
+        let mut saw_indexed = false;
+        let mut sort_keys = Vec::new();
+        let mut old_to_new = Vec::new();
+        let mut items = Vec::new();
+        let mut expected = Vec::new();
+        let mut parallel = Vec::new();
+        let mut sort_scratch = Vec::new();
+
+        for len in 0..=8 {
+            for mut encoded in 0..4_usize.pow(len as u32) {
+                items.clear();
+                parallel.clear();
+                expected.clear();
+                old_to_new.clear();
+                sort_keys.clear();
+                for index in 0..len {
+                    items.push(((encoded % 4) as u32, index));
+                    parallel.push(index);
+                    encoded /= 4;
+                }
+                expected.extend_from_slice(&items);
+                expected.sort_by_key(|(key, _)| *key);
+
+                let mut mapping = LaneMapping::default();
+                sort_scene_items(
+                    &items,
+                    &mut sort_keys,
+                    &mut old_to_new,
+                    |(key, _)| (*key, 0),
+                    &mut mapping,
+                );
+                match &mapping.sort {
+                    LaneSort::Identity => saw_identity = true,
+                    LaneSort::Swap(_) => saw_swap = true,
+                    LaneSort::Reverse(_) => saw_reverse = true,
+                    LaneSort::ReverseRuns(_) => saw_reverse_runs = true,
+                    LaneSort::Indexed(_) => saw_indexed = true,
+                }
+
+                for old_index in 0..len {
+                    let mut new_index = old_index;
+                    remap_index(&mut new_index, &mapping.sort, &old_to_new);
+                    let expected_index = expected
+                        .iter()
+                        .position(|(_, id)| *id == old_index)
+                        .unwrap();
+                    assert_eq!(new_index, expected_index, "keys: {items:?}");
+                }
+
+                let permutation = old_to_new.clone();
+                apply_scene_sort(
+                    &mut items,
+                    &old_to_new,
+                    &mut sort_scratch,
+                    mapping.sort.clone(),
+                    |(key, _)| (*key, 0),
+                    |edit| match edit {
+                        LaneEdit::Swap(from, to) => parallel.swap(from, to),
+                        LaneEdit::Reverse(range) => parallel[range].reverse(),
+                    },
+                );
+                assert_eq!(old_to_new, permutation, "keys: {items:?}");
+                assert_eq!(items, expected, "keys: {items:?}");
+                assert_eq!(
+                    parallel,
+                    expected.iter().map(|(_, id)| *id).collect::<Vec<_>>()
+                );
+            }
+        }
+
+        assert!(saw_identity && saw_swap && saw_reverse && saw_reverse_runs && saw_indexed);
+    }
+
+    #[test]
     fn render_plan_reuses_its_command_allocation_across_frames() {
         let mut scene = Scene::default();
         for _ in 0..32 {
