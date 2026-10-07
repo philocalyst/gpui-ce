@@ -16,7 +16,12 @@ use crate::{
 
 pub(crate) fn result_id(result: &DownstreamResult) -> String {
     let mut hash = Sha256::new();
-    if let Ok(identity) = serde_json::to_vec(&(&result.name, &result.manifest, &result.source)) {
+    if let Ok(identity) = serde_json::to_vec(&(
+        &result.name,
+        &result.manifest,
+        &result.source,
+        &result.recipe,
+    )) {
         hash.update(identity);
     }
     format!("consumer-{:x}", hash.finalize())[..25].into()

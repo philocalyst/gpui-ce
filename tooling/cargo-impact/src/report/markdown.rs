@@ -107,7 +107,7 @@ pub(super) fn render(report: &ImpactReport, concise: bool) -> String {
         render_consumer(
             &mut output,
             result,
-            drafts.iter().find(|d| d.downstream == result.name),
+            drafts.iter().find(|d| d.id == result_id(result)),
             concise,
         );
     }

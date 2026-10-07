@@ -17,6 +17,7 @@ use super::presentation::{
 
 #[derive(Clone, Debug, Serialize)]
 pub struct IssueDraft {
+    pub id: String,
     pub downstream: String,
     pub title: String,
     pub body: String,
@@ -236,6 +237,7 @@ fn draft(report: &ImpactReport, result: &DownstreamResult) -> IssueDraft {
         body,
         filename: format!("{id}.md"),
         reproduction_filename: format!("{id}.toml"),
+        id,
         reproduction_config,
         repository,
         composer_url,

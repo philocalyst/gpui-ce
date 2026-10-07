@@ -125,7 +125,7 @@ pub(super) fn render(report: &ImpactReport) -> String {
         consumer(
             &mut output,
             result,
-            drafts.iter().find(|d| d.downstream == result.name),
+            drafts.iter().find(|d| d.id == result_id(result)),
         );
     }
     output.push_str("</div><footer><strong>Retained compiler evidence.</strong> JSON contains complete retained diagnostic trees and all Cargo targets. This view deduplicates compiler symptoms and bounds excerpts. Generated/external paths stay unlinked; macro callsites retain their own provenance. Issue forms require human submission.</footer></main><div id=\"copy-status\" role=\"status\" aria-live=\"polite\"></div><script>");

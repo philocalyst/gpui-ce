@@ -269,6 +269,37 @@ fn changed_input_diagnostics_do_not_claim_verified_source_links() {
 }
 
 #[test]
+fn same_named_experiments_keep_their_own_issue_and_recipe_links() {
+    let mut report = report();
+    let mut alternate = report.downstreams[0].clone();
+    alternate.recipe.features = vec!["alternate-feature".into()];
+    report.downstreams.push(alternate);
+    let drafts = report.issue_drafts();
+    assert_ne!(drafts[0].id, drafts[1].id);
+    assert_ne!(drafts[0].reproduction_config, drafts[1].reproduction_config);
+    let html = report.html();
+    let markdown = report.markdown();
+    for draft in drafts {
+        assert_eq!(
+            html.matches(&format!("href=\"issues/{}\"", draft.filename))
+                .count(),
+            1
+        );
+        assert_eq!(
+            html.matches(&format!("href=\"issues/{}\"", draft.reproduction_filename))
+                .count(),
+            1
+        );
+        assert_eq!(
+            markdown
+                .matches(&format!("issues/{}", draft.filename))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
 fn offline_report_loader_rejects_future_schema_and_truncated_json() {
     let directory = TempDir::new().unwrap();
     let input = directory.path().join("report.json");
