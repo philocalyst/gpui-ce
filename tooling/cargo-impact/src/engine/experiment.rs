@@ -195,13 +195,20 @@ pub(super) fn execute(
         }
         stage = ExperimentStage::Candidate;
         emit(ExperimentEvent::PhaseStarted(BuildPhase::Candidate))?;
-        snapshot_in(
+        let restored_fingerprint = snapshot_in(
             context.request,
             context.root,
             &workspace.original,
             &workspace.root,
             deadline,
         )?;
+        if restored_fingerprint != fingerprint {
+            return Ok(Some(ExperimentFailure {
+                stage,
+                cause: HarnessFailure::InputMutation,
+                message: "The original consumer changed between phases; candidate compilation was refused to preserve a controlled comparison.".into(),
+            }));
+        }
         if let Some(lock) = lock {
             write_lock(
                 &workspace.workspace_manifest.with_file_name("Cargo.lock"),

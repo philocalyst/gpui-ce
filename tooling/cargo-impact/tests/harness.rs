@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
@@ -59,6 +60,103 @@ fn package(root: &Path, name: &str, version: &str, source: &str, extra: &str) {
     fs::write(root.join("src/lib.rs"), source).unwrap();
 }
 const DEP: &str = "[dependencies]\nchanged-lib='1'";
+
+#[test]
+fn oversized_manifest_is_a_bounded_preparation_failure_at_the_actual_phase() {
+    let mut fixture = Fixture::new();
+    let consumer = fixture.consumer(
+        "large-manifest",
+        "pub fn api() { changed_lib::kept(); }",
+        DEP,
+    );
+    let path = consumer.join("Cargo.toml");
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(b"\n#").unwrap();
+    file.write_all(&vec![b'a'; 8 * 1024 * 1024]).unwrap();
+    drop(file);
+    fixture.consumer(
+        "normal-manifest",
+        "pub fn api() { changed_lib::kept(); }",
+        DEP,
+    );
+    let report = analyze(&fixture.request).unwrap();
+    let result = &report.downstreams[0];
+    assert_eq!(result.classification, Classification::HarnessFailure);
+    let failure = result.lifecycle.failure.as_ref().unwrap();
+    assert_eq!(failure.stage, ExperimentStage::Baseline);
+    assert_eq!(failure.cause, HarnessFailure::Preparation);
+    assert!(failure.message.contains("manifest exceeds 8 MiB"));
+    assert!(result.baseline.compiled_packages.is_empty());
+    assert_eq!(result.candidate.failure, None);
+    assert_eq!(
+        report.downstreams[1].classification,
+        Classification::Compatible
+    );
+}
+
+#[test]
+fn repeated_errors_in_one_large_source_keep_every_verified_mapping() {
+    let mut fixture = Fixture::new();
+    let source = format!(
+        "pub fn api() {{ changed_lib::removed(); }}\npub fn second() {{ changed_lib::removed(); }}\n//{}\n",
+        "x".repeat(1024 * 1024)
+    );
+    fixture.consumer("repeated-errors", &source, DEP);
+    let report = analyze(&fixture.request).unwrap();
+    let result = &report.downstreams[0];
+    assert_eq!(result.classification, Classification::Regression);
+    let errors: Vec<_> = result
+        .candidate
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic
+                .code
+                .as_ref()
+                .is_some_and(|code| code.code == "E0425")
+        })
+        .collect();
+    assert_eq!(errors.len(), 2);
+    for diagnostic in errors {
+        let span = diagnostic
+            .spans
+            .iter()
+            .find(|span| span.is_primary)
+            .unwrap();
+        assert_eq!(
+            diagnostic.source_files.get(&span.file_name),
+            Some(&PathBuf::from("src/lib.rs"))
+        );
+    }
+}
+
+#[test]
+fn editing_the_original_consumer_between_phases_cannot_hide_a_regression() {
+    let mut fixture = Fixture::new();
+    let consumer = fixture.consumer(
+        "original-drift",
+        "pub fn api() { changed_lib::removed(); }",
+        DEP,
+    );
+    fs::write(consumer.join("build.rs"), format!(
+        "fn main() {{ if std::fs::read_to_string(\"Cargo.toml\").unwrap().contains(\"upstream/baseline\") {{ std::fs::write({:?}, \"pub fn api() {{ changed_lib::kept(); }}\").unwrap(); }} }}",
+        consumer.join("src/lib.rs")
+    )).unwrap();
+    let report = analyze(&fixture.request).unwrap();
+    let result = &report.downstreams[0];
+    assert!(result.baseline.success);
+    assert_eq!(result.classification, Classification::HarnessFailure);
+    let failure = result.lifecycle.failure.as_ref().unwrap();
+    assert_eq!(failure.stage, ExperimentStage::Candidate);
+    assert_eq!(failure.cause, HarnessFailure::InputMutation);
+    assert!(
+        failure
+            .message
+            .contains("original consumer changed between phases")
+    );
+    assert!(result.candidate.compiled_packages.is_empty());
+    assert_eq!(result.candidate.failure, None);
+}
 
 #[test]
 fn unavailable_standard_library_is_an_environment_failure() {

@@ -223,6 +223,7 @@ fn check_prepared(
         .iter()
         .map(|package| (package.id.repr.as_str(), package))
         .collect();
+    let mut source_map = VerifiedSources::new(metadata.workspace_root.as_std_path(), cwd, original);
     for diagnostic in &mut output.diagnostics {
         let Some(package) = packages.get(diagnostic.package_id.as_str()) else {
             continue;
@@ -242,13 +243,7 @@ fn check_prepared(
         });
         // Cargo invokes rustc from the workspace directory. Only link files that still
         // match the original checkout, not generated files or modified build-script output.
-        map_diagnostic_sources(
-            &diagnostic.diagnostic,
-            metadata.workspace_root.as_std_path(),
-            cwd,
-            original,
-            &mut diagnostic.source_files,
-        );
+        source_map.map_diagnostic(&diagnostic.diagnostic, &mut diagnostic.source_files);
     }
     let failure = if source_changed {
         Some(HarnessFailure::InputMutation)
@@ -400,48 +395,138 @@ fn dependency_graph(
     })
 }
 
-fn map_diagnostic_sources(
-    diagnostic: &cargo_metadata::diagnostic::Diagnostic,
-    rustc_cwd: &Path,
-    root: &Path,
-    original: &Path,
-    files: &mut std::collections::BTreeMap<String, PathBuf>,
-) {
-    for span in &diagnostic.spans {
-        map_span_source(span, rustc_cwd, root, original, files);
+/// Repeated errors, macro expansions, and path aliases share one bounded file
+/// comparison. Negative mappings are cached too; generated/external sources
+/// cannot turn thousands of diagnostics into repeated large file reads.
+struct VerifiedSources<'a> {
+    rustc_cwd: &'a Path,
+    root: &'a Path,
+    original: &'a Path,
+    names: std::collections::BTreeMap<String, Option<PathBuf>>,
+    files: std::collections::BTreeMap<PathBuf, Option<PathBuf>>,
+}
+
+impl<'a> VerifiedSources<'a> {
+    fn new(rustc_cwd: &'a Path, root: &'a Path, original: &'a Path) -> Self {
+        Self {
+            rustc_cwd,
+            root,
+            original,
+            names: Default::default(),
+            files: Default::default(),
+        }
     }
-    for child in &diagnostic.children {
-        map_diagnostic_sources(child, rustc_cwd, root, original, files);
+
+    fn map_diagnostic(
+        &mut self,
+        diagnostic: &cargo_metadata::diagnostic::Diagnostic,
+        files: &mut std::collections::BTreeMap<String, PathBuf>,
+    ) {
+        for span in &diagnostic.spans {
+            self.map_span(span, files);
+        }
+        for child in &diagnostic.children {
+            self.map_diagnostic(child, files);
+        }
+    }
+
+    fn map_span(
+        &mut self,
+        span: &cargo_metadata::diagnostic::DiagnosticSpan,
+        files: &mut std::collections::BTreeMap<String, PathBuf>,
+    ) {
+        if let Some(path) = self.lookup(&span.file_name) {
+            files.insert(span.file_name.clone(), path);
+        }
+        if let Some(expansion) = &span.expansion {
+            self.map_span(&expansion.span, files);
+            if let Some(definition) = &expansion.def_site_span {
+                self.map_span(definition, files);
+            }
+        }
+    }
+
+    fn lookup(&mut self, name: &str) -> Option<PathBuf> {
+        if let Some(mapped) = self.names.get(name) {
+            return mapped.clone();
+        }
+        let mapped = self
+            .rustc_cwd
+            .join(name)
+            .canonicalize()
+            .ok()
+            .and_then(|path| {
+                if let Some(mapped) = self.files.get(&path) {
+                    return mapped.clone();
+                }
+                let mapped = self.verify(&path);
+                self.files.insert(path, mapped.clone());
+                mapped
+            });
+        self.names.insert(name.into(), mapped.clone());
+        mapped
+    }
+
+    fn verify(&self, path: &Path) -> Option<PathBuf> {
+        let relative = path.strip_prefix(self.root).ok()?;
+        let source = self.original.join(relative).canonicalize().ok()?;
+        (source.starts_with(self.original) && equal_source_files(path, &source).unwrap_or(false))
+            .then(|| relative.to_owned())
     }
 }
 
-fn map_span_source(
-    span: &cargo_metadata::diagnostic::DiagnosticSpan,
-    rustc_cwd: &Path,
-    root: &Path,
-    original: &Path,
-    files: &mut std::collections::BTreeMap<String, PathBuf>,
-) {
-    if !files.contains_key(&span.file_name)
-        && let Ok(path) = rustc_cwd.join(&span.file_name).canonicalize()
-        && let Ok(relative) = path.strip_prefix(root)
-        && let Ok(source) = original.join(relative).canonicalize()
-        && source.starts_with(original)
-        && path.is_file()
-        && source.is_file()
-        && fs::metadata(&path).is_ok_and(|m| m.len() <= 16 * 1024 * 1024)
-        && fs::metadata(&source).is_ok_and(|m| m.len() <= 16 * 1024 * 1024)
-        && let (Ok(current), Ok(initial)) = (fs::read(&path), fs::read(source))
-        && current == initial
+fn equal_source_files(current: &Path, initial: &Path) -> io::Result<bool> {
+    const LIMIT: u64 = 16 * 1024 * 1024;
+    let current_metadata = fs::metadata(current)?;
+    let initial_metadata = fs::metadata(initial)?;
+    if !current_metadata.is_file()
+        || !initial_metadata.is_file()
+        || current_metadata.len() != initial_metadata.len()
+        || current_metadata.len() > LIMIT
     {
-        files.insert(span.file_name.clone(), relative.to_owned());
+        return Ok(false);
     }
-    if let Some(expansion) = &span.expansion {
-        map_span_source(&expansion.span, rustc_cwd, root, original, files);
-        if let Some(definition) = &expansion.def_site_span {
-            map_span_source(definition, rustc_cwd, root, original, files);
+    let mut current = fs::File::open(current)?.take(LIMIT + 1);
+    let mut initial = fs::File::open(initial)?.take(LIMIT + 1);
+    let mut current_bytes = [0u8; 64 * 1024];
+    let mut initial_bytes = [0u8; 64 * 1024];
+    let mut total = 0;
+    loop {
+        let count = current.read(&mut current_bytes)?;
+        total += count as u64;
+        if total > LIMIT {
+            return Ok(false);
+        }
+        if count == 0 {
+            return Ok(initial.read(&mut initial_bytes[..1])? == 0);
+        }
+        match initial.read_exact(&mut initial_bytes[..count]) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        if current_bytes[..count] != initial_bytes[..count] {
+            return Ok(false);
         }
     }
+}
+
+fn read_manifest(path: &Path) -> io::Result<String> {
+    const LIMIT: u64 = 8 * 1024 * 1024;
+    let mut contents = String::new();
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() > LIMIT {
+        return Err(io::Error::other(
+            "Cargo manifest exceeds 8 MiB; narrow or split the selected workspace",
+        ));
+    }
+    file.take(LIMIT + 1).read_to_string(&mut contents)?;
+    if contents.len() as u64 > LIMIT {
+        return Err(io::Error::other(
+            "Cargo manifest exceeds 8 MiB; narrow or split the selected workspace",
+        ));
+    }
+    Ok(contents)
 }
 
 pub(crate) fn feature_args(builder: &Builder<'_>, args: &mut Vec<OsString>) {
@@ -481,7 +566,7 @@ pub(crate) fn inject(
         if !visited.insert(manifest.clone()) {
             continue;
         }
-        let text = fs::read_to_string(&manifest)?;
+        let text = read_manifest(&manifest)?;
         let mut value: toml::Value = toml::from_str(&text).map_err(io::Error::other)?;
         inject_tables(
             &mut value,
@@ -497,7 +582,7 @@ pub(crate) fn inject(
         )?;
     }
     let mut value: toml::Value =
-        toml::from_str(&fs::read_to_string(workspace_manifest)?).map_err(io::Error::other)?;
+        toml::from_str(&read_manifest(workspace_manifest)?).map_err(io::Error::other)?;
     let root = value
         .as_table_mut()
         .ok_or_else(|| io::Error::other("invalid workspace manifest"))?;
@@ -598,7 +683,7 @@ fn inject_tables(
 
 pub(crate) fn normalize_version(manifest: &Path, version: &str) -> io::Result<()> {
     let mut value: toml::Value =
-        toml::from_str(&fs::read_to_string(manifest)?).map_err(io::Error::other)?;
+        toml::from_str(&read_manifest(manifest)?).map_err(io::Error::other)?;
     let package = value
         .get_mut("package")
         .and_then(toml::Value::as_table_mut)
@@ -651,7 +736,7 @@ pub(crate) fn apply_source_patches(
         return Ok(());
     }
     let mut value: toml::Value =
-        toml::from_str(&fs::read_to_string(manifest)?).map_err(io::Error::other)?;
+        toml::from_str(&read_manifest(manifest)?).map_err(io::Error::other)?;
     let patches = value
         .as_table_mut()
         .ok_or_else(|| io::Error::other("invalid manifest"))?
