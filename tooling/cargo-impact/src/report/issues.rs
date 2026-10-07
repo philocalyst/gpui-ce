@@ -17,6 +17,7 @@ use super::presentation::{
 
 #[derive(Clone, Debug, Serialize)]
 pub struct IssueDraft {
+    pub id: String,
     pub downstream: String,
     pub title: String,
     pub body: String,
@@ -31,7 +32,7 @@ impl ImpactReport {
     pub fn issue_drafts(&self) -> Vec<IssueDraft> {
         self.downstreams
             .iter()
-            .filter(|r| r.classification == Classification::Regression)
+            .filter(|r| super::view::outcome(r) == Some(Classification::Regression))
             .map(|result| draft(self, result))
             .collect()
     }
@@ -212,7 +213,16 @@ fn draft(report: &ImpactReport, result: &DownstreamResult) -> IssueDraft {
     if let Some(lock) = &build.provenance.lock_fingerprint {
         let _ = writeln!(body, "Resolved Cargo.lock fingerprint: {}.\n", inline(lock));
     }
-    body.push_str("Attach this draft, its reproduction TOML, and the original report.json. Review whether the API change is intentional before submitting. No issue or notification was sent by cargo-impact.\n");
+    if let Ok(identity) = crate::replay::ReplayIdentity::from_report(report, result) {
+        body.push_str("## Verified replay\n\nThe complete report bundle retains both phase lockfiles and resolved dependency graphs. With the original library snapshots and scanner implementation, run:\n\n");
+        fenced(
+            &mut body,
+            "sh",
+            &super::presentation::replay_command(&identity.experiment_id),
+        );
+        body.push_str("Replay pins the recorded Docker environment, verifies the frozen inputs, and compiles again. Environment or evidence drift yields an inconclusive result.\n\n");
+    }
+    body.push_str("Attach this draft, its reproduction TOML, and the original complete report bundle (including phase locks and manifest). Review whether the API change is intentional before submitting. No issue or notification was sent by cargo-impact.\n");
     let first = diagnostics.first();
     let compact = format!(
         "A cargo-impact comparison found a compile-time regression in {} when replacing {} with a candidate source. The baseline compiled successfully.\n\n{}\n\nTested downstream revision: {}.\n\nPlease attach the full issue Markdown, reproduction TOML, and report.json from the report bundle. Review this draft before submitting.",
@@ -236,6 +246,7 @@ fn draft(report: &ImpactReport, result: &DownstreamResult) -> IssueDraft {
         body,
         filename: format!("{id}.md"),
         reproduction_filename: format!("{id}.toml"),
+        id,
         reproduction_config,
         repository,
         composer_url,

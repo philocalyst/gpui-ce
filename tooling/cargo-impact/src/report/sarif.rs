@@ -16,7 +16,7 @@ pub(super) fn render(report: &ImpactReport) -> Value {
     for consumer in report
         .downstreams
         .iter()
-        .filter(|r| r.classification != Classification::Compatible)
+        .filter(|r| super::view::has_outcome(r) && r.classification != Classification::Compatible)
     {
         for diagnostic in errors(selected_build(consumer)) {
             let code = diagnostic
@@ -76,11 +76,11 @@ pub(super) fn render(report: &ImpactReport) -> Value {
             }
             results.push(json!({
                 "ruleId":rule_id,
-                "level":if consumer.classification == Classification::Regression {"error"} else {"warning"},
+                "level":if super::view::outcome(consumer) == Some(Classification::Regression) {"error"} else {"warning"},
                 "message":{"text":format!("{}: {}", consumer.name, diagnostic.message)},
                 "locations":locations,
                 "partialFingerprints":{"cargo-impact/compiler-symptom":diagnostic_key(diagnostic)},
-                "properties":{"consumer":consumer.name,"classification":consumer.classification,"revision":consumer.revision,"package":diagnostic.package,"sourceFingerprint":consumer.source_fingerprint}
+                "properties":{"experimentId":consumer.experiment_id,"consumer":consumer.name,"classification":super::view::outcome(consumer),"recordedClassification":consumer.classification,"lifecycle":consumer.lifecycle,"revision":consumer.revision,"package":diagnostic.package,"sourceFingerprint":consumer.source_fingerprint}
             }));
         }
     }
@@ -91,7 +91,7 @@ pub(super) fn render(report: &ImpactReport) -> Value {
     for consumer in report
         .downstreams
         .iter()
-        .filter(|r| r.classification == Classification::HarnessFailure)
+        .filter(|r| super::view::outcome(r) == Some(Classification::HarnessFailure))
     {
         notifications.push(json!({"level":"error","message":{"text":format!("{}: {}",consumer.name,consumer.message.as_deref().unwrap_or("build environment failed; inspect report.json"))}}));
     }
@@ -108,7 +108,7 @@ pub(super) fn render(report: &ImpactReport) -> Value {
             "tool":{"driver":{"name":"cargo-impact","version":env!("CARGO_PKG_VERSION"),"rules":rules.into_values().collect::<Vec<_>>() }},
             "results":results,
             "invocations":[{"executionSuccessful": !report.has_harness_failures() && report.run.status == RunStatus::Complete && report.run.coverage_sufficient != Some(false),"toolExecutionNotifications":notifications}],
-            "properties":{"library":report.library,"runStatus":report.run.status,"baselineFingerprint":report.baseline_fingerprint,"candidateFingerprint":report.candidate_fingerprint}
+            "properties":{"library":report.library,"runStatus":report.run.status,"engineFingerprint":report.run.engine_fingerprint,"replayOf":report.run.replay_of,"replayExpected":report.run.replay_expected,"baselineFingerprint":report.baseline_fingerprint,"candidateFingerprint":report.candidate_fingerprint}
         }]
     })
 }

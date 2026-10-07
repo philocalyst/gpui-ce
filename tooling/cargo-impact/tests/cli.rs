@@ -60,6 +60,17 @@ fn init_vendors_a_standalone_scanner_manifest() {
     assert!(scanner.join("src/setup.rs").is_file());
     assert!(scanner.join("examples/impact.yml").is_file());
     assert!(scanner.join("action.yml").is_file());
+    for asset in [
+        "build.rs",
+        "src/engine/scheduler.rs",
+        "src/report/bundle/verify.rs",
+        "src/cli/check.rs",
+    ] {
+        assert!(
+            scanner.join(asset).is_file(),
+            "missing standalone asset {asset}"
+        );
+    }
     let impact_workflow =
         fs::read_to_string(directory.path().join(".github/workflows/impact.yml")).unwrap();
     assert!(impact_workflow.contains("uses: ./baseline/.github/cargo-impact"));
@@ -148,7 +159,7 @@ fn setup_rejects_a_symlink_inside_the_chosen_repository() {
         .arg(directory.path())
         .assert()
         .code(2)
-        .stderr(contains("contains a symlink"));
+        .stderr(contains("must be a directory without symlinks"));
     assert!(!directory.path().join("impact.toml").exists());
     assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
 }
@@ -352,4 +363,152 @@ fn package(root: &Path) {
     )
     .unwrap();
     fs::write(root.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+}
+
+#[test]
+fn verify_checks_published_views_before_reporting_validity() {
+    let directory = TempDir::new().unwrap();
+    let report = cargo_impact::ImpactReport::failed("demo", "retained failure");
+    report.write_artifacts(directory.path()).unwrap();
+    let output = cli()
+        .args(["verify", "--json", "--report-dir"])
+        .arg(directory.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let verified: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(verified["valid"], true);
+    assert!(verified["bundle"].as_str().is_some());
+    let manifest = cargo_impact::report::bundle::verify(directory.path())
+        .unwrap()
+        .manifest
+        .unwrap();
+    fs::write(
+        directory
+            .path()
+            .join(manifest.directory())
+            .join("report.md"),
+        "changed view",
+    )
+    .unwrap();
+    cli()
+        .args(["verify", "--report-dir"])
+        .arg(directory.path())
+        .assert()
+        .code(2)
+        .stderr(contains("digest or size differs"));
+}
+
+#[test]
+fn setup_rejects_blocking_ancestors_before_changing_any_files() {
+    for ancestor in [".github/workflows", ".github/cargo-impact/src/report"] {
+        let directory = TempDir::new().unwrap();
+        let blocker = directory.path().join(ancestor);
+        fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+        fs::write(&blocker, "user owned").unwrap();
+        fs::write(directory.path().join(".gitignore"), "original\n").unwrap();
+        cli()
+            .args(["init", "--library", "demo", "--directory"])
+            .arg(directory.path())
+            .assert()
+            .code(2);
+        assert!(!directory.path().join("impact.toml").exists());
+        assert_eq!(
+            fs::read_to_string(directory.path().join(".gitignore")).unwrap(),
+            "original\n"
+        );
+        assert_eq!(fs::read_to_string(blocker).unwrap(), "user owned");
+    }
+}
+
+#[test]
+fn replay_cannot_overwrite_its_input_generation_or_work_inside_the_bundle() {
+    let directory = TempDir::new().unwrap();
+    let input = directory.path().join("input");
+    cargo_impact::ImpactReport::failed("demo", "retained original")
+        .write_artifacts(&input)
+        .unwrap();
+    let manifest = cargo_impact::report::bundle::verify(&input)
+        .unwrap()
+        .manifest
+        .unwrap();
+    let generation = input.join(manifest.directory());
+    let original = fs::read(generation.join("report.json")).unwrap();
+    cli()
+        .args(["replay", "--report-dir"])
+        .arg(&input)
+        .args([
+            "--experiment",
+            &"a".repeat(64),
+            "--baseline",
+            "base",
+            "--candidate",
+            "head",
+            "--output-dir",
+        ])
+        .arg(&generation)
+        .assert()
+        .code(2)
+        .stderr(contains("outside its input report tree"));
+    assert_eq!(fs::read(generation.join("report.json")).unwrap(), original);
+    cli()
+        .args(["replay", "--report-dir"])
+        .arg(&input)
+        .args([
+            "--experiment",
+            &"a".repeat(64),
+            "--baseline",
+            "base",
+            "--candidate",
+            "head",
+            "--output-dir",
+        ])
+        .arg(directory.path().join("output"))
+        .arg("--work-dir")
+        .arg(input.join("future/work"))
+        .assert()
+        .code(2)
+        .stderr(contains("outside its input report tree"));
+    assert!(!directory.path().join("output").exists());
+    cargo_impact::report::bundle::verify(&input).unwrap();
+}
+
+#[test]
+fn publish_accepts_a_bare_report_filename_and_rejects_damage_before_api_access() {
+    let directory = TempDir::new().unwrap();
+    cargo_impact::ImpactReport::failed("demo", "original")
+        .write_artifacts(directory.path())
+        .unwrap();
+    let manifest = cargo_impact::report::bundle::verify(directory.path())
+        .unwrap()
+        .manifest
+        .unwrap();
+    fs::write(
+        directory
+            .path()
+            .join(manifest.directory())
+            .join("index.html"),
+        "damaged",
+    )
+    .unwrap();
+    cli()
+        .current_dir(directory.path())
+        .args([
+            "publish",
+            "--repository",
+            "owner/repo",
+            "--pull-request",
+            "1",
+            "--candidate-sha",
+            &"a".repeat(40),
+            "--report",
+            "report.json",
+            "--run-url",
+            "https://github.com/owner/repo/actions/runs/1",
+        ])
+        .assert()
+        .code(2)
+        .stderr(contains("digest or size differs"));
 }

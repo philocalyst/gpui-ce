@@ -21,6 +21,8 @@ fn regression(name: &str) -> DownstreamResult {
         "children":[],"rendered":"error[E0624]: method is private\n<script>alert(\"PWN\")</script>\n"
     })).unwrap();
     DownstreamResult {
+        experiment_id: None,
+        lifecycle: Default::default(),
         name: name.into(),
         revision: Some("a".repeat(40)),
         source: DownstreamSource::Git {
@@ -269,6 +271,37 @@ fn changed_input_diagnostics_do_not_claim_verified_source_links() {
 }
 
 #[test]
+fn same_named_experiments_keep_their_own_issue_and_recipe_links() {
+    let mut report = report();
+    let mut alternate = report.downstreams[0].clone();
+    alternate.recipe.features = vec!["alternate-feature".into()];
+    report.downstreams.push(alternate);
+    let drafts = report.issue_drafts();
+    assert_ne!(drafts[0].id, drafts[1].id);
+    assert_ne!(drafts[0].reproduction_config, drafts[1].reproduction_config);
+    let html = report.html();
+    let markdown = report.markdown();
+    for draft in drafts {
+        assert_eq!(
+            html.matches(&format!("href=\"issues/{}\"", draft.filename))
+                .count(),
+            1
+        );
+        assert_eq!(
+            html.matches(&format!("href=\"issues/{}\"", draft.reproduction_filename))
+                .count(),
+            1
+        );
+        assert_eq!(
+            markdown
+                .matches(&format!("issues/{}", draft.filename))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
 fn offline_report_loader_rejects_future_schema_and_truncated_json() {
     let directory = TempDir::new().unwrap();
     let input = directory.path().join("report.json");
@@ -283,4 +316,93 @@ fn offline_report_loader_rejects_future_schema_and_truncated_json() {
     );
     fs::write(&input, "{\"schema_version\":1").unwrap();
     assert!(ImpactReport::load(&input).is_err());
+}
+
+#[test]
+fn lifecycle_keeps_pending_builds_out_of_outcomes_drafts_and_sarif() {
+    let mut report = report();
+    report.run.status = RunStatus::Running;
+    let result = &mut report.downstreams[0];
+    result.lifecycle.status = cargo_impact::ExperimentStatus::Candidate;
+    result.classification = Classification::HarnessFailure;
+    let summary = cargo_impact::report::ReportSummary::from_report(&report);
+    assert_eq!(summary.pending, 1);
+    assert_eq!(summary.harness_failures, 0);
+    assert!(!report.has_harness_failures());
+    assert!(report.html().contains("Building candidate"));
+    assert!(
+        report
+            .markdown()
+            .contains("0 harness failures · 0 not exercised · 1 pending")
+    );
+    assert!(report.issue_drafts().is_empty());
+    assert!(
+        report.sarif()["runs"][0]["results"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn lifecycle_integrity_failure_invalidates_source_permalinks_with_retained_diagnostics() {
+    let mut report = report();
+    report.downstreams[0].lifecycle.status = cargo_impact::ExperimentStatus::Complete;
+    report.downstreams[0].lifecycle.failure = Some(cargo_impact::ExperimentFailure {
+        stage: cargo_impact::ExperimentStage::IntegrityCheck,
+        cause: cargo_impact::HarnessFailure::InputMutation,
+        message: "build changed source inputs".into(),
+    });
+    assert!(report.html().contains("Failed during IntegrityCheck"));
+    assert!(report.html().contains("<mark>λ.retiré</mark>"));
+    assert!(!report.html().contains("src/a%20b%23%3F.rs#L42"));
+    assert!(!report.has_regressions());
+    assert!(report.has_harness_failures());
+    assert!(report.issue_drafts().is_empty());
+    assert!(
+        report
+            .html()
+            .contains("Environment failure and retry recipe")
+    );
+    assert_eq!(
+        report.sarif()["runs"][0]["results"][0]["properties"]["classification"],
+        "harness_failure"
+    );
+    assert!(
+        report.sarif()["runs"][0]["results"][0]["locations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn preparation_failure_reports_a_replay_attempt_without_claiming_compilation() {
+    let mut report = ImpactReport::failed("demo", "engine identity differed before compilation");
+    report.run.replay_of = Some("a".repeat(64));
+    let html = report.html();
+    assert!(html.contains("Replay attempt"));
+    assert!(!html.contains("Recompiled"));
+    assert!(!html.contains("Fresh replay"));
+}
+
+#[test]
+fn resolved_graph_explains_failing_package_and_injected_library_paths() {
+    let mut report = report();
+    let graph = json!({"roots":["app"],"selected_library":"lib","packages":[
+        {"id":"app","identity":"a".repeat(64),"name":"app","version":"2.0.0","source":null,"manifest":"Cargo.toml","origin":"downstream","features":[],"dependencies":["consumer 1.0.0"]},
+        {"id":"consumer 1.0.0","identity":"b".repeat(64),"name":"consumer","version":"1.0.0","source":null,"manifest":"crates/consumer/Cargo.toml","origin":"downstream","features":["display"],"dependencies":["lib"]},
+        {"id":"lib","identity":"c".repeat(64),"name":"demo-lib","version":"0.1.0","source":null,"manifest":"Cargo.toml","origin":"library","features":["render"],"dependencies":[]}
+    ]});
+    report.downstreams[0].candidate.dependency_graph = Some(serde_json::from_value(graph).unwrap());
+    report.downstreams[0].candidate.selected_library = Some("lib".into());
+    let html = report.html();
+    assert!(html.contains("Resolved path to the failing package"));
+    assert!(html.contains("app 2.0.0 → consumer 1.0.0 → demo-lib 0.1.0"));
+    assert!(html.contains("Selected features: <code>render</code>"));
+    assert!(
+        report
+            .markdown()
+            .contains("app 2.0.0 → consumer 1.0.0 → demo-lib 0.1.0")
+    );
 }

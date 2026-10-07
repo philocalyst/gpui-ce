@@ -27,7 +27,7 @@
       try {
         if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(draft.value);
         else { draft.focus(); draft.select(); if (!document.execCommand("copy")) throw new Error("Clipboard unavailable"); button.focus(); }
-        status.textContent = "Issue draft copied. Review it before submitting.";
+        status.textContent = button.dataset.copyMessage || "Issue draft copied. Review it before submitting.";
       } catch (_) { status.textContent = "Clipboard unavailable. Use Download draft instead."; }
       window.setTimeout(() => { status.textContent = ""; }, 5000);
     });

@@ -56,6 +56,20 @@ SARIF retains commit-pinned consumer URLs and reports harness/partial failures t
 invocation notifications; it is not uploaded to the upstream repository as foreign code.
 Progress checkpoints preserve completed experiments after interruption; re-render their
 JSON offline. New checkpoints replace old HTML/SARIF/issue views.
+Completed views live in immutable `bundles/<sha256>/` generations. `bundle.json`
+publishes their exact inventory, sizes and hashes; root views link to that generation.
+Verify downloaded evidence before inspecting or publishing it:
+
+```sh
+cargo impact verify --report-dir impact-report
+cargo impact prune-reports --report-dir impact-report --keep-previous 3
+# Add --apply after inspecting the retention preview.
+```
+
+Retention preserves the publication, altered/incomplete directories and user files.
+Verification checks integrity of the artifact set; keep its trusted acquisition context.
+It does not authenticate the author. A checkpoint verifies its JSON separately from
+complete rendered views. See [the evidence contract](docs/evidence.md) for recovery.
 Each diagnostic retains its Cargo target and package origin (downstream,
 injected library, or external dependency). Source links use verified original
 checkout files, including nested workspace paths; generated and external files
@@ -276,6 +290,34 @@ Actions caches retain target and Cargo/Boxington cache tiers, omitting mutable s
 and HOME/configuration. Cache reuse accelerates builds; it never bypasses a comparison
 with a previous result. Exact immutable result reuse, dependency sharing between phases,
 and tiered LRU eviction remain future work.
+
+The installation action caches the finished scanner and its compilation separately.
+Changing scanner source can reuse trusted dependencies keyed by the lockfile and
+toolchain. This cache lives outside downstream worker mounts; comment jobs only
+read caches and transfer the scanner through a same-run artifact.
+
+## Verify a replay
+
+Completed Docker comparisons retain resolved phase lockfiles, patch-source URLs,
+feature-filtered dependency graphs, frozen source hashes, exact compiler versions,
+immutable image identity and its registry acquisition reference. The report provides
+a copyable command for one full experiment ID:
+
+```sh
+cargo impact replay --report-dir impact-report --experiment FULL_EXPERIMENT_ID \
+  --baseline ../base --candidate ../candidate \
+  --work-dir .cargo-impact-replay --output-dir impact-replay
+```
+
+Replay verifies the bundle first, pins the consumer Git commit and Docker image,
+restores each retained lockfile, and checks all input identities before compiling.
+It clears only the selected experiment's targets for a clean confirmation; downloads
+remain reusable. It records the expected comparison and explains a changed outcome.
+Source, engine, compiler, image, lock or graph drift is inconclusive. Runtime resource
+overrides are the same as `check`. Input and output directories must be separate.
+Locally built images need to exist in the daemon; pulled images retain a registry digest.
+Legacy, incomplete, host/Nix and uncontrolled reports are ineligible. Replay never
+substitutes a cached success for a new build.
 
 Set `driver = "boxington"` in a recipe to run downstream checks through `mbx`.
 Install mbx in the chosen local/Nix environment or Docker image. Rustdoc and

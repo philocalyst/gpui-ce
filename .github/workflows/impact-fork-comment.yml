@@ -109,6 +109,9 @@ jobs:
           --upstream-repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
           --baseline-sha "$BASELINE_SHA" --candidate-sha "$CANDIDATE_SHA"
           --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report --scan-timeout-seconds 2100
+      - name: Verify retained report bundle
+        if: always()
+        run: '"$RUNNER_TEMP/impact/bin/cargo-impact" verify --report-dir impact-report'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         id: impact-artifact
         if: always()
@@ -142,12 +145,16 @@ jobs:
         with:
           name: downstream-impact
           path: impact-report
-      - name: Preserve a worker failure when evidence is unavailable
+      - name: Verify worker evidence or preserve an explicit inconclusive result
+        id: evidence
         run: |
-          if ! test -f impact-report/report.json; then
+          if "$RUNNER_TEMP/impact/bin/cargo-impact" verify --report-dir impact-report; then
+            echo 'report=impact-report/report.json' >> "$GITHUB_OUTPUT"
+          else
             "$RUNNER_TEMP/impact/bin/cargo-impact" report \
-              --failure "The worker did not produce downloadable evidence. Inspect this Actions run for preparation, cancellation, installation, or artifact failures." \
-              --output-dir impact-report
+              --failure "Worker evidence is missing, incomplete, or failed bundle verification. Inspect the original artifact and this Actions run for preparation, cancellation, or transport failures." \
+              --output-dir impact-failure
+            echo 'report=impact-failure/report.json' >> "$GITHUB_OUTPUT"
           fi
       - name: Publish only against the tested head
         env:
@@ -155,9 +162,10 @@ jobs:
           REPORT_ARTIFACT_URL: ${{ needs.build.outputs.artifact_url }}
           TESTED_HEAD: ${{ needs.authorize.outputs.candidate }}
           PR_NUMBER: ${{ github.event.issue.number }}
+          REPORT_PATH: ${{ steps.evidence.outputs.report }}
         run: |
           report_url="${REPORT_ARTIFACT_URL:-$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID}"
           "$RUNNER_TEMP/impact/bin/cargo-impact" publish \
             --repository philocalyst/gpui-ce --pull-request "$PR_NUMBER" --candidate-sha "$TESTED_HEAD" \
-            --report impact-report/report.json \
+            --report "$REPORT_PATH" \
             --run-url "$report_url"

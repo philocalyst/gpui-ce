@@ -37,6 +37,8 @@ jobs:
           cargo +1.99.0 test --locked --all-targets
           cargo +1.99.0 clippy --locked --all-targets -- -D warnings
           cargo +1.99.0 fmt --all -- --check
+          cargo +1.99.0 run --locked -- init --library setup-probe --directory "$RUNNER_TEMP/impact-install-probe"
+          cargo +1.99.0 check --locked --manifest-path "$RUNNER_TEMP/impact-install-probe/.github/cargo-impact/Cargo.toml" --target-dir target
           docker pull rust:1.99.0-bookworm
           cargo +1.99.0 test --test harness docker_baseline_cannot_mutate_candidate_or_sibling_workers -- --ignored --nocapture
   check:
@@ -103,6 +105,33 @@ jobs:
             --upstream-repository https://github.com/philocalyst/gpui-ce \
             --baseline-sha "$BASELINE_SHA" --candidate-sha "$CANDIDATE_SHA" \
             --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report "${options[@]}"
+      - name: Clean replay of one completed pinned consumer
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.scanner_only != true)
+        run: |
+          if ! test -f impact-report/report.json; then exit 0; fi
+          experiment="$(jq -r '[.downstreams[] | select(.lifecycle.status == "complete" and .lifecycle.failure == null and (.classification == "regression" or .classification == "compatible")) | .experiment_id][0] // empty' impact-report/report.json)"
+          if test -z "$experiment"; then
+            echo 'No controlled completed experiment is eligible for replay.'
+            exit 0
+          fi
+          expected="$(jq -r --arg id "$experiment" '.downstreams[] | select(.experiment_id == $id) | if .classification == "regression" then 1 else 0 end' impact-report/report.json)"
+          status=0
+          "$RUNNER_TEMP/impact/bin/cargo-impact" replay \
+            --report-dir impact-report --experiment "$experiment" \
+            --baseline "$RUNNER_TEMP/impact-inputs/baseline" --candidate "$RUNNER_TEMP/impact-inputs/candidate" \
+            --work-dir "$RUNNER_TEMP/impact-replay-work" --output-dir impact-replay || status=$?
+          test "$status" -eq "$expected"
+          "$RUNNER_TEMP/impact/bin/cargo-impact" verify --report-dir impact-replay
+          jq -e '.error == null and (.run.replay_of | length == 64) and .downstreams[0].lifecycle.status == "complete" and .downstreams[0].lifecycle.failure == null and .downstreams[0].classification == .run.replay_expected' impact-replay/report.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && hashFiles('impact-replay/report.json') != ''
+        with:
+          name: downstream-replay
+          path: impact-replay/
+          if-no-files-found: error
+      - name: Verify retained report bundle
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.scanner_only != true)
+        run: '"$RUNNER_TEMP/impact/bin/cargo-impact" verify --report-dir impact-report'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         id: impact-artifact
         if: always() && (github.event_name != 'workflow_dispatch' || inputs.scanner_only != true)
