@@ -57,21 +57,10 @@ fn main() -> io::Result<()> {
 }
 
 fn engine_input(path: &str) -> bool {
-    path.starts_with("src/engine/")
-        || matches!(
-            path,
-            "Cargo.toml"
-                | "Cargo.lock"
-                | "build.rs"
-                | "src/cargo.rs"
-                | "src/config.rs"
-                | "src/gate.rs"
-                | "src/model.rs"
-                | "src/process.rs"
-                | "src/runner.rs"
-                | "src/source.rs"
-                | "src/replay.rs"
-        )
+    matches!(path, "Cargo.toml" | "Cargo.lock" | "build.rs")
+        || (path.starts_with("src/") && path.ends_with(".rs")
+            && !path.starts_with("src/report/") && !path.starts_with("src/cli/")
+            && !matches!(path, "src/report.rs" | "src/main.rs" | "src/setup.rs"))
 }
 
 fn collect(root: &Path, relative: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {

@@ -71,16 +71,16 @@ pub(crate) fn initialize(directory: &Path, library: &str) -> io::Result<()> {
                 directory.join(path).display()
             )));
         }
-        for ancestor in destination.ancestors() {
+        for ancestor in destination.ancestors().skip(1) {
             // The caller chooses the root; normal OS aliases such as /var are valid.
             if ancestor == directory {
                 break;
             }
             if fs::symlink_metadata(ancestor)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                .is_ok_and(|metadata| !metadata.is_dir() || metadata.file_type().is_symlink())
             {
                 return Err(io::Error::other(format!(
-                    "setup path contains a symlink: {}",
+                    "setup path ancestor must be a directory without symlinks: {}",
                     ancestor.display()
                 )));
             }

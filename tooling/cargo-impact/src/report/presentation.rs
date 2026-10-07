@@ -9,12 +9,81 @@ use url::Url;
 use crate::{
     forge::Repository,
     model::{
-        BuildResult, Classification, CompilerDiagnostic, DiagnosticOrigin, DownstreamResult,
-        DownstreamSource, HarnessFailure,
+        BuildPhase, BuildResult, Classification, CompilerDiagnostic, DependencyPackage,
+        DiagnosticOrigin, DownstreamResult, DownstreamSource, ExperimentStatus, HarnessFailure,
     },
 };
 
+pub(crate) fn lock_path(result: &DownstreamResult, phase: BuildPhase) -> String {
+    format!("locks/{}/{}.lock", result_id(result), phase.as_str())
+}
+
+pub(crate) fn replay_command(id: &crate::ExperimentId) -> String {
+    format!(
+        "cargo impact replay --report-dir PATH_TO_REPORT \\\n  --experiment {} \\\n  --baseline PATH_TO_BASELINE --candidate PATH_TO_CANDIDATE \\\n  --work-dir .cargo-impact-replay --output-dir impact-replay",
+        id
+    )
+}
+
+pub(crate) fn result_status(
+    result: &DownstreamResult,
+) -> (&'static str, &'static str, &'static str) {
+    if let Some(outcome) = super::view::outcome(result) {
+        return classification(outcome);
+    }
+    let label = match result.lifecycle.status {
+        ExperimentStatus::Queued => "Queued",
+        ExperimentStatus::Preparing => "Preparing source",
+        ExperimentStatus::Baseline => "Building baseline",
+        ExperimentStatus::Candidate => "Building candidate",
+        _ => "Pending",
+    };
+    ("pending", "⏳", label)
+}
+
+pub(crate) fn dependency_paths<'a>(
+    build: &'a BuildResult,
+    target: &str,
+) -> Vec<Vec<&'a DependencyPackage>> {
+    let Some(graph) = &build.dependency_graph else {
+        return Vec::new();
+    };
+    let packages: std::collections::BTreeMap<_, _> = graph
+        .packages
+        .iter()
+        .map(|package| (package.id.as_str(), package))
+        .collect();
+    graph
+        .roots
+        .iter()
+        .take(6)
+        .filter_map(|root| {
+            graph
+                .dependency_path(root, target)?
+                .iter()
+                .map(|id| packages.get(id.as_str()).copied())
+                .collect()
+        })
+        .collect()
+}
+
+pub(crate) fn path_label(path: &[&DependencyPackage]) -> String {
+    let mut label = path
+        .iter()
+        .take(12)
+        .map(|package| format!("{} {}", package.name, package.version))
+        .collect::<Vec<_>>()
+        .join(" → ");
+    if path.len() > 12 {
+        label.push_str(" → … (full graph in JSON)");
+    }
+    label
+}
+
 pub(crate) fn result_id(result: &DownstreamResult) -> String {
+    if let Some(id) = &result.experiment_id {
+        return format!("consumer-{id}");
+    }
     let mut hash = Sha256::new();
     if let Ok(identity) = serde_json::to_vec(&(
         &result.name,
@@ -107,8 +176,13 @@ pub(crate) fn source_link(
 }
 
 pub(crate) fn source_unchanged(result: &DownstreamResult) -> bool {
-    ![result.baseline.failure, result.candidate.failure]
-        .contains(&Some(HarnessFailure::InputMutation))
+    result
+        .lifecycle
+        .failure
+        .as_ref()
+        .is_none_or(|failure| failure.cause != HarnessFailure::InputMutation)
+        && ![result.baseline.failure, result.candidate.failure]
+            .contains(&Some(HarnessFailure::InputMutation))
 }
 
 pub(crate) fn source_spans(diagnostic: &CompilerDiagnostic) -> Vec<(&DiagnosticSpan, bool)> {
@@ -211,4 +285,40 @@ pub(crate) fn fenced(output: &mut String, language: &str, value: &str) {
         neutral(value)
     };
     let _ = writeln!(output, "{fence}{language}\n{value}\n{fence}\n");
+}
+
+#[cfg(test)]
+mod replay_command_tests {
+    #[test]
+    fn copied_replay_command_passes_only_the_intended_arguments_through_a_shell() {
+        let id = crate::ExperimentId::try_from("a".repeat(64)).unwrap();
+        let command = super::replay_command(&id);
+        // Execute the real continuation syntax with a recording cargo function.
+        let script = format!("cargo() {{ printf '%s\\n' \"$@\"; }}\n{command}");
+        let output = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let arguments = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            arguments.lines().collect::<Vec<_>>(),
+            vec![
+                "impact",
+                "replay",
+                "--report-dir",
+                "PATH_TO_REPORT",
+                "--experiment",
+                id.as_str(),
+                "--baseline",
+                "PATH_TO_BASELINE",
+                "--candidate",
+                "PATH_TO_CANDIDATE",
+                "--work-dir",
+                ".cargo-impact-replay",
+                "--output-dir",
+                "impact-replay"
+            ]
+        );
+    }
 }
