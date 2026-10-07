@@ -61,7 +61,6 @@ pub(crate) fn checkout(
         let parent = destination
             .parent()
             .ok_or_else(|| io::Error::other("missing checkout parent"))?;
-        fs::create_dir_all(parent)?;
         // Interrupted clones must not leave a checkout that poisons every retry.
         let staged = tempfile::TempDir::new_in(parent)?;
         let repository = staged.path().join("repository");

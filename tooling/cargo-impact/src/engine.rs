@@ -640,7 +640,6 @@ impl WorkArea {
                 "invalid cargo-impact work directory marker",
             ));
         }
-        fs::create_dir_all(root.join("home"))?;
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)

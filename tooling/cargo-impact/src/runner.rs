@@ -140,14 +140,16 @@ impl Builder<'_> {
     ) -> std::io::Result<ProcessOutput> {
         self.remaining()?;
         let cached = self.scope.join("cache");
-        for path in [&cached, &self.scope.join("home"), &self.target] {
+        for path in [
+            &cached,
+            &cached.join("cargo"),
+            &cached.join("mbx"),
+            &cached.join("mbx-shims"),
+            &self.scope.join("home"),
+            &self.target,
+        ] {
             safe_directory(self.root, path)?;
         }
-        fs::create_dir_all(cached.join("cargo"))?;
-        fs::create_dir_all(cached.join("mbx"))?;
-        fs::create_dir_all(cached.join("mbx-shims"))?;
-        fs::create_dir_all(self.scope.join("home"))?;
-        fs::create_dir_all(&self.target)?;
         // Builds may write their own Cargo home, but cannot install a config for the
         // next invocation. Registry/Git source trees are mounted read-only offline.
         for filename in ["config", "config.toml", "credentials", "credentials.toml"] {
@@ -684,6 +686,47 @@ mod tests {
                 .filter(|mount| mount.contains("cargo/registry") || mount.contains("cargo/git"))
                 .all(|mount| mount.ends_with(",readonly"))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_cache_symlinks_fail_before_native_preparation_touches_other_files() {
+        for directory in ["cargo", "mbx", "mbx-shims"] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let outside = tempfile::TempDir::new().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let scope = root.join("workers/consumer/baseline");
+            fs::create_dir_all(scope.join("cache")).unwrap();
+            fs::write(outside.path().join("config.toml"), "retained").unwrap();
+            std::os::unix::fs::symlink(outside.path(), scope.join("cache").join(directory))
+                .unwrap();
+            let recipe = BuildRecipe::default();
+            let execution = ExecutionOptions::default();
+            let images = Mutex::new(BTreeMap::new());
+            let builder = Builder {
+                recipe: &recipe,
+                root: &root,
+                scope: &scope,
+                target: root.join("targets/consumer/baseline"),
+                timeout: Duration::from_secs(5),
+                deadline: Instant::now() + Duration::from_secs(5),
+                execution: &execution,
+                images: &images,
+            };
+            let error = builder
+                .run(&root, &["metadata".into()], Capture::Bytes, false)
+                .err()
+                .expect("nested cache symlink must fail before invoking Cargo");
+            assert!(
+                error.to_string().contains("symlinks"),
+                "{directory}: {error}"
+            );
+            assert_eq!(
+                fs::read_to_string(outside.path().join("config.toml")).unwrap(),
+                "retained"
+            );
+            assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 1);
+        }
     }
 
     #[cfg(unix)]
