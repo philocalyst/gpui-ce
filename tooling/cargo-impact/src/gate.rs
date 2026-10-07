@@ -323,7 +323,7 @@ impl Write for BoundedWriter {
 mod tests {
     use super::*;
     use crate::{model::ExecutionOptions, runner::BuildRecipe};
-    use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, sync::Mutex};
+    use std::{collections::BTreeMap, fs, sync::Mutex};
 
     fn supervised(
         script: &str,
@@ -332,9 +332,10 @@ mod tests {
     ) -> Result<GateResult, String> {
         let temporary = tempfile::TempDir::new().unwrap();
         let root = temporary.path().canonicalize().unwrap();
-        let helper = root.join("helper");
-        fs::write(&helper, format!("#!/bin/sh\n{script}\n")).unwrap();
-        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        // The supervisor appends this subcommand first, so the trusted shell
+        // reads our fixture as a script. Executing a just-written script directly
+        // can race parallel process spawning on Linux and produce ETXTBSY.
+        fs::write(root.join("__semver-helper"), format!("{script}\n")).unwrap();
         let recipe = BuildRecipe::default();
         let execution = ExecutionOptions {
             max_work_bytes: budget,
@@ -356,7 +357,7 @@ mod tests {
             &root.join("base.json"),
             &root.join("head.json"),
             &builder,
-            &helper,
+            Path::new("/bin/sh"),
         )
     }
 

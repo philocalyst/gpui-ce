@@ -5,9 +5,9 @@ use super::{ScanContext, preparation::PreparedScan, storage::snapshot_in};
 use crate::{
     cargo,
     model::{
-        BuildPhase, BuildResult, Classification, DownstreamResult, DownstreamSpec,
-        ExperimentFailure, ExperimentId, ExperimentLifecycle, ExperimentStage, ExperimentStatus,
-        HarnessFailure,
+        BuildPhase, BuildResult, Classification, DownstreamResult, DownstreamSource,
+        DownstreamSpec, ExperimentFailure, ExperimentId, ExperimentLifecycle, ExperimentStage,
+        ExperimentStatus, HarnessFailure,
     },
     runner::{BuildRecipe, Builder},
     source,
@@ -34,6 +34,9 @@ pub(super) fn plans(
     let mut seen = BTreeSet::new();
     let mut plans = Vec::new();
     for spec in specs {
+        if let DownstreamSource::Local { path } = &spec.source {
+            super::storage::validate_input(context.root, path)?;
+        }
         let recipe = spec
             .recipe
             .as_ref()

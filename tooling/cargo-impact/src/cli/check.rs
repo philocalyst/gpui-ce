@@ -34,6 +34,15 @@ pub(super) fn check(args: CheckArgs) -> Result<i32> {
         baseline_sha,
         candidate_sha,
     } = args;
+    super::paths::report_layout(
+        &report_dir,
+        &work_dir,
+        [baseline.as_path(), candidate.as_path()].into_iter().chain(
+            downstreams
+                .iter()
+                .filter_map(|value| value.split_once('=').map(|(_, path)| Path::new(path))),
+        ),
+    )?;
     let config_path = config_arg.or_else(|| {
         Path::new("impact.toml")
             .is_file()
@@ -55,6 +64,17 @@ pub(super) fn check(args: CheckArgs) -> Result<i32> {
         },
         None => Config::default(),
     };
+    super::paths::report_layout(
+        &report_dir,
+        &work_dir,
+        config
+            .downstreams
+            .iter()
+            .filter_map(|spec| match &spec.source {
+                cargo_impact::DownstreamSource::Local { path } => Some(path.as_path()),
+                _ => None,
+            }),
+    )?;
     if local {
         config.recipe.runner = Runner::Local;
     }
@@ -97,7 +117,6 @@ pub(super) fn check(args: CheckArgs) -> Result<i32> {
         });
     }
     request.force = force;
-    request.work_dir = Some(work_dir);
     request.timeout = Duration::from_secs(timeout_seconds);
     request.downstreams = config.downstreams.clone();
     for value in downstreams {
@@ -113,6 +132,7 @@ pub(super) fn check(args: CheckArgs) -> Result<i32> {
     for spec in &mut request.downstreams {
         config.apply_override(spec);
     }
+    request.work_dir = Some(work_dir);
     let mut initial = ImpactReport::failed(&request.library, "Preparing experiment");
     initial.error = None;
     initial.run.status = RunStatus::Running;
