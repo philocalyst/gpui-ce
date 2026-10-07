@@ -17,7 +17,10 @@ pub mod http;
 pub mod replay;
 pub mod runner;
 
-pub use engine::{ImpactError, analyze, analyze_with_discovery, analyze_with_progress};
+pub use engine::{
+    ImpactError, analyze, analyze_replay, analyze_replay_with_progress, analyze_with_discovery,
+    analyze_with_progress,
+};
 pub use gate::run_semver_helper;
 pub use model::{
     BuildPhase, BuildProvenance, BuildResult, Classification, CompilerDiagnostic, DependencyGraph,

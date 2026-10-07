@@ -8,7 +8,7 @@ use std::{
 use cargo_impact::{
     Classification, DiagnosticOrigin, DownstreamSource, DownstreamSpec, ExperimentId,
     ExperimentStage, ExperimentStatus, HarnessFailure, ImpactRequest, RunStatus, analyze,
-    analyze_with_discovery, analyze_with_progress,
+    analyze_replay_with_progress, analyze_with_discovery, analyze_with_progress,
     discovery::Discovery,
     runner::{BuildRecipe, Runner},
 };
@@ -268,6 +268,14 @@ fn transitive_git_dependency_is_patched_after_graph_resolution() {
     assert_eq!(
         diagnostic.package.as_ref().unwrap().origin,
         DiagnosticOrigin::Dependency
+    );
+    assert_eq!(
+        result.baseline.injection_sources,
+        vec![library_url.to_string()]
+    );
+    assert_eq!(
+        result.baseline.injection_sources,
+        result.candidate.injection_sources
     );
     assert!(
         diagnostic.source_files.is_empty(),
@@ -738,6 +746,84 @@ fn retained_locks_and_source_relative_graph_proof_survive_a_new_work_directory()
         cargo_impact::replay::ReplayIdentity::from_report(&second_report, second),
         Err(cargo_impact::replay::ReplayIneligible::UnsupportedRunner)
     ));
+}
+
+#[test]
+fn replay_rejects_source_and_engine_drift_before_starting_a_compilation() {
+    let mut fixture = Fixture::new();
+    fixture.consumer(
+        "negative-replay",
+        "pub fn api() { changed_lib::removed(); }",
+        DEP,
+    );
+    let mut report = analyze(&fixture.request).unwrap();
+    let result = &mut report.downstreams[0];
+    // This fixture exercises negative preflight only, so no Docker daemon is required.
+    result.recipe.runner = Runner::default();
+    for build in [&mut result.baseline, &mut result.candidate] {
+        build.provenance.image_id = Some(format!("sha256:{}", "a".repeat(64)));
+    }
+    let spec = DownstreamSpec {
+        name: result.name.clone(),
+        source: result.source.clone(),
+        manifest: result.manifest.clone(),
+        recipe: None,
+    };
+    let id = ExperimentId::for_spec("changed-lib", &spec, &result.recipe).unwrap();
+    result.experiment_id = Some(id.clone());
+    let mut replay = cargo_impact::replay::ReplayRequest::new(
+        report.clone(),
+        id.clone(),
+        &fixture.request.baseline,
+        &fixture.request.candidate,
+    )
+    .unwrap();
+    replay.work_dir = Some(fixture.dir.path().join("drift-replay"));
+    fs::write(
+        fixture.request.candidate.join("src/lib.rs"),
+        "pub fn different_source() {}\n",
+    )
+    .unwrap();
+    let checkpoint = fixture.dir.path().join("refused-replay.json");
+    let refused = analyze_replay_with_progress(&replay, |report| {
+        fs::write(&checkpoint, serde_json::to_vec(report).unwrap())
+    })
+    .unwrap();
+    assert!(checkpoint.is_file());
+    assert_eq!(refused.run.status, RunStatus::Complete);
+    assert_eq!(refused.run.coverage_sufficient, Some(false));
+    assert!(refused.run.replay_of.is_some());
+    let failure = refused.downstreams[0].lifecycle.failure.as_ref().unwrap();
+    assert_eq!(failure.cause, HarnessFailure::EvidenceMismatch);
+    assert_eq!(failure.stage, ExperimentStage::SourcePreparation);
+    assert!(failure.message.contains("candidate source differs"));
+    assert!(refused.downstreams[0].baseline.compiled_packages.is_empty());
+    assert!(
+        !replay
+            .work_dir
+            .as_ref()
+            .unwrap()
+            .join("gate-sources")
+            .exists()
+    );
+    report.run.engine_fingerprint = Some("f".repeat(64));
+    let mut replay = cargo_impact::replay::ReplayRequest::new(
+        report,
+        id,
+        &fixture.request.baseline,
+        &fixture.request.candidate,
+    )
+    .unwrap();
+    replay.work_dir = Some(fixture.dir.path().join("engine-replay"));
+    let refused = cargo_impact::analyze_replay(&replay).unwrap();
+    assert!(
+        refused
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("engine implementation differs")
+    );
+    assert!(!replay.work_dir.as_ref().unwrap().join("upstream").exists());
 }
 
 #[test]
@@ -1372,6 +1458,108 @@ fn main() {{
         .expect("real isolated comparison must retain a complete replay identity");
     assert_eq!(proof.baseline.image, proof.candidate.image);
     assert!(proof.baseline.image.starts_with("sha256:"));
+    assert!(
+        proof
+            .baseline
+            .image_reference
+            .as_deref()
+            .unwrap()
+            .contains("@sha256:")
+    );
+    let id = report.downstreams[0]
+        .experiment_id
+        .as_ref()
+        .unwrap()
+        .clone();
+    let mut replay = cargo_impact::replay::ReplayRequest::new(
+        report.clone(),
+        id.clone(),
+        &fixture.request.baseline,
+        &fixture.request.candidate,
+    )
+    .unwrap();
+    replay.timeout = Duration::from_secs(180);
+    replay.work_dir = Some(fixture.dir.path().join("replay-work"));
+    let checkpoint = fixture.dir.path().join("replay-checkpoint.json");
+    let replayed = cargo_impact::analyze_replay_with_progress(&replay, |report| {
+        fs::write(&checkpoint, serde_json::to_vec(report).unwrap())
+    })
+    .unwrap();
+    assert_eq!(
+        replayed.downstreams[0].classification,
+        Classification::Regression,
+        "{replayed:?}"
+    );
+    assert_eq!(
+        proof,
+        cargo_impact::replay::ReplayIdentity::from_report(&replayed, &replayed.downstreams[0])
+            .unwrap()
+    );
+    assert!(checkpoint.is_file());
+
+    let replay_root = replay.work_dir.as_ref().unwrap();
+    let selected_marker = replay_root
+        .join("targets")
+        .join(id.as_str())
+        .join("old-target-marker");
+    fs::write(
+        &selected_marker,
+        "must be discarded before the next compilation",
+    )
+    .unwrap();
+    let sibling = replay_root.join("targets").join("b".repeat(64));
+    fs::create_dir_all(&sibling).unwrap();
+    fs::write(sibling.join("keep"), "other experiment").unwrap();
+    let repeated = cargo_impact::analyze_replay(&replay).unwrap();
+    assert_eq!(
+        repeated.downstreams[0].classification,
+        Classification::Regression
+    );
+    assert!(
+        !selected_marker.exists(),
+        "same-work-dir replay reused its old target namespace"
+    );
+    assert!(sibling.join("keep").is_file());
+
+    let mut stale_graph = report.clone();
+    stale_graph.downstreams[0]
+        .candidate
+        .dependency_graph
+        .as_mut()
+        .unwrap()
+        .packages[0]
+        .features
+        .push("incorrect-retained-feature".into());
+    let mut replay = cargo_impact::replay::ReplayRequest::new(
+        stale_graph,
+        id,
+        &fixture.request.baseline,
+        &fixture.request.candidate,
+    )
+    .unwrap();
+    replay.timeout = Duration::from_secs(180);
+    replay.work_dir = Some(fixture.dir.path().join("graph-refusal-work"));
+    let refused = cargo_impact::analyze_replay(&replay).unwrap();
+    let result = &refused.downstreams[0];
+    assert_eq!(result.classification, Classification::HarnessFailure);
+    assert!(result.baseline.success);
+    assert_eq!(result.baseline.failure, None);
+    assert_eq!(
+        result.candidate.failure,
+        Some(HarnessFailure::EvidenceMismatch)
+    );
+    assert_eq!(
+        result.lifecycle.failure.as_ref().unwrap().stage,
+        ExperimentStage::Candidate
+    );
+    assert!(
+        result.candidate.compiled_packages.is_empty(),
+        "mismatched graph must be refused before compilation"
+    );
+    assert!(
+        result.candidate.dependency_graph.is_some(),
+        "retain the observed graph explaining the refusal"
+    );
     assert_eq!(
         fs::read_to_string(root.join("upstream/candidate/src/lib.rs")).unwrap(),
         "pub fn kept() {}"

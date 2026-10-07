@@ -25,6 +25,16 @@ pub(crate) fn metadata(
     manifest: &Path,
     no_deps: bool,
 ) -> io::Result<Metadata> {
+    metadata_with_lock(builder, cwd, manifest, no_deps, false)
+}
+
+pub(crate) fn metadata_with_lock(
+    builder: &Builder<'_>,
+    cwd: &Path,
+    manifest: &Path,
+    no_deps: bool,
+    locked: bool,
+) -> io::Result<Metadata> {
     let mut args = vec![
         "metadata".into(),
         "--format-version=1".into(),
@@ -39,6 +49,9 @@ pub(crate) fn metadata(
         if let Some(target) = &builder.recipe.target {
             args.extend(["--filter-platform".into(), target.into()]);
         }
+    }
+    if locked {
+        args.push("--locked".into());
     }
     let output = builder.run(cwd, &args, Capture::Bytes, false)?;
     if output.timed_out {
@@ -66,11 +79,23 @@ pub(crate) fn metadata(
 }
 
 pub(crate) fn fetch(builder: &Builder<'_>, cwd: &Path, manifest: &Path) -> io::Result<()> {
+    fetch_with_lock(builder, cwd, manifest, false)
+}
+
+pub(crate) fn fetch_with_lock(
+    builder: &Builder<'_>,
+    cwd: &Path,
+    manifest: &Path,
+    locked: bool,
+) -> io::Result<()> {
     let mut args = vec![
         "fetch".into(),
         "--manifest-path".into(),
         manifest.as_os_str().to_owned(),
     ];
+    if locked {
+        args.push("--locked".into());
+    }
     if let Some(target) = &builder.recipe.target {
         args.extend(["--target".into(), target.into()]);
     }
@@ -113,14 +138,22 @@ pub(crate) fn selected_library(metadata: &Metadata, library: &str, path: &Path) 
         .map(|p| p.id.to_string())
 }
 
+pub(crate) struct ResolvedBuild {
+    pub selected: String,
+    pub metadata: Metadata,
+    pub injection_sources: Vec<String>,
+}
+
 pub(crate) fn check(
     builder: &Builder<'_>,
     cwd: &Path,
     manifest: &Path,
-    selected: String,
-    metadata: &Metadata,
+    resolved: &ResolvedBuild,
     original: &Path,
+    replay: Option<(crate::BuildPhase, &crate::replay::PhaseIdentity, &str)>,
 ) -> io::Result<BuildResult> {
+    let metadata = &resolved.metadata;
+    let selected = &resolved.selected;
     let mut args = vec![
         "check".into(),
         "--offline".into(),
@@ -140,11 +173,46 @@ pub(crate) fn check(
     let lockfile = resolved_lockfile(metadata.workspace_root.as_std_path())?;
     let mut provenance = builder.provenance(cwd)?;
     provenance.lock_fingerprint = lockfile.as_ref().map(|lock| lock.sha256.clone());
-    let dependency_graph = dependency_graph(metadata, cwd, builder.root, &selected);
+    let dependency_graph = dependency_graph(metadata, cwd, builder.root, selected);
+    let mut prepared = PreparedCheck {
+        selected: selected.clone(),
+        evidence: BuildResult {
+            selected_library: Some(selected.clone()),
+            provenance,
+            lockfile,
+            dependency_graph,
+            injection_sources: resolved.injection_sources.clone(),
+            ..Default::default()
+        },
+    };
+    if let Some((phase, expected, library)) = replay
+        && let Err(error) = expected.verify_prepared(phase, &prepared.evidence, library)
+    {
+        prepared.evidence.failure = Some(HarnessFailure::EvidenceMismatch);
+        prepared.evidence.log = format!("Replay refused before compilation: {error}");
+        return Ok(prepared.evidence);
+    }
+    check_prepared(builder, cwd, &args, metadata, original, prepared)
+}
+
+struct PreparedCheck {
+    selected: String,
+    evidence: BuildResult,
+}
+
+fn check_prepared(
+    builder: &Builder<'_>,
+    cwd: &Path,
+    args: &[OsString],
+    metadata: &Metadata,
+    original: &Path,
+    prepared: PreparedCheck,
+) -> io::Result<BuildResult> {
+    let PreparedCheck { selected, evidence } = prepared;
     let source_fingerprint = (!builder.recipe.runner.is_isolated())
         .then(|| source::fingerprint(cwd))
         .transpose()?;
-    let mut output = builder.run(cwd, &args, Capture::Cargo, false)?;
+    let mut output = builder.run(cwd, args, Capture::Cargo, false)?;
     let source_changed = source_fingerprint
         .is_some_and(|before| source::fingerprint(cwd).map_or(true, |after| before != after));
     if source_changed {
@@ -228,9 +296,10 @@ pub(crate) fn check(
         compiled_packages: output.artifacts.into_iter().collect(),
         selected_library: Some(selected),
         failure,
-        provenance,
-        lockfile,
-        dependency_graph,
+        provenance: evidence.provenance,
+        lockfile: evidence.lockfile,
+        dependency_graph: evidence.dependency_graph,
+        injection_sources: evidence.injection_sources,
     })
 }
 
@@ -546,7 +615,7 @@ pub(crate) fn patch_resolved_sources(
     manifest: &Path,
     library: &str,
     upstream: &Path,
-) -> io::Result<bool> {
+) -> io::Result<Vec<String>> {
     let sources: std::collections::BTreeSet<_> = metadata
         .packages
         .iter()
@@ -565,7 +634,21 @@ pub(crate) fn patch_resolved_sources(
         })
         .collect();
     if sources.is_empty() {
-        return Ok(false);
+        return Ok(Vec::new());
+    }
+    let sources: Vec<_> = sources.into_iter().collect();
+    apply_source_patches(manifest, &sources, library, upstream)?;
+    Ok(sources)
+}
+
+pub(crate) fn apply_source_patches(
+    manifest: &Path,
+    sources: &[String],
+    library: &str,
+    upstream: &Path,
+) -> io::Result<()> {
+    if sources.is_empty() {
+        return Ok(());
     }
     let mut value: toml::Value =
         toml::from_str(&fs::read_to_string(manifest)?).map_err(io::Error::other)?;
@@ -578,7 +661,7 @@ pub(crate) fn patch_resolved_sources(
         .ok_or_else(|| io::Error::other("invalid patch table"))?;
     for source in sources {
         let table = patches
-            .entry(source)
+            .entry(source.clone())
             .or_insert_with(|| toml::Value::Table(Default::default()))
             .as_table_mut()
             .ok_or_else(|| io::Error::other("invalid patch source"))?;
@@ -600,5 +683,5 @@ pub(crate) fn patch_resolved_sources(
         manifest,
         toml::to_string_pretty(&value).map_err(io::Error::other)?,
     )?;
-    Ok(true)
+    Ok(())
 }

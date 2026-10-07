@@ -101,8 +101,24 @@ pub(super) fn execute(
             .min(context.deadline);
         source::validate_manifest(&plan.spec.manifest)?;
         let key = plan.id.as_str();
+        if context
+            .replay
+            .is_some_and(|replay| replay.identity.experiment_id != plan.id)
+        {
+            return Ok(Some(replay_mismatch(
+                stage,
+                "configured experiment identity differs from retained evidence",
+            )));
+        }
+        if context.replay.is_some() {
+            super::storage::prepare_fresh_targets(context.root, &plan.id)?;
+        }
+        let source = context
+            .replay
+            .map(|replay| &replay.checkout)
+            .unwrap_or(&plan.spec.source);
         let (checkout, revision) = source::checkout(
-            &plan.spec.source,
+            source,
             &context.root.join("checkouts").join(key),
             deadline.saturating_duration_since(Instant::now()),
             context.root,
@@ -113,8 +129,17 @@ pub(super) fn execute(
             snapshot_in(context.request, context.root, &checkout, &working, deadline)?;
         emit(ExperimentEvent::Source {
             revision,
-            fingerprint,
+            fingerprint: fingerprint.clone(),
         })?;
+        if context
+            .replay
+            .is_some_and(|replay| replay.identity.consumer_source != fingerprint)
+        {
+            return Ok(Some(replay_mismatch(
+                stage,
+                "consumer source differs from retained evidence",
+            )));
+        }
         let scope = context.root.join("workers").join(key).join("baseline");
         let builder = Builder {
             recipe: &plan.recipe,
@@ -158,6 +183,7 @@ pub(super) fn execute(
             &workspace,
             &context.request.library,
             &upstream.baseline.manifest,
+            context.replay.map(|replay| (BuildPhase::Baseline, replay)),
         )?;
         // Retain the pre-build lock, rather than trusting a build script's mutable
         // post-build lock, when resetting the workspace for the candidate phase.
@@ -177,9 +203,9 @@ pub(super) fn execute(
             deadline,
         )?;
         if let Some(lock) = lock {
-            fs::write(
-                workspace.workspace_manifest.with_file_name("Cargo.lock"),
-                lock,
+            write_lock(
+                &workspace.workspace_manifest.with_file_name("Cargo.lock"),
+                &lock,
             )?;
         }
         let candidate_scope = context.root.join("workers").join(key).join("candidate");
@@ -193,6 +219,7 @@ pub(super) fn execute(
             &workspace,
             &context.request.library,
             &upstream.candidate.manifest,
+            context.replay.map(|replay| (BuildPhase::Candidate, replay)),
         )?;
         let failure = phase_failure(stage, &candidate);
         checkpoint_phase(&mut emit, BuildPhase::Candidate, candidate, deadline)?;
@@ -251,6 +278,14 @@ fn phase_failure(stage: ExperimentStage, build: &BuildResult) -> Option<Experime
     })
 }
 
+fn replay_mismatch(stage: ExperimentStage, message: &str) -> ExperimentFailure {
+    ExperimentFailure {
+        stage,
+        cause: HarnessFailure::EvidenceMismatch,
+        message: message.into(),
+    }
+}
+
 pub(super) fn finish(result: &mut DownstreamResult, failure: Option<ExperimentFailure>) {
     result.lifecycle = ExperimentLifecycle {
         status: ExperimentStatus::Complete,
@@ -306,6 +341,7 @@ fn build(
     workspace: &ConsumerWorkspace,
     library: &str,
     upstream: &Path,
+    replay: Option<(BuildPhase, &crate::replay::ReplayEvidence)>,
 ) -> io::Result<BuildResult> {
     let ConsumerWorkspace {
         root,
@@ -314,10 +350,25 @@ fn build(
         workspace_manifest,
         manifests,
     } = workspace;
+    if let Some((phase, evidence)) = replay {
+        write_lock(
+            &workspace_manifest.with_file_name("Cargo.lock"),
+            &evidence.phase(phase).1.contents,
+        )?;
+    }
     cargo::inject(root, workspace_manifest, manifests, library, upstream)?;
+    let mut injection_sources = replay
+        .map(|(phase, evidence)| evidence.phase(phase).0.injection_sources.clone())
+        .unwrap_or_default();
+    cargo::apply_source_patches(workspace_manifest, &injection_sources, library, upstream)?;
     let prepare = || {
-        cargo::fetch(builder, root, manifest)?;
-        cargo::metadata(builder, root, manifest, false)
+        if replay.is_some() {
+            cargo::fetch_with_lock(builder, root, manifest, true)?;
+            cargo::metadata_with_lock(builder, root, manifest, false, true)
+        } else {
+            cargo::fetch(builder, root, manifest)?;
+            cargo::metadata(builder, root, manifest, false)
+        }
     };
     let mut metadata = match prepare() {
         Ok(metadata) => metadata,
@@ -333,7 +384,12 @@ fn build(
             });
         }
     };
-    if cargo::patch_resolved_sources(&metadata, workspace_manifest, library, upstream)? {
+    let additional_sources =
+        cargo::patch_resolved_sources(&metadata, workspace_manifest, library, upstream)?;
+    if !additional_sources.is_empty() {
+        injection_sources.extend(additional_sources);
+        injection_sources.sort();
+        injection_sources.dedup();
         metadata = match prepare() {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -360,7 +416,29 @@ fn build(
             ..BuildResult::default()
         });
     };
-    cargo::check(builder, root, manifest, selected, &metadata, original)
+    let resolved = cargo::ResolvedBuild {
+        selected,
+        metadata,
+        injection_sources,
+    };
+    cargo::check(
+        builder,
+        root,
+        manifest,
+        &resolved,
+        original,
+        replay.map(|(phase, evidence)| (phase, evidence.phase(phase).0, library)),
+    )
+}
+
+fn write_lock(path: &Path, contents: &str) -> io::Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file() || metadata.is_symlink())
+    {
+        return Err(io::Error::other(
+            "phase Cargo.lock must be a regular file without symlinks",
+        ));
+    }
+    fs::write(path, contents)
 }
 
 fn exercised(build: &BuildResult) -> bool {

@@ -9,7 +9,129 @@ use crate::{
     runner::Runner,
 };
 use serde::{Deserialize, Serialize};
+use std::{path::PathBuf, time::Duration};
 use thiserror::Error;
+
+/// One fresh, bounded rebuild from retained evidence. The caller should verify
+/// the report bundle before constructing this request; its evidence is checked
+/// again against newly frozen sources and resolved phase inputs before compiling.
+#[derive(Clone, Debug)]
+pub struct ReplayRequest {
+    pub baseline: PathBuf,
+    pub candidate: PathBuf,
+    pub work_dir: Option<PathBuf>,
+    pub timeout: Duration,
+    pub execution: crate::ExecutionOptions,
+    pub(crate) spec: DownstreamSpec,
+    pub(crate) recipe: crate::runner::BuildRecipe,
+    pub(crate) upstream: Option<crate::UpstreamRevisions>,
+    pub(crate) evidence: ReplayEvidence,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ReplayEvidence {
+    pub identity: ReplayIdentity,
+    pub expected: Classification,
+    pub checkout: crate::DownstreamSource,
+    pub baseline_lock: crate::LockfileEvidence,
+    pub candidate_lock: crate::LockfileEvidence,
+}
+
+impl ReplayRequest {
+    pub fn new(
+        report: ImpactReport,
+        experiment_id: ExperimentId,
+        baseline: impl Into<PathBuf>,
+        candidate: impl Into<PathBuf>,
+    ) -> Result<Self, ReplayIneligible> {
+        let mut results = report
+            .downstreams
+            .iter()
+            .filter(|result| result.experiment_id.as_ref() == Some(&experiment_id));
+        let result = results
+            .next()
+            .ok_or_else(|| missing("selected experiment ID"))?;
+        if results.next().is_some() {
+            return Err(inconsistent("selected experiment ID occurs more than once"));
+        }
+        let identity = ReplayIdentity::from_report(&report, result)?;
+        let mut checkout = result.source.clone();
+        if let crate::DownstreamSource::Git { revision, .. } = &mut checkout {
+            let resolved = result
+                .revision
+                .as_deref()
+                .ok_or_else(|| missing("resolved consumer Git revision"))?;
+            if !matches!(resolved.len(), 40 | 64)
+                || !resolved.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(missing("full resolved consumer Git revision"));
+            }
+            *revision = resolved.into();
+        }
+        let mut execution = report.run.execution.clone();
+        execution.jobs = 1;
+        execution.minimum_exercised = 1;
+        Ok(Self {
+            baseline: baseline.into(),
+            candidate: candidate.into(),
+            work_dir: None,
+            timeout: Duration::from_secs(1800),
+            execution,
+            spec: DownstreamSpec {
+                name: result.name.clone(),
+                source: result.source.clone(),
+                manifest: result.manifest.clone(),
+                recipe: Some(result.recipe.clone()),
+            },
+            recipe: result.recipe.clone(),
+            upstream: report.run.upstream.clone(),
+            evidence: ReplayEvidence {
+                identity,
+                expected: result.classification,
+                checkout,
+                baseline_lock: result
+                    .baseline
+                    .lockfile
+                    .clone()
+                    .ok_or_else(|| missing("baseline Cargo.lock"))?,
+                candidate_lock: result
+                    .candidate
+                    .lockfile
+                    .clone()
+                    .ok_or_else(|| missing("candidate Cargo.lock"))?,
+            },
+        })
+    }
+
+    pub fn identity(&self) -> &ReplayIdentity {
+        &self.evidence.identity
+    }
+
+    pub(crate) fn impact_request(&self) -> crate::ImpactRequest {
+        let mut request = crate::ImpactRequest::new(
+            &self.evidence.identity.library,
+            &self.baseline,
+            &self.candidate,
+        );
+        request.work_dir = self.work_dir.clone();
+        request.timeout = self.timeout;
+        request.execution = self.execution.clone();
+        request.upstream = self.upstream.clone();
+        request.recipe = self.recipe.clone();
+        request.downstreams = vec![self.spec.clone()];
+        request.force = true;
+        request
+    }
+}
+
+impl ReplayEvidence {
+    pub fn phase(&self, phase: BuildPhase) -> (&PhaseIdentity, &crate::LockfileEvidence) {
+        match phase {
+            BuildPhase::Baseline => (&self.identity.baseline, &self.baseline_lock),
+            BuildPhase::Candidate => (&self.identity.candidate, &self.candidate_lock),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplayIdentity {
@@ -31,6 +153,10 @@ pub struct PhaseIdentity {
     pub rustc: String,
     pub cargo: String,
     pub image: String,
+    #[serde(default)]
+    pub image_reference: Option<String>,
+    #[serde(default)]
+    pub injection_sources: Vec<String>,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -133,6 +259,9 @@ fn phase(
     if build.failure.is_some() || build.timed_out || build.diagnostics_truncated {
         return Err(ReplayIneligible::UncontrolledOutcome);
     }
+    if build.exit_code.is_none() || build.success != (build.exit_code == Some(0)) {
+        return Err(inconsistent(&format!("{label} compiler exit status")));
+    }
     if phase == BuildPhase::Baseline && !build.success {
         return Err(ReplayIneligible::UncontrolledOutcome);
     }
@@ -143,10 +272,26 @@ fn phase(
     if !build.compiled_packages.contains(selected) {
         return Err(ReplayIneligible::UncontrolledOutcome);
     }
+    phase_inputs(phase, build, library)
+}
+
+fn phase_inputs(
+    phase: BuildPhase,
+    build: &BuildResult,
+    library: &str,
+) -> Result<PhaseIdentity, ReplayIneligible> {
+    let label = phase.as_str();
+    let selected = build
+        .selected_library
+        .as_ref()
+        .ok_or_else(|| missing(&format!("{label} selected library")))?;
     let lock = build
         .lockfile
         .as_ref()
         .ok_or_else(|| missing(&format!("{label} Cargo.lock")))?;
+    if lock.contents.len() > 16 * 1024 * 1024 {
+        return Err(missing(&format!("{label} Cargo.lock exceeds 16 MiB")));
+    }
     if !lock.verify() || build.provenance.lock_fingerprint.as_deref() != Some(&lock.sha256) {
         return Err(inconsistent(&format!("{label} Cargo.lock digest")));
     }
@@ -182,6 +327,14 @@ fn phase(
         image.strip_prefix("sha256:"),
         &format!("{label} immutable image"),
     )?;
+    if build
+        .provenance
+        .image_reference
+        .as_deref()
+        .is_some_and(|reference| !crate::runner::immutable_image_reference(reference))
+    {
+        return Err(inconsistent(&format!("{label} pullable image reference")));
+    }
     Ok(PhaseIdentity {
         lockfile: lock.sha256.clone(),
         dependency_graph: graph
@@ -200,7 +353,42 @@ fn phase(
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| missing(&format!("{label} cargo")))?,
         image: image.into(),
+        image_reference: build.provenance.image_reference.clone(),
+        injection_sources: build.injection_sources.clone(),
     })
+}
+
+impl PhaseIdentity {
+    pub(crate) fn verify_prepared(
+        &self,
+        phase: BuildPhase,
+        build: &BuildResult,
+        library: &str,
+    ) -> Result<(), ReplayIneligible> {
+        let observed = phase_inputs(phase, build, library)?;
+        for (label, matches) in [
+            (
+                "source injection",
+                self.injection_sources == observed.injection_sources,
+            ),
+            ("Cargo.lock", self.lockfile == observed.lockfile),
+            (
+                "resolved dependency graph",
+                self.dependency_graph == observed.dependency_graph,
+            ),
+            ("rustc", self.rustc == observed.rustc),
+            ("Cargo", self.cargo == observed.cargo),
+            ("immutable image", self.image == observed.image),
+        ] {
+            if !matches {
+                return Err(inconsistent(&format!(
+                    "{} {label} differs from retained evidence",
+                    phase.as_str()
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn fingerprint(value: Option<&str>, label: &str) -> Result<String, ReplayIneligible> {
@@ -269,6 +457,7 @@ mod tests {
                 cargo: Some("cargo 1.99.0 (exact cargo)".into()),
                 runner_identity: "rust:1.99.0 (sha256 digest)".into(),
                 image_id: Some(format!("sha256:{}", "a".repeat(64))),
+                image_reference: Some(format!("docker.io/library/rust@sha256:{}", "a".repeat(64))),
                 lock_fingerprint: Some(lock.sha256.clone()),
             },
             lockfile: Some(lock),
@@ -431,5 +620,80 @@ mod tests {
             ReplayIdentity::from_report(&legacy, result),
             Err(ReplayIneligible::Unfinished)
         );
+    }
+
+    #[test]
+    fn replay_constructor_pins_git_revision_and_requires_a_unique_selection() {
+        let mut evidence = report();
+        let result = &mut evidence.downstreams[0];
+        result.source = DownstreamSource::Git {
+            url: "https://github.com/example/consumer".into(),
+            revision: "main".into(),
+            forge: None,
+        };
+        result.revision = Some("1".repeat(40));
+        let spec = DownstreamSpec {
+            name: result.name.clone(),
+            source: result.source.clone(),
+            manifest: result.manifest.clone(),
+            recipe: None,
+        };
+        let id = ExperimentId::for_spec("library", &spec, &result.recipe).unwrap();
+        result.experiment_id = Some(id.clone());
+        let request =
+            ReplayRequest::new(evidence.clone(), id.clone(), "base", "candidate").unwrap();
+        assert!(
+            matches!(&request.evidence.checkout, DownstreamSource::Git { revision, .. } if revision == &"1".repeat(40))
+        );
+        assert!(
+            matches!(&request.spec.source, DownstreamSource::Git { revision, .. } if revision == "main")
+        );
+        let mut duplicate = evidence.clone();
+        duplicate.downstreams.push(duplicate.downstreams[0].clone());
+        assert!(matches!(
+            ReplayRequest::new(duplicate, id.clone(), "base", "candidate"),
+            Err(ReplayIneligible::InconsistentEvidence(_))
+        ));
+        evidence.downstreams[0].revision = Some("abc123".into());
+        assert!(matches!(
+            ReplayRequest::new(evidence, id, "base", "candidate"),
+            Err(ReplayIneligible::MissingEvidence(_))
+        ));
+    }
+
+    #[test]
+    fn fresh_phase_proof_precedes_compilation_and_rejects_graph_or_compiler_drift() {
+        let report = report();
+        let proof = ReplayIdentity::from_report(&report, &report.downstreams[0]).unwrap();
+        let mut prepared = report.downstreams[0].baseline.clone();
+        prepared.compiled_packages.clear();
+        prepared.success = false;
+        proof
+            .baseline
+            .verify_prepared(BuildPhase::Baseline, &prepared, "library")
+            .unwrap();
+        prepared.provenance.rustc = Some("another compiler".into());
+        assert!(matches!(
+            proof
+                .baseline
+                .verify_prepared(BuildPhase::Baseline, &prepared, "library"),
+            Err(ReplayIneligible::InconsistentEvidence(_))
+        ));
+        prepared.provenance.rustc = report.downstreams[0].baseline.provenance.rustc.clone();
+        prepared.dependency_graph.as_mut().unwrap().packages[0]
+            .features
+            .push("new-feature".into());
+        assert!(matches!(
+            proof
+                .baseline
+                .verify_prepared(BuildPhase::Baseline, &prepared, "library"),
+            Err(ReplayIneligible::InconsistentEvidence(_))
+        ));
+        let mut contradictory = report.clone();
+        contradictory.downstreams[0].baseline.exit_code = Some(1);
+        assert!(matches!(
+            ReplayIdentity::from_report(&contradictory, &contradictory.downstreams[0]),
+            Err(ReplayIneligible::InconsistentEvidence(_))
+        ));
     }
 }

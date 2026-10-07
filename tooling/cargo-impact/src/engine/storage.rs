@@ -183,9 +183,52 @@ pub(super) fn snapshot_in(
     )
 }
 
+/// Under the held scan lock, start a clean confirmation without discarding
+/// dependency downloads or another experiment's compiler artifacts.
+pub(super) fn prepare_fresh_targets(
+    root: &Path,
+    experiment: &crate::ExperimentId,
+) -> io::Result<()> {
+    let targets = root.join("targets").join(experiment.as_str());
+    crate::runner::safe_directory(root, &targets)?;
+    fs::remove_dir_all(targets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_replay_discards_only_selected_targets_and_refuses_parent_symlinks() {
+        let area = WorkArea::open(None).unwrap();
+        let id = crate::ExperimentId::try_from("a".repeat(64)).unwrap();
+        let selected = area.path().join("targets").join(id.as_str());
+        let sibling = area.path().join("targets").join("b".repeat(64));
+        let downloads = area
+            .path()
+            .join("workers")
+            .join(id.as_str())
+            .join("baseline/cache/cargo");
+        for path in [&selected, &sibling, &downloads] {
+            fs::create_dir_all(path).unwrap();
+            fs::write(path.join("keep-or-clean"), "retained bytes").unwrap();
+        }
+        prepare_fresh_targets(area.path(), &id).unwrap();
+        assert!(!selected.exists());
+        assert!(sibling.join("keep-or-clean").is_file());
+        assert!(downloads.join("keep-or-clean").is_file());
+        #[cfg(unix)]
+        {
+            let outside = TempDir::new().unwrap();
+            fs::write(outside.path().join("untouched"), "user data").unwrap();
+            std::os::unix::fs::symlink(outside.path(), &selected).unwrap();
+            assert!(prepare_fresh_targets(area.path(), &id).is_err());
+            assert_eq!(
+                fs::read_to_string(outside.path().join("untouched")).unwrap(),
+                "user data"
+            );
+        }
+    }
 
     #[test]
     fn storage_accounting_tolerates_parallel_snapshot_replacement() {

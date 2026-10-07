@@ -192,6 +192,11 @@ pub enum RunStatus {
 #[serde(default)]
 pub struct RunMetadata {
     pub engine_fingerprint: Option<String>,
+    /// Digest of the retained input identity being rebuilt, never cached success.
+    pub replay_of: Option<String>,
+    /// Recorded outcome for comparison with a fresh replay; inputs can be deterministic
+    /// while a build script's behavior is not.
+    pub replay_expected: Option<Classification>,
     pub status: RunStatus,
     pub elapsed_ms: u64,
     pub execution: ExecutionOptions,
@@ -273,6 +278,9 @@ pub struct BuildResult {
     pub lockfile: Option<LockfileEvidence>,
     #[serde(default)]
     pub dependency_graph: Option<DependencyGraph>,
+    /// Resolved registry/Git patch tables applied before the controlled phase.
+    #[serde(default)]
+    pub injection_sources: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -283,6 +291,8 @@ pub struct BuildProvenance {
     pub runner_identity: String,
     pub lock_fingerprint: Option<String>,
     pub image_id: Option<String>,
+    /// Registry-pullable digest, when Docker has retained one for this image.
+    pub image_reference: Option<String>,
 }
 
 /// Identity of a configured experiment, independent of its display label.
@@ -573,6 +583,7 @@ pub enum HarnessFailure {
     LibraryCompilation,
     StorageLimit,
     InputMutation,
+    EvidenceMismatch,
 }
 
 /// Keep rustc's diagnostic tree, suggestions, macro expansions, byte ranges, and snippets.

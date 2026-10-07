@@ -26,14 +26,60 @@ impl PreparedScan {
             root,
             deadline,
             images,
+            ..
         } = context;
+        if let Some(replay) = context.replay
+            && option_env!("CARGO_IMPACT_ENGINE_SHA256") != Some(replay.identity.engine.as_str())
+        {
+            return Err(crate::replay::ReplayIneligible::InconsistentEvidence(
+                "engine implementation differs from retained evidence".into(),
+            )
+            .into());
+        }
         let baseline = root.join("upstream/baseline");
         let candidate = root.join("upstream/candidate");
         let baseline_fingerprint =
             snapshot_in(request, root, &request.baseline, &baseline, *deadline)?;
         let candidate_fingerprint =
             snapshot_in(request, root, &request.candidate, &candidate, *deadline)?;
+        if let Some(replay) = context.replay {
+            for (label, observed, expected) in [
+                (
+                    "baseline",
+                    &baseline_fingerprint,
+                    &replay.identity.baseline_source,
+                ),
+                (
+                    "candidate",
+                    &candidate_fingerprint,
+                    &replay.identity.candidate_source,
+                ),
+            ] {
+                if observed != expected {
+                    return Err(crate::replay::ReplayIneligible::InconsistentEvidence(
+                        format!("{label} source differs from retained evidence (expected {expected}, observed {observed})"),
+                    ).into());
+                }
+            }
+        }
         let gate_baseline = root.join("gate-sources/baseline");
+        if let Some(replay) = context.replay {
+            let crate::runner::Runner::Docker { image } = &request.recipe.runner else {
+                return Err(crate::replay::ReplayIneligible::UnsupportedRunner.into());
+            };
+            let actual = crate::runner::prepare_replay_image(
+                image,
+                &replay.identity.baseline,
+                images,
+                *deadline,
+            )?;
+            if actual != replay.identity.baseline.image {
+                return Err(crate::replay::ReplayIneligible::InconsistentEvidence(
+                    "immutable Docker image differs from retained evidence".into(),
+                )
+                .into());
+            }
+        }
         let gate_candidate = root.join("gate-sources/candidate");
         snapshot_in(request, root, &baseline, &gate_baseline, *deadline)?;
         snapshot_in(request, root, &candidate, &gate_candidate, *deadline)?;
