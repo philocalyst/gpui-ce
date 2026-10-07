@@ -476,6 +476,168 @@ fn replay_cannot_overwrite_its_input_generation_or_work_inside_the_bundle() {
 }
 
 #[test]
+fn scan_commands_keep_report_output_outside_managed_work_before_any_write() {
+    for command in ["check", "replay"] {
+        let directory = TempDir::new().unwrap();
+        let work = directory.path().join("work");
+        let selected = work.join("targets").join("a".repeat(64));
+        fs::create_dir_all(&selected).unwrap();
+        fs::write(selected.join("report.json"), b"retained evidence").unwrap();
+        fs::write(directory.path().join("index.html"), b"user index").unwrap();
+        for output in [
+            &work,
+            &selected,
+            &work.join("future/report"),
+            directory.path(),
+        ] {
+            let mut invocation = cli();
+            invocation
+                .args([
+                    command,
+                    "--baseline",
+                    "base",
+                    "--candidate",
+                    "head",
+                    "--work-dir",
+                ])
+                .arg(&work);
+            if command == "replay" {
+                invocation.args([
+                    "--report-dir",
+                    "retained-input",
+                    "--experiment",
+                    &"a".repeat(64),
+                    "--output-dir",
+                ]);
+            } else {
+                invocation.args(["--library", "demo", "--prune", "--report-dir"]);
+            }
+            invocation
+                .arg(output)
+                .assert()
+                .code(2)
+                .stderr(contains("report output and managed work must use separate"));
+            assert_eq!(
+                fs::read(selected.join("report.json")).unwrap(),
+                b"retained evidence"
+            );
+            assert_eq!(
+                fs::read(directory.path().join("index.html")).unwrap(),
+                b"user index"
+            );
+            assert!(!work.join("future").exists());
+        }
+    }
+}
+
+#[test]
+fn scan_commands_refuse_to_write_reports_into_library_sources() {
+    for command in ["check", "replay"] {
+        let directory = TempDir::new().unwrap();
+        let candidate = directory.path().join("candidate");
+        fs::create_dir(&candidate).unwrap();
+        fs::write(candidate.join("report.json"), b"user source").unwrap();
+        for output in [&candidate, &candidate.join("future/report")] {
+            let mut invocation = cli();
+            invocation
+                .args([command, "--baseline", "base", "--candidate"])
+                .arg(&candidate)
+                .arg("--work-dir")
+                .arg(directory.path().join("work"));
+            if command == "replay" {
+                invocation.args([
+                    "--report-dir",
+                    "retained-input",
+                    "--experiment",
+                    &"a".repeat(64),
+                    "--output-dir",
+                ]);
+            } else {
+                // Even configuration failures must not overwrite user sources.
+                invocation.args(["--config", "missing-config", "--report-dir"]);
+            }
+            invocation
+                .arg(output)
+                .assert()
+                .code(2)
+                .stderr(contains("report output must be outside source trees"));
+            assert_eq!(
+                fs::read(candidate.join("report.json")).unwrap(),
+                b"user source"
+            );
+            assert!(!candidate.join("future").exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn report_layout_resolves_symlink_aliases_and_missing_descendants() {
+    let directory = TempDir::new().unwrap();
+    let source = directory.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("report.json"), b"user data").unwrap();
+    let alias = directory.path().join("alias");
+    std::os::unix::fs::symlink(&source, &alias).unwrap();
+    cli()
+        .args(["check", "--library", "demo", "--baseline"])
+        .arg(&source)
+        .args(["--candidate", "head", "--report-dir"])
+        .arg(alias.join("future/report"))
+        .arg("--work-dir")
+        .arg(directory.path().join("work"))
+        .assert()
+        .code(2)
+        .stderr(contains("report output must be outside source trees"));
+    assert_eq!(fs::read(source.join("report.json")).unwrap(), b"user data");
+    assert!(!source.join("future").exists());
+}
+
+#[test]
+fn report_output_protects_configured_and_explicit_local_consumers_before_failures() {
+    for configured in [true, false] {
+        let directory = TempDir::new().unwrap();
+        let consumer = directory.path().join("consumer");
+        fs::create_dir(&consumer).unwrap();
+        fs::write(consumer.join("report.json"), b"consumer source").unwrap();
+        let mut invocation = cli();
+        invocation
+            .args([
+                "check",
+                "--library",
+                "demo",
+                "--baseline",
+                "base",
+                "--candidate",
+                "head",
+            ])
+            .arg("--report-dir")
+            .arg(&consumer)
+            .arg("--work-dir")
+            .arg(directory.path().join("work"));
+        if configured {
+            let config = directory.path().join("impact.toml");
+            fs::write(&config, "library = 'demo'\n[recipe.runner]\nkind = 'local'\n[[downstreams]]\nname = 'consumer'\n[downstreams.source]\nkind = 'local'\npath = 'consumer'\n").unwrap();
+            // No --allow-local: layout validation must precede this failure report.
+            invocation.arg("--config").arg(config);
+        } else {
+            invocation
+                .arg("--downstream")
+                .arg(format!("consumer={}", consumer.display()));
+        }
+        invocation
+            .assert()
+            .code(2)
+            .stderr(contains("report output must be outside source trees"));
+        assert_eq!(
+            fs::read(consumer.join("report.json")).unwrap(),
+            b"consumer source"
+        );
+        assert!(!consumer.join("bundle.json").exists());
+    }
+}
+
+#[test]
 fn publish_accepts_a_bare_report_filename_and_rejects_damage_before_api_access() {
     let directory = TempDir::new().unwrap();
     cargo_impact::ImpactReport::failed("demo", "original")
