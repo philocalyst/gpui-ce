@@ -517,6 +517,39 @@ fn bot_checks_head_again_after_comment_lookup() {
 }
 
 #[test]
+fn identical_bot_report_does_not_send_another_write() {
+    let sha = "b".repeat(40);
+    let report = cargo_impact::ImpactReport::failed("demo", "failure");
+    let run = Url::parse("https://github.com/org/lib/actions/runs/1").unwrap();
+    let first = Server::new(vec![
+        (200, open_pr(&sha), vec![]),
+        (200, json!([]), vec![]),
+        (200, open_pr(&sha), vec![]),
+        (200, json!({"id":91}), vec![]),
+    ]);
+    assert!(bot::publish(&first.api(), "org/lib", 7, &sha, &report, &run).unwrap());
+    let requests = first.finish();
+    let body = requests[3].split_once("\r\n\r\n").unwrap().1;
+    let comment: serde_json::Value = serde_json::from_str(body).unwrap();
+    let second = Server::new(vec![
+        (200, open_pr(&sha), vec![]),
+        (
+            200,
+            json!([{"id":91,"body":comment["body"],"user":{"login":"github-actions[bot]","type":"Bot"}}]),
+            vec![],
+        ),
+        (200, open_pr(&sha), vec![]),
+    ]);
+    assert!(bot::publish(&second.api(), "org/lib", 7, &sha, &report, &run).unwrap());
+    assert!(
+        second
+            .finish()
+            .iter()
+            .all(|request| request.starts_with("GET "))
+    );
+}
+
+#[test]
 fn retry_reads_but_never_repeat_an_uncertain_write() {
     let server = Server::new(vec![
         (503, json!({}), vec![("Retry-After", "0")]),
