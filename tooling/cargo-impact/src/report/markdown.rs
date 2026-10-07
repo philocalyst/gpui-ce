@@ -1,12 +1,17 @@
 use std::{collections::BTreeMap, fmt::Write};
 
 use crate::model::{
-    BuildResult, Classification, CompilerDiagnostic, DownstreamResult, ImpactReport, RunStatus,
+    BuildPhase, BuildResult, Classification, CompilerDiagnostic, DownstreamResult, ImpactReport,
+    RunStatus,
 };
 
 use super::{issues::IssueDraft, presentation::*};
 
 pub(super) fn render(report: &ImpactReport, concise: bool) -> String {
+    render_with_links(report, concise, "")
+}
+
+pub(super) fn render_with_links(report: &ImpactReport, concise: bool, prefix: &str) -> String {
     let mut output = format!("# Downstream impact · {}\n\n", inline(&report.library));
     if report.run.status == RunStatus::Running {
         let _ = writeln!(
@@ -21,6 +26,16 @@ pub(super) fn render(report: &ImpactReport, concise: bool) -> String {
         output.push_str("Adjust the library build recipe after inspecting the failure with `cargo impact doctor`, then retry.\n\n");
     }
     let _ = writeln!(output, "{}\n", escape(&report.gate.reason));
+    if let Some(identity) = &report.run.replay_of {
+        let _ = writeln!(output, "**Replay attempt:** {}\n", inline(identity));
+        if let Some(expected) = report.run.replay_expected {
+            let (_, _, label) = classification(expected);
+            let _ = writeln!(
+                output,
+                "Original comparison: **{label}**. The fresh assessment is recorded below.\n"
+            );
+        }
+    }
     summary(&mut output, report);
     if report.run.coverage_sufficient == Some(false) {
         let _ = writeln!(
@@ -41,7 +56,10 @@ pub(super) fn render(report: &ImpactReport, concise: bool) -> String {
     if concise {
         output.push_str("Download the report artifact bundle and open **index.html** for highlighted spans, filtering, issue drafts and reproduction recipes.\n\n");
     } else {
-        output.push_str("[Interactive report](index.html) · [Full compiler evidence](report.json) · [SARIF](report.sarif) · [Issue drafts and reproduction recipes](issues/index.md)\n\n");
+        let _ = writeln!(
+            output,
+            "[Interactive report]({prefix}index.html) · [Full compiler evidence]({prefix}report.json) · [SARIF]({prefix}report.sarif) · [Issue drafts and reproduction recipes]({prefix}issues/index.md)\n"
+        );
     }
     if !report.discovery.notes.is_empty() {
         output.push_str("<details>\n<summary>Coverage and configuration</summary>\n\n");
@@ -55,22 +73,23 @@ pub(super) fn render(report: &ImpactReport, concise: bool) -> String {
         return output;
     }
     let mut ordered = report.downstreams.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|r| match r.classification {
-        Classification::Regression => 0,
-        Classification::HarnessFailure => 1,
-        Classification::PreExistingFailure => 2,
-        Classification::NotExercised => 3,
-        Classification::Compatible => 4,
+    ordered.sort_by_key(|r| match super::view::outcome(r) {
+        Some(Classification::Regression) => 0,
+        Some(Classification::HarnessFailure) => 1,
+        Some(Classification::PreExistingFailure) => 2,
+        Some(Classification::NotExercised) => 3,
+        Some(Classification::Compatible) => 4,
+        None => 5,
     });
     let detailed: Vec<_> = ordered
         .iter()
         .copied()
-        .filter(|r| r.classification != Classification::Compatible)
+        .filter(|r| super::view::outcome(r) != Some(Classification::Compatible))
         .take(if concise { 3 } else { usize::MAX })
         .collect();
     output.push_str("| Consumer | Baseline | Candidate | Comparison | Inspect |\n| --- | --- | --- | --- | --- |\n");
     for result in ordered.iter().take(if concise { 40 } else { usize::MAX }) {
-        let (_, icon, label) = classification(result.classification);
+        let (_, icon, label) = result_status(result);
         let inspect = if detailed.iter().any(|r| std::ptr::eq(*r, *result)) {
             format!("[Details](#{})", result_id(result))
         } else if concise {
@@ -101,14 +120,15 @@ pub(super) fn render(report: &ImpactReport, concise: bool) -> String {
     let interesting = report
         .downstreams
         .iter()
-        .filter(|r| r.classification != Classification::Compatible)
+        .filter(|r| super::view::outcome(r) != Some(Classification::Compatible))
         .collect::<Vec<_>>();
     for result in detailed {
         render_consumer(
             &mut output,
             result,
-            drafts.iter().find(|d| d.downstream == result.name),
+            drafts.iter().find(|d| d.id == result_id(result)),
             concise,
+            prefix,
         );
     }
     if interesting.len() > maximum {
@@ -123,21 +143,16 @@ pub(super) fn render(report: &ImpactReport, concise: bool) -> String {
 }
 
 fn summary(output: &mut String, report: &ImpactReport) {
-    let count = |kind| {
-        report
-            .downstreams
-            .iter()
-            .filter(|r| r.classification == kind)
-            .count()
-    };
+    let summary = super::ReportSummary::from_report(report);
     let _ = writeln!(
         output,
-        "**{} regressions** · {} compatible · {} baseline failures · {} harness failures · {} not exercised\n",
-        count(Classification::Regression),
-        count(Classification::Compatible),
-        count(Classification::PreExistingFailure),
-        count(Classification::HarnessFailure),
-        count(Classification::NotExercised)
+        "**{} regressions** · {} compatible · {} baseline failures · {} harness failures · {} not exercised · {} pending\n",
+        summary.regressions,
+        summary.compatible,
+        summary.baseline_failures,
+        summary.harness_failures,
+        summary.not_exercised,
+        summary.pending,
     );
     if report.run.elapsed_ms > 0 {
         let _ = writeln!(
@@ -177,7 +192,7 @@ fn shared_failures(output: &mut String, report: &ImpactReport) {
     for result in report
         .downstreams
         .iter()
-        .filter(|r| r.classification == Classification::Regression)
+        .filter(|r| super::view::outcome(r) == Some(Classification::Regression))
     {
         for diagnostic in errors(selected_build(result)) {
             groups
@@ -222,9 +237,10 @@ fn render_consumer(
     result: &DownstreamResult,
     draft: Option<&IssueDraft>,
     concise: bool,
+    prefix: &str,
 ) {
     let id = result_id(result);
-    let (_, icon, label) = classification(result.classification);
+    let (_, icon, label) = result_status(result);
     let _ = writeln!(
         output,
         "\n<a name=\"{id}\"></a>\n\n## {icon} {} · {label}\n",
@@ -233,11 +249,20 @@ fn render_consumer(
     if let Some(message) = &result.message {
         let _ = writeln!(output, "{}\n", escape(&clip(message, 2_000)));
     }
+    if let Some(failure) = &result.lifecycle.failure {
+        let _ = writeln!(
+            output,
+            "**Failure stage:** {:?} · {:?}\n\n{}\n",
+            failure.stage,
+            failure.cause,
+            escape(&clip(&failure.message, 2_000))
+        );
+    }
     if let Some(draft) = draft {
         if !concise {
             let _ = write!(
                 output,
-                "[Download issue draft](issues/{}) · [Reproduction recipe](issues/{})",
+                "[Download issue draft]({prefix}issues/{}) · [Reproduction recipe]({prefix}issues/{})",
                 draft.filename, draft.reproduction_filename
             );
         }
@@ -259,6 +284,15 @@ fn render_consumer(
         );
     }
     let build = selected_build(result);
+    if !concise && let Some(selected) = &build.selected_library {
+        for path in dependency_paths(build, selected) {
+            let _ = writeln!(
+                output,
+                "Resolved dependency path: {}\n",
+                inline(&path_label(&path))
+            );
+        }
+    }
     let diagnostics = errors(build);
     let maximum = if concise { 2 } else { 8 };
     for diagnostic in diagnostics.iter().take(maximum) {
@@ -342,7 +376,7 @@ fn render_consumer(
             diagnostics.len() - maximum
         );
     }
-    if result.classification == Classification::HarnessFailure {
+    if super::view::outcome(result) == Some(Classification::HarnessFailure) {
         output.push_str("<details>\n<summary>Environment failure and retry recipe</summary>\n\n");
         for (phase, build) in [
             ("Baseline", &result.baseline),
@@ -384,6 +418,21 @@ fn render_consumer(
         }
         if let Some(lock) = &build.provenance.lock_fingerprint {
             let _ = writeln!(output, "Resolved lockfile: {}\n", inline(lock));
+        }
+        if !concise {
+            for (phase, build) in [
+                (BuildPhase::Baseline, &result.baseline),
+                (BuildPhase::Candidate, &result.candidate),
+            ] {
+                if build.lockfile.as_ref().is_some_and(|lock| lock.verify()) {
+                    let _ = writeln!(
+                        output,
+                        "[Download {} Cargo.lock]({prefix}{})\n",
+                        phase.as_str(),
+                        lock_path(result, phase)
+                    );
+                }
+            }
         }
         output.push_str("</details>\n\n");
     }

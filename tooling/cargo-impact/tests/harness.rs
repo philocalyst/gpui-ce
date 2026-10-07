@@ -1,13 +1,15 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
 };
 
 use cargo_impact::{
-    Classification, DiagnosticOrigin, DownstreamSource, DownstreamSpec, HarnessFailure,
-    ImpactRequest, RunStatus, analyze, analyze_with_discovery, analyze_with_progress,
+    Classification, DiagnosticOrigin, DownstreamSource, DownstreamSpec, ExperimentId,
+    ExperimentStage, ExperimentStatus, HarnessFailure, ImpactRequest, RunStatus, analyze,
+    analyze_replay_with_progress, analyze_with_discovery, analyze_with_progress,
     discovery::Discovery,
     runner::{BuildRecipe, Runner},
 };
@@ -58,6 +60,103 @@ fn package(root: &Path, name: &str, version: &str, source: &str, extra: &str) {
     fs::write(root.join("src/lib.rs"), source).unwrap();
 }
 const DEP: &str = "[dependencies]\nchanged-lib='1'";
+
+#[test]
+fn oversized_manifest_is_a_bounded_preparation_failure_at_the_actual_phase() {
+    let mut fixture = Fixture::new();
+    let consumer = fixture.consumer(
+        "large-manifest",
+        "pub fn api() { changed_lib::kept(); }",
+        DEP,
+    );
+    let path = consumer.join("Cargo.toml");
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(b"\n#").unwrap();
+    file.write_all(&vec![b'a'; 8 * 1024 * 1024]).unwrap();
+    drop(file);
+    fixture.consumer(
+        "normal-manifest",
+        "pub fn api() { changed_lib::kept(); }",
+        DEP,
+    );
+    let report = analyze(&fixture.request).unwrap();
+    let result = &report.downstreams[0];
+    assert_eq!(result.classification, Classification::HarnessFailure);
+    let failure = result.lifecycle.failure.as_ref().unwrap();
+    assert_eq!(failure.stage, ExperimentStage::Baseline);
+    assert_eq!(failure.cause, HarnessFailure::Preparation);
+    assert!(failure.message.contains("manifest exceeds 8 MiB"));
+    assert!(result.baseline.compiled_packages.is_empty());
+    assert_eq!(result.candidate.failure, None);
+    assert_eq!(
+        report.downstreams[1].classification,
+        Classification::Compatible
+    );
+}
+
+#[test]
+fn repeated_errors_in_one_large_source_keep_every_verified_mapping() {
+    let mut fixture = Fixture::new();
+    let source = format!(
+        "pub fn api() {{ changed_lib::removed(); }}\npub fn second() {{ changed_lib::removed(); }}\n//{}\n",
+        "x".repeat(1024 * 1024)
+    );
+    fixture.consumer("repeated-errors", &source, DEP);
+    let report = analyze(&fixture.request).unwrap();
+    let result = &report.downstreams[0];
+    assert_eq!(result.classification, Classification::Regression);
+    let errors: Vec<_> = result
+        .candidate
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic
+                .code
+                .as_ref()
+                .is_some_and(|code| code.code == "E0425")
+        })
+        .collect();
+    assert_eq!(errors.len(), 2);
+    for diagnostic in errors {
+        let span = diagnostic
+            .spans
+            .iter()
+            .find(|span| span.is_primary)
+            .unwrap();
+        assert_eq!(
+            diagnostic.source_files.get(&span.file_name),
+            Some(&PathBuf::from("src/lib.rs"))
+        );
+    }
+}
+
+#[test]
+fn editing_the_original_consumer_between_phases_cannot_hide_a_regression() {
+    let mut fixture = Fixture::new();
+    let consumer = fixture.consumer(
+        "original-drift",
+        "pub fn api() { changed_lib::removed(); }",
+        DEP,
+    );
+    fs::write(consumer.join("build.rs"), format!(
+        "fn main() {{ if std::fs::read_to_string(\"Cargo.toml\").unwrap().contains(\"upstream/baseline\") {{ std::fs::write({:?}, \"pub fn api() {{ changed_lib::kept(); }}\").unwrap(); }} }}",
+        consumer.join("src/lib.rs")
+    )).unwrap();
+    let report = analyze(&fixture.request).unwrap();
+    let result = &report.downstreams[0];
+    assert!(result.baseline.success);
+    assert_eq!(result.classification, Classification::HarnessFailure);
+    let failure = result.lifecycle.failure.as_ref().unwrap();
+    assert_eq!(failure.stage, ExperimentStage::Candidate);
+    assert_eq!(failure.cause, HarnessFailure::InputMutation);
+    assert!(
+        failure
+            .message
+            .contains("original consumer changed between phases")
+    );
+    assert!(result.candidate.compiled_packages.is_empty());
+    assert_eq!(result.candidate.failure, None);
+}
 
 #[test]
 fn unavailable_standard_library_is_an_environment_failure() {
@@ -162,6 +261,28 @@ fn transitive_local_dependency_is_rewritten_inside_the_workspace_snapshot() {
         DiagnosticOrigin::Downstream
     );
     let primary = diagnostic.spans.iter().find(|s| s.is_primary).unwrap();
+    let graph = result.candidate.dependency_graph.as_ref().unwrap();
+    let root = graph
+        .packages
+        .iter()
+        .find(|package| package.name == "app")
+        .unwrap();
+    let path = graph
+        .dependency_path(&root.id, &graph.selected_library)
+        .unwrap();
+    let names: Vec<_> = path
+        .iter()
+        .map(|id| {
+            graph
+                .packages
+                .iter()
+                .find(|package| &package.id == id)
+                .unwrap()
+                .name
+                .as_str()
+        })
+        .collect();
+    assert_eq!(names, ["app", "middle", "changed-lib"]);
     assert_eq!(
         diagnostic
             .source_files
@@ -245,6 +366,14 @@ fn transitive_git_dependency_is_patched_after_graph_resolution() {
     assert_eq!(
         diagnostic.package.as_ref().unwrap().origin,
         DiagnosticOrigin::Dependency
+    );
+    assert_eq!(
+        result.baseline.injection_sources,
+        vec![library_url.to_string()]
+    );
+    assert_eq!(
+        result.baseline.injection_sources,
+        result.candidate.injection_sources
     );
     assert!(
         diagnostic.source_files.is_empty(),
@@ -555,6 +684,244 @@ fn disabled_optional_dependency_is_not_claimed_as_compatible() {
         report.downstreams[0].classification,
         Classification::NotExercised
     );
+}
+
+#[test]
+fn same_name_experiments_keep_distinct_recipes_and_deduplicate_exact_identity() {
+    let mut fixture = Fixture::new();
+    fixture.consumer("same", "#[cfg(feature=\"api\")] pub fn api() { changed_lib::removed(); }", "[features]\napi=['dep:changed-lib']\nextra=[]\n[dependencies]\nchanged-lib={version='1',optional=true}");
+    let original = fixture.request.downstreams[0].clone();
+    let mut exercised = original.clone();
+    exercised.recipe = Some(BuildRecipe {
+        features: vec!["api".into()],
+        ..fixture.request.recipe.clone()
+    });
+    fixture.request.downstreams.extend([exercised, original]);
+    let report = analyze(&fixture.request).unwrap();
+    assert_eq!(report.downstreams.len(), 2, "{report:?}");
+    assert_eq!(
+        report.downstreams[0].classification,
+        Classification::NotExercised
+    );
+    assert_eq!(
+        report.downstreams[1].classification,
+        Classification::Regression
+    );
+    assert_ne!(
+        report.downstreams[0].experiment_id,
+        report.downstreams[1].experiment_id
+    );
+    assert!(
+        report
+            .downstreams
+            .iter()
+            .all(|result| result.lifecycle.status == ExperimentStatus::Complete)
+    );
+    assert!(
+        report
+            .discovery
+            .notes
+            .iter()
+            .any(|note| note.contains("Duplicate experiment"))
+    );
+    let mut recipe = fixture.request.recipe.clone();
+    recipe.features = vec!["api".into(), "extra".into()];
+    let id =
+        ExperimentId::for_spec("changed-lib", &fixture.request.downstreams[0], &recipe).unwrap();
+    recipe.features = vec!["extra".into(), "api".into(), "api".into()];
+    assert_eq!(
+        id,
+        ExperimentId::for_spec("changed-lib", &fixture.request.downstreams[0], &recipe).unwrap()
+    );
+    assert!(serde_json::from_str::<ExperimentId>("\"../../outside\"").is_err());
+}
+
+#[test]
+fn phase_evidence_is_durable_before_candidate_and_observer_failure_stops_the_pair() {
+    let mut fixture = Fixture::new();
+    let consumer = fixture.consumer("phase-ack", "pub fn api() { changed_lib::kept(); }", DEP);
+    let marker = fixture.dir.path().join("candidate-started");
+    fs::write(consumer.join("build.rs"),format!("fn main() {{ if std::fs::read_to_string(\"Cargo.toml\").unwrap().contains(\"upstream/candidate\") {{ std::fs::write({:?},\"started\").unwrap(); }} }}",marker)).unwrap();
+    let checkpoint = fixture.dir.path().join("baseline-checkpoint.json");
+    let error = analyze_with_progress(
+        &fixture.request,
+        || Ok((Vec::new(), Discovery::default())),
+        |report| {
+            if report
+                .downstreams
+                .first()
+                .is_some_and(|result| result.baseline.success)
+            {
+                assert!(
+                    !marker.exists(),
+                    "candidate ran before baseline evidence was acknowledged"
+                );
+                fs::write(&checkpoint, serde_json::to_vec(report).unwrap())?;
+                return Err(std::io::Error::other("baseline checkpoint refused"));
+            }
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("baseline checkpoint refused"),
+        "{error}"
+    );
+    assert!(!marker.exists());
+    let saved: cargo_impact::ImpactReport =
+        serde_json::from_slice(&fs::read(checkpoint).unwrap()).unwrap();
+    let result = &saved.downstreams[0];
+    assert_eq!(result.lifecycle.status, ExperimentStatus::Baseline);
+    assert!(result.baseline.lockfile.as_ref().unwrap().verify());
+    assert_eq!(result.candidate.selected_library, None);
+    assert_eq!(saved.run.status, RunStatus::Running);
+}
+
+#[test]
+fn preparation_failures_keep_their_stage_and_never_invent_candidate_failures() {
+    let mut fixture = Fixture::new();
+    fixture.request.downstreams.push(DownstreamSpec::local(
+        "missing-source",
+        fixture.dir.path().join("absent"),
+    ));
+    fixture.consumer("working", "pub fn api() { changed_lib::kept(); }", DEP);
+    let report = analyze(&fixture.request).unwrap();
+    let result = &report.downstreams[0];
+    assert_eq!(result.lifecycle.status, ExperimentStatus::Complete);
+    assert_eq!(
+        result.lifecycle.failure.as_ref().unwrap().stage,
+        ExperimentStage::SourcePreparation
+    );
+    assert_eq!(result.baseline.failure, None);
+    assert_eq!(result.candidate.failure, None);
+    assert_eq!(
+        report.downstreams[1].classification,
+        Classification::Compatible
+    );
+}
+
+#[test]
+fn retained_locks_and_source_relative_graph_proof_survive_a_new_work_directory() {
+    let mut fixture = Fixture::new();
+    fixture.consumer("portable", "pub fn api() { changed_lib::removed(); }", DEP);
+    let first = analyze(&fixture.request).unwrap();
+    fixture.request.work_dir = Some(fixture.dir.path().join("second-work"));
+    let second_report = analyze(&fixture.request).unwrap();
+    let first = &first.downstreams[0];
+    let second = &second_report.downstreams[0];
+    assert_eq!(first.experiment_id, second.experiment_id);
+    assert_ne!(
+        first.baseline.selected_library,
+        second.baseline.selected_library
+    );
+    for (first, second) in [
+        (&first.baseline, &second.baseline),
+        (&first.candidate, &second.candidate),
+    ] {
+        let lock = second.lockfile.as_ref().unwrap();
+        assert!(lock.verify());
+        assert_eq!(
+            Some(&lock.sha256),
+            second.provenance.lock_fingerprint.as_ref()
+        );
+        assert_eq!(first.lockfile.as_ref().unwrap().sha256, lock.sha256);
+        assert_eq!(
+            first
+                .dependency_graph
+                .as_ref()
+                .unwrap()
+                .fingerprint()
+                .unwrap(),
+            second
+                .dependency_graph
+                .as_ref()
+                .unwrap()
+                .fingerprint()
+                .unwrap()
+        );
+    }
+    assert!(matches!(
+        cargo_impact::replay::ReplayIdentity::from_report(&second_report, second),
+        Err(cargo_impact::replay::ReplayIneligible::UnsupportedRunner)
+    ));
+}
+
+#[test]
+fn replay_rejects_source_and_engine_drift_before_starting_a_compilation() {
+    let mut fixture = Fixture::new();
+    fixture.consumer(
+        "negative-replay",
+        "pub fn api() { changed_lib::removed(); }",
+        DEP,
+    );
+    let mut report = analyze(&fixture.request).unwrap();
+    let result = &mut report.downstreams[0];
+    // This fixture exercises negative preflight only, so no Docker daemon is required.
+    result.recipe.runner = Runner::default();
+    for build in [&mut result.baseline, &mut result.candidate] {
+        build.provenance.image_id = Some(format!("sha256:{}", "a".repeat(64)));
+    }
+    let spec = DownstreamSpec {
+        name: result.name.clone(),
+        source: result.source.clone(),
+        manifest: result.manifest.clone(),
+        recipe: None,
+    };
+    let id = ExperimentId::for_spec("changed-lib", &spec, &result.recipe).unwrap();
+    result.experiment_id = Some(id.clone());
+    let mut replay = cargo_impact::replay::ReplayRequest::new(
+        report.clone(),
+        id.clone(),
+        &fixture.request.baseline,
+        &fixture.request.candidate,
+    )
+    .unwrap();
+    replay.work_dir = Some(fixture.dir.path().join("drift-replay"));
+    fs::write(
+        fixture.request.candidate.join("src/lib.rs"),
+        "pub fn different_source() {}\n",
+    )
+    .unwrap();
+    let checkpoint = fixture.dir.path().join("refused-replay.json");
+    let refused = analyze_replay_with_progress(&replay, |report| {
+        fs::write(&checkpoint, serde_json::to_vec(report).unwrap())
+    })
+    .unwrap();
+    assert!(checkpoint.is_file());
+    assert_eq!(refused.run.status, RunStatus::Complete);
+    assert_eq!(refused.run.coverage_sufficient, Some(false));
+    assert!(refused.run.replay_of.is_some());
+    let failure = refused.downstreams[0].lifecycle.failure.as_ref().unwrap();
+    assert_eq!(failure.cause, HarnessFailure::EvidenceMismatch);
+    assert_eq!(failure.stage, ExperimentStage::SourcePreparation);
+    assert!(failure.message.contains("candidate source differs"));
+    assert!(refused.downstreams[0].baseline.compiled_packages.is_empty());
+    assert!(
+        !replay
+            .work_dir
+            .as_ref()
+            .unwrap()
+            .join("gate-sources")
+            .exists()
+    );
+    report.run.engine_fingerprint = Some("f".repeat(64));
+    let mut replay = cargo_impact::replay::ReplayRequest::new(
+        report,
+        id,
+        &fixture.request.baseline,
+        &fixture.request.candidate,
+    )
+    .unwrap();
+    replay.work_dir = Some(fixture.dir.path().join("engine-replay"));
+    let refused = cargo_impact::analyze_replay(&replay).unwrap();
+    assert!(
+        refused
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("engine implementation differs")
+    );
+    assert!(!replay.work_dir.as_ref().unwrap().join("upstream").exists());
 }
 
 #[test]
@@ -969,8 +1336,21 @@ fn host_source_mutation_cannot_be_reported_as_compatible() {
         Classification::HarnessFailure
     );
     assert_eq!(
-        report.downstreams[0].candidate.failure,
+        report.downstreams[0]
+            .lifecycle
+            .failure
+            .as_ref()
+            .map(|failure| failure.cause),
         Some(HarnessFailure::InputMutation)
+    );
+    assert_eq!(
+        report.downstreams[0]
+            .lifecycle
+            .failure
+            .as_ref()
+            .unwrap()
+            .stage,
+        ExperimentStage::IntegrityCheck
     );
     assert!(!report.has_regressions());
 }
@@ -1131,7 +1511,17 @@ fn global_deadline_stops_running_pairs_and_preserves_queued_coverage() {
     assert_eq!(report.run.completed_downstreams, 1);
     assert_eq!(report.run.coverage_sufficient, Some(false));
     for result in report.downstreams.iter().skip(1) {
-        assert_eq!(result.candidate.failure, Some(HarnessFailure::Timeout));
+        assert_eq!(result.lifecycle.status, ExperimentStatus::Cancelled);
+        assert_eq!(
+            result.lifecycle.failure.as_ref().unwrap().cause,
+            HarnessFailure::Timeout
+        );
+        assert_eq!(
+            result.lifecycle.failure.as_ref().unwrap().stage,
+            ExperimentStage::Scheduling
+        );
+        assert_eq!(result.baseline.failure, None);
+        assert_eq!(result.candidate.failure, None);
         assert!(result.message.as_deref().unwrap().contains("not started"));
     }
 }
@@ -1161,6 +1551,112 @@ fn main() {{
         report.downstreams[0].classification,
         Classification::Regression,
         "{report:?}"
+    );
+    let proof = cargo_impact::replay::ReplayIdentity::from_report(&report, &report.downstreams[0])
+        .expect("real isolated comparison must retain a complete replay identity");
+    assert_eq!(proof.baseline.image, proof.candidate.image);
+    assert!(proof.baseline.image.starts_with("sha256:"));
+    assert!(
+        proof
+            .baseline
+            .image_reference
+            .as_deref()
+            .unwrap()
+            .contains("@sha256:")
+    );
+    let id = report.downstreams[0]
+        .experiment_id
+        .as_ref()
+        .unwrap()
+        .clone();
+    let mut replay = cargo_impact::replay::ReplayRequest::new(
+        report.clone(),
+        id.clone(),
+        &fixture.request.baseline,
+        &fixture.request.candidate,
+    )
+    .unwrap();
+    replay.timeout = Duration::from_secs(180);
+    replay.work_dir = Some(fixture.dir.path().join("replay-work"));
+    let checkpoint = fixture.dir.path().join("replay-checkpoint.json");
+    let replayed = cargo_impact::analyze_replay_with_progress(&replay, |report| {
+        fs::write(&checkpoint, serde_json::to_vec(report).unwrap())
+    })
+    .unwrap();
+    assert_eq!(
+        replayed.downstreams[0].classification,
+        Classification::Regression,
+        "{replayed:?}"
+    );
+    assert_eq!(
+        proof,
+        cargo_impact::replay::ReplayIdentity::from_report(&replayed, &replayed.downstreams[0])
+            .unwrap()
+    );
+    assert!(checkpoint.is_file());
+
+    let replay_root = replay.work_dir.as_ref().unwrap();
+    let selected_marker = replay_root
+        .join("targets")
+        .join(id.as_str())
+        .join("old-target-marker");
+    fs::write(
+        &selected_marker,
+        "must be discarded before the next compilation",
+    )
+    .unwrap();
+    let sibling = replay_root.join("targets").join("b".repeat(64));
+    fs::create_dir_all(&sibling).unwrap();
+    fs::write(sibling.join("keep"), "other experiment").unwrap();
+    let repeated = cargo_impact::analyze_replay(&replay).unwrap();
+    assert_eq!(
+        repeated.downstreams[0].classification,
+        Classification::Regression
+    );
+    assert!(
+        !selected_marker.exists(),
+        "same-work-dir replay reused its old target namespace"
+    );
+    assert!(sibling.join("keep").is_file());
+
+    let mut stale_graph = report.clone();
+    stale_graph.downstreams[0]
+        .candidate
+        .dependency_graph
+        .as_mut()
+        .unwrap()
+        .packages[0]
+        .features
+        .push("incorrect-retained-feature".into());
+    let mut replay = cargo_impact::replay::ReplayRequest::new(
+        stale_graph,
+        id,
+        &fixture.request.baseline,
+        &fixture.request.candidate,
+    )
+    .unwrap();
+    replay.timeout = Duration::from_secs(180);
+    replay.work_dir = Some(fixture.dir.path().join("graph-refusal-work"));
+    let refused = cargo_impact::analyze_replay(&replay).unwrap();
+    let result = &refused.downstreams[0];
+    assert_eq!(result.classification, Classification::HarnessFailure);
+    assert!(result.baseline.success);
+    assert_eq!(result.baseline.failure, None);
+    assert_eq!(
+        result.candidate.failure,
+        Some(HarnessFailure::EvidenceMismatch)
+    );
+    assert_eq!(
+        result.lifecycle.failure.as_ref().unwrap().stage,
+        ExperimentStage::Candidate
+    );
+    assert!(
+        result.candidate.compiled_packages.is_empty(),
+        "mismatched graph must be refused before compilation"
+    );
+    assert!(
+        result.candidate.dependency_graph.is_some(),
+        "retain the observed graph explaining the refusal"
     );
     assert_eq!(
         fs::read_to_string(root.join("upstream/candidate/src/lib.rs")).unwrap(),

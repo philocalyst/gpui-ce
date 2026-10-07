@@ -111,7 +111,7 @@ button:focus-visible,input:focus-visible,a:focus-visible,summary:focus-visible {
 
 .scorecards {
   display:grid;
-  grid-template-columns:repeat(5,minmax(0,1fr));
+  grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
   gap:12px;
 }
 
@@ -159,6 +159,9 @@ button:focus-visible,input:focus-visible,a:focus-visible,summary:focus-visible {
 .not-exercised {
   --tone:#687578;
 }
+
+.pending { --tone:#40657c; }
+.dependency-paths li { margin-top:8px; overflow-wrap:anywhere; }
 
 .scorecard strong,.badge {
   color:var(--tone);
@@ -509,7 +512,7 @@ footer strong {
     break-inside:avoid;
   }
   .scorecards {
-    grid-template-columns:repeat(5,1fr);
+    grid-template-columns:repeat(auto-fit,minmax(100px,1fr));
   }
   details {
     display:block;
