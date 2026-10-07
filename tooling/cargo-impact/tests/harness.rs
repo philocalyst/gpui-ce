@@ -594,6 +594,31 @@ fn workspace_inheritance_renaming_and_target_dependencies_are_preserved() {
         report.downstreams[0]
     );
     assert_eq!(fs::read(root.join("Cargo.toml")).unwrap(), original);
+    let result = &report.downstreams[0];
+    assert!(result.baseline.provenance.lock_fingerprint.is_some());
+    let snapshot = fs::read_dir(
+        fixture
+            .request
+            .work_dir
+            .as_ref()
+            .unwrap()
+            .join("downstreams"),
+    )
+    .unwrap()
+    .next()
+    .unwrap()
+    .unwrap()
+    .path();
+    assert!(
+        !snapshot.join("app/Cargo.lock").exists(),
+        "this fixture must exercise a workspace-root lock"
+    );
+    use sha2::Digest;
+    let lock = fs::read(snapshot.join("Cargo.lock")).unwrap();
+    assert_eq!(
+        result.candidate.provenance.lock_fingerprint.as_deref(),
+        Some(format!("{:x}", sha2::Sha256::digest(lock)).as_str())
+    );
 }
 
 #[test]
@@ -951,6 +976,81 @@ fn host_source_mutation_cannot_be_reported_as_compatible() {
 }
 
 #[test]
+fn consumer_source_mutation_is_not_a_controlled_comparison() {
+    let mut fixture = Fixture::new();
+    let consumer = fixture.consumer(
+        "self-mutating",
+        "pub fn api() { changed_lib::kept(); }",
+        DEP,
+    );
+    fs::write(
+        consumer.join("build.rs"),
+        "fn main() { std::fs::write(\"src/lib.rs\", \"pub fn api() {}\").unwrap(); }",
+    )
+    .unwrap();
+    let report = analyze(&fixture.request).unwrap();
+    assert_eq!(
+        report.downstreams[0].classification,
+        Classification::HarnessFailure
+    );
+    assert_eq!(
+        report.downstreams[0].baseline.failure,
+        Some(HarnessFailure::InputMutation)
+    );
+    assert_eq!(report.run.coverage_sufficient, Some(false));
+    assert_eq!(report.run.exercised_downstreams, 0);
+}
+
+#[test]
+fn gate_source_mutation_cannot_hide_a_breaking_api_change() {
+    let mut fixture = Fixture::new();
+    fixture.request.force = false;
+    fs::write(
+        fixture.request.baseline.join("build.rs"),
+        "fn main() { std::fs::write(\"src/lib.rs\", \"pub fn kept() {}\").unwrap(); }",
+    )
+    .unwrap();
+    let error = analyze(&fixture.request).unwrap_err().to_string();
+    assert!(
+        error.contains("changed its upstream source copy"),
+        "{error}"
+    );
+}
+
+#[test]
+fn global_deadline_stops_running_pairs_and_preserves_queued_coverage() {
+    let mut fixture = Fixture::new();
+    fixture.request.execution.jobs = 1;
+    fixture.request.execution.scan_timeout_seconds = 3;
+    let consumer = fixture.consumer("slow", "pub fn api() { changed_lib::kept(); }", DEP);
+    fs::write(
+        consumer.join("build.rs"),
+        "fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }",
+    )
+    .unwrap();
+    fixture.consumer("queued-one", "pub fn api() { changed_lib::kept(); }", DEP);
+    fixture.consumer("queued-two", "pub fn api() { changed_lib::kept(); }", DEP);
+    let started = std::time::Instant::now();
+    let report = analyze(&fixture.request).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(8));
+    assert!(
+        report
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("wall-clock budget")
+    );
+    assert_eq!(report.run.status, RunStatus::Complete);
+    assert_eq!(report.run.planned_downstreams, 3);
+    assert_eq!(report.run.completed_downstreams, 1);
+    assert_eq!(report.run.coverage_sufficient, Some(false));
+    for result in report.downstreams.iter().skip(1) {
+        assert_eq!(result.candidate.failure, Some(HarnessFailure::Timeout));
+        assert!(result.message.as_deref().unwrap().contains("not started"));
+    }
+}
+
+#[test]
 #[ignore = "requires a Docker daemon and the Rust worker image; run in isolated Linux CI"]
 fn docker_baseline_cannot_mutate_candidate_or_sibling_workers() {
     let mut fixture = Fixture::new();
@@ -967,6 +1067,7 @@ fn main() {{
     assert!(std::fs::write(root.join("upstream/baseline/src/lib.rs"), "pub fn removed() {{}}" ).is_err(), "baseline was writable");
     assert!(!root.join("checkouts").exists(), "sibling checkouts were exposed");
     assert!(!root.join("workers/sibling").exists(), "sibling workers were exposed");
+    assert!(std::fs::write("src/lib.rs", "pub fn api() {{}}" ).is_err(), "consumer sources were writable during compilation");
 }}
 "#, root = root.to_str().unwrap())).unwrap();
     let report = analyze(&fixture.request).unwrap();

@@ -149,14 +149,26 @@ fn git(cwd: &Path, args: &[&str], deadline: Instant) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+#[cfg(test)]
 pub(crate) fn snapshot(source: &Path, destination: &Path) -> io::Result<String> {
     snapshot_with_limit(source, destination, 2 * 1024 * 1024 * 1024)
 }
 
+#[cfg(test)]
 pub(crate) fn snapshot_with_limit(
     source: &Path,
     destination: &Path,
     max_bytes: u64,
+) -> io::Result<String> {
+    snapshot_before(source, destination, max_bytes, None, None)
+}
+
+pub(crate) fn snapshot_before(
+    source: &Path,
+    destination: &Path,
+    max_bytes: u64,
+    deadline: Option<Instant>,
+    storage: Option<(&Path, u64)>,
 ) -> io::Result<String> {
     let source = source.canonicalize()?;
     if let Ok(relative) = destination.strip_prefix(&source)
@@ -183,6 +195,9 @@ pub(crate) fn snapshot_with_limit(
         bytes: 0,
         files: 0,
         max_bytes: max_bytes.min(2 * 1024 * 1024 * 1024),
+        deadline,
+        storage,
+        storage_checked: None,
     };
     snapshot.copy(&source, Some(staged.path()), Path::new(""))?;
     let hash = format!("{:x}", snapshot.hash.finalize());
@@ -203,6 +218,9 @@ pub(crate) fn fingerprint(source: &Path) -> io::Result<String> {
         bytes: 0,
         files: 0,
         max_bytes: 2 * 1024 * 1024 * 1024,
+        deadline: None,
+        storage: None,
+        storage_checked: None,
     };
     snapshot.copy(&source, None, Path::new(""))?;
     Ok(format!("{:x}", snapshot.hash.finalize()))
@@ -216,6 +234,9 @@ struct Snapshot<'a> {
     bytes: u64,
     files: usize,
     max_bytes: u64,
+    deadline: Option<Instant>,
+    storage: Option<(&'a Path, u64)>,
+    storage_checked: Option<Instant>,
 }
 
 impl Snapshot<'_> {
@@ -225,6 +246,7 @@ impl Snapshot<'_> {
         destination: Option<&Path>,
         relative: &Path,
     ) -> io::Result<()> {
+        self.check_deadline()?;
         let resolved = source.canonicalize()?;
         if !resolved.starts_with(self.root) {
             return Err(io::Error::other(format!(
@@ -241,6 +263,7 @@ impl Snapshot<'_> {
         let mut entries = fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
+            self.check_deadline()?;
             let name = entry.file_name();
             if [".git", "target", ".cargo-impact", "node_modules"]
                 .iter()
@@ -327,6 +350,7 @@ impl Snapshot<'_> {
                 let mut old_buffer = [0u8; 64 * 1024];
                 let mut copied = 0u64;
                 loop {
+                    self.check_deadline()?;
                     let size = input.read(&mut buffer)?;
                     if size == 0 {
                         break;
@@ -364,6 +388,32 @@ impl Snapshot<'_> {
             }
         }
         self.visited.remove(&resolved);
+        Ok(())
+    }
+
+    fn check_deadline(&mut self) -> io::Result<()> {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "source preparation exceeded the pair or scan deadline",
+            ));
+        }
+        if let Some((root, budget)) = self.storage
+            && self
+                .storage_checked
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
+        {
+            self.storage_checked = Some(Instant::now());
+            if crate::engine::work_bytes(root)? > budget {
+                return Err(io::Error::new(
+                    io::ErrorKind::StorageFull,
+                    "source preparation exceeded the scan storage budget",
+                ));
+            }
+        }
         Ok(())
     }
 }

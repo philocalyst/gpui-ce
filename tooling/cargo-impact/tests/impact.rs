@@ -52,6 +52,7 @@ fn classifies_real_downstream_builds_against_both_library_versions() {
         timeout: Duration::from_secs(240),
         execution: Default::default(),
         upstream: None,
+        semver_helper: Some(assert_cmd::cargo::cargo_bin!("cargo-impact").into()),
     })
     .expect("semver gate and fixture runs should complete");
     assert!(
@@ -181,6 +182,7 @@ fn semantic_break_without_downstream_impact_does_not_invent_a_regression() {
         timeout: Duration::from_secs(240),
         execution: Default::default(),
         upstream: None,
+        semver_helper: None,
     })
     .unwrap();
     assert!(report.gate.ran);

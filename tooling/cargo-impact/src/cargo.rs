@@ -12,6 +12,7 @@ use crate::{
     model::{BuildResult, DiagnosticOrigin, DiagnosticPackage, HarnessFailure},
     process::Capture,
     runner::Builder,
+    source,
 };
 
 pub(crate) fn metadata(
@@ -119,6 +120,7 @@ pub(crate) fn check(
     let mut args = vec![
         "check".into(),
         "--offline".into(),
+        "--locked".into(),
         "--all-targets".into(),
         "--message-format=json".into(),
         "--manifest-path".into(),
@@ -138,7 +140,15 @@ pub(crate) fn check(
             .join("Cargo.toml")
             .into_std_path_buf(),
     )?;
+    let source_fingerprint = (!builder.recipe.runner.is_isolated())
+        .then(|| source::fingerprint(cwd))
+        .transpose()?;
     let mut output = builder.run(cwd, &args, Capture::Cargo, false)?;
+    let source_changed = source_fingerprint
+        .is_some_and(|before| source::fingerprint(cwd).map_or(true, |after| before != after));
+    if source_changed {
+        output.log.push_str("\nThe build changed its consumer source copy; this comparison is inconclusive. Generate files in OUT_DIR or use an isolated recipe.\n");
+    }
     for diagnostic in &mut output.diagnostics {
         let Some(package) = metadata
             .packages
@@ -170,7 +180,9 @@ pub(crate) fn check(
             &mut diagnostic.source_files,
         );
     }
-    let failure = if output.resource_limited {
+    let failure = if source_changed {
+        Some(HarnessFailure::InputMutation)
+    } else if output.resource_limited {
         Some(HarnessFailure::StorageLimit)
     } else if output.timed_out {
         Some(HarnessFailure::Timeout)

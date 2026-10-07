@@ -5,7 +5,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{Mutex, mpsc},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use fs2::FileExt;
@@ -52,19 +52,24 @@ pub fn analyze_with_progress(
         upstream.validate()?;
     }
     let started = Instant::now();
+    let scan_deadline = started
+        .checked_add(Duration::from_secs(request.execution.scan_timeout_seconds))
+        .ok_or_else(|| io::Error::other("scan timeout exceeds the host clock range"))?;
     let area = WorkArea::open(request.work_dir.as_deref())?;
     let root = area.path();
     prepare_storage(root, &request.execution)?;
     let baseline = root.join("upstream/baseline");
     let candidate = root.join("upstream/candidate");
-    let baseline_fingerprint = snapshot_in(request, root, &request.baseline, &baseline)?;
-    let candidate_fingerprint = snapshot_in(request, root, &request.candidate, &candidate)?;
+    let baseline_fingerprint =
+        snapshot_in(request, root, &request.baseline, &baseline, scan_deadline)?;
+    let candidate_fingerprint =
+        snapshot_in(request, root, &request.candidate, &candidate, scan_deadline)?;
     // Each gate phase sees only its own working copy. The canonical upstream
     // snapshots are never writable in an untrusted build container.
     let gate_baseline = root.join("gate-sources/baseline");
     let gate_candidate = root.join("gate-sources/candidate");
-    snapshot_in(request, root, &baseline, &gate_baseline)?;
-    snapshot_in(request, root, &candidate, &gate_candidate)?;
+    snapshot_in(request, root, &baseline, &gate_baseline, scan_deadline)?;
+    snapshot_in(request, root, &candidate, &gate_candidate, scan_deadline)?;
     let gate_scope = root.join("gate-worker");
     let images = Mutex::new(std::collections::BTreeMap::new());
     let builder = Builder {
@@ -74,7 +79,8 @@ pub fn analyze_with_progress(
         timeout: request.timeout,
         deadline: Instant::now()
             .checked_add(request.timeout)
-            .ok_or_else(|| io::Error::other("timeout exceeds the host clock range"))?,
+            .ok_or_else(|| io::Error::other("timeout exceeds the host clock range"))?
+            .min(scan_deadline),
         scope: &gate_scope,
         execution: &request.execution,
         images: &images,
@@ -110,6 +116,7 @@ pub fn analyze_with_progress(
             (&gate_baseline, &baseline_package),
             (&gate_candidate, &candidate_package),
             &builder,
+            request.semver_helper.as_deref(),
         )
         .map_err(ImpactError::Semver)?
     };
@@ -138,11 +145,19 @@ pub fn analyze_with_progress(
         )
         .into());
     }
+    if Instant::now() >= scan_deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "scan deadline exceeded during API preparation or analysis",
+        )
+        .into());
+    }
     report.run.storage_bytes = work_bytes(root)?;
     report.run.elapsed_ms = milliseconds(started.elapsed());
     progress(&report)?;
     if !report.gate.ran {
         report.run.status = RunStatus::Complete;
+        report.run.coverage_sufficient = Some(true);
         progress(&report)?;
         return Ok(report);
     }
@@ -157,6 +172,9 @@ pub fn analyze_with_progress(
         ),
     };
     report.discovery = discovery;
+    if Instant::now() >= scan_deadline {
+        report.error = Some("The scan wall-clock budget was exhausted during discovery; consumers are inconclusive.".into());
+    }
     // A major version change should test source compatibility, rather than reject every ^old dependency.
     // Normalize only the copied candidate manifest, after semver comparison, never either input tree.
     if baseline_package.version != candidate_package.version {
@@ -204,6 +222,7 @@ pub fn analyze_with_progress(
             .map_err(io::Error::other)?,
     );
     let mut results = std::collections::BTreeMap::new();
+    let mut completed_count = 0;
     std::thread::scope(|scope| -> io::Result<()> {
         let workers = request.execution.jobs.min(specs.len());
         let (completed, receiver) = mpsc::channel();
@@ -226,9 +245,9 @@ pub fn analyze_with_progress(
                             request,
                             spec,
                             root,
-                            baseline_manifest,
-                            candidate_manifest,
+                            (baseline_manifest, candidate_manifest),
                             images,
+                            scan_deadline,
                             &mut result,
                         )
                     }));
@@ -261,9 +280,11 @@ pub fn analyze_with_progress(
         while active > 0 {
             let (worker, index, result) = receiver.recv().map_err(io::Error::other)?;
             active -= 1;
+            completed_count += 1;
             results.insert(index, result);
             report.downstreams = results.values().cloned().collect();
-            report.run.completed_downstreams = results.len();
+            report.run.completed_downstreams = completed_count;
+            report.run.exercised_downstreams = exercised_count(&report);
             report.run.elapsed_ms = milliseconds(started.elapsed());
             report.run.storage_bytes = work_bytes(root)?;
             let inputs_mutated = detect_drift
@@ -276,21 +297,28 @@ pub fn analyze_with_progress(
                     result.message = Some("Canonical upstream source changed during host execution; results are inconclusive. Use an isolated recipe and retry.".into());
                 }
                 report.downstreams = results.values().cloned().collect();
+                report.run.exercised_downstreams = exercised_count(&report);
             }
             progress(&report)?;
             let exceeded = request
                 .execution
                 .max_work_bytes
                 .is_some_and(|budget| report.run.storage_bytes > budget);
-            if exceeded || inputs_mutated {
+            let expired = Instant::now() >= scan_deadline;
+            if expired {
+                report.error = Some("The scan wall-clock budget was exhausted; queued or unfinished consumers are inconclusive.".into());
+            }
+            if exceeded || inputs_mutated || expired {
                 while next < specs.len() {
                     let mut omitted = empty_result(request, &specs[next]);
-                    omitted.candidate.failure = Some(if inputs_mutated {
+                    omitted.candidate.failure = Some(if expired {
+                        HarnessFailure::Timeout
+                    } else if inputs_mutated {
                         HarnessFailure::InputMutation
                     } else {
                         HarnessFailure::StorageLimit
                     });
-                    omitted.message = Some(if inputs_mutated { "Canonical upstream inputs changed; queued experiments were not started. Use an isolated recipe and retry." } else { "Work directory exceeds its storage budget; no new workers were started. Prune managed build caches and retry." }.into());
+                    omitted.message = Some(if expired { "Scan deadline exceeded; this queued experiment was not started. Increase execution.scan_timeout_seconds or narrow the consumer list." } else if inputs_mutated { "Canonical upstream inputs changed; queued experiments were not started. Use an isolated recipe and retry." } else { "Work directory exceeds its storage budget; no new workers were started. Prune managed build caches and retry." }.into());
                     results.insert(next, omitted);
                     next += 1;
                 }
@@ -304,16 +332,34 @@ pub fn analyze_with_progress(
         Ok(())
     })?;
     report.downstreams = results.into_values().collect();
-    report.run.completed_downstreams = report.downstreams.len();
     report.run.elapsed_ms = milliseconds(started.elapsed());
     report.run.storage_bytes = work_bytes(root)?;
     report.run.status = RunStatus::Complete;
+    report.run.exercised_downstreams = exercised_count(&report);
+    let sufficient = report.run.exercised_downstreams >= request.execution.minimum_exercised;
+    report.run.coverage_sufficient = Some(sufficient);
+    if !sufficient {
+        report.discovery.notes.push(format!("Coverage is inconclusive: {} consumer comparisons exercised the library; at least {} were required. Select a consuming package or feature, expand discovery, or adjust execution.minimum_exercised explicitly.", report.run.exercised_downstreams, request.execution.minimum_exercised));
+    }
     progress(&report)?;
     Ok(report)
 }
 
 fn milliseconds(duration: std::time::Duration) -> u64 {
     duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn exercised_count(report: &ImpactReport) -> usize {
+    report
+        .downstreams
+        .iter()
+        .filter(|result| {
+            matches!(
+                result.classification,
+                Classification::Compatible | Classification::Regression
+            )
+        })
+        .count()
 }
 
 fn empty_result(request: &ImpactRequest, spec: &DownstreamSpec) -> DownstreamResult {
@@ -340,14 +386,16 @@ fn experiment(
     request: &ImpactRequest,
     spec: &DownstreamSpec,
     root: &Path,
-    baseline: &Path,
-    candidate: &Path,
+    upstream: (&Path, &Path),
     images: &Mutex<std::collections::BTreeMap<String, String>>,
+    scan_deadline: Instant,
     result: &mut DownstreamResult,
 ) -> io::Result<()> {
+    let (baseline, candidate) = upstream;
     let deadline = Instant::now()
         .checked_add(request.timeout)
-        .ok_or_else(|| io::Error::other("timeout exceeds the host clock range"))?;
+        .ok_or_else(|| io::Error::other("timeout exceeds the host clock range"))?
+        .min(scan_deadline);
     source::validate_manifest(&spec.manifest)?;
     let identity = serde_json::to_vec(&(
         &request.library,
@@ -365,7 +413,7 @@ fn experiment(
     )?;
     result.revision = revision;
     let working = root.join("downstreams").join(&key);
-    result.source_fingerprint = Some(snapshot_in(request, root, &checkout, &working)?);
+    result.source_fingerprint = Some(snapshot_in(request, root, &checkout, &working, deadline)?);
     let baseline_scope = root.join("workers").join(&key).join("baseline");
     let candidate_scope = root.join("workers").join(&key).join("candidate");
     let builder = Builder {
@@ -406,7 +454,7 @@ fn experiment(
     result.baseline = build(&builder, &workspace, &request.library, baseline)?;
     // Restore original manifests and sources to prevent baseline build scripts from modifying candidate inputs.
     let lock = fs::read(workspace_manifest.with_file_name("Cargo.lock")).ok();
-    snapshot_in(request, root, &checkout, &working)?;
+    snapshot_in(request, root, &checkout, &working, deadline)?;
     if let Some(lock) = lock {
         fs::write(workspace_manifest.with_file_name("Cargo.lock"), lock)?;
     }
@@ -682,17 +730,24 @@ fn snapshot_in(
     root: &Path,
     source: &Path,
     destination: &Path,
+    deadline: Instant,
 ) -> io::Result<String> {
-    if request.execution.max_work_bytes.is_none() {
-        return crate::source::snapshot(source, destination);
-    }
     let available = request
         .execution
         .max_work_bytes
         .map(|budget| work_bytes(root).map(|used| budget.saturating_sub(used)))
         .transpose()?
         .unwrap_or(2 * 1024 * 1024 * 1024);
-    crate::source::snapshot_with_limit(source, destination, available)
+    crate::source::snapshot_before(
+        source,
+        destination,
+        available,
+        Some(deadline),
+        request
+            .execution
+            .max_work_bytes
+            .map(|budget| (root, budget)),
+    )
 }
 
 #[cfg(test)]

@@ -38,6 +38,10 @@ pub struct ExecutionOptions {
     pub cpus: u16,
     pub max_work_bytes: Option<u64>,
     pub prune_before_run: bool,
+    /// Wall-clock budget for preparation, gate, discovery and all consumer pairs.
+    pub scan_timeout_seconds: u64,
+    /// Successful controlled comparisons required when the downstream gate opens.
+    pub minimum_exercised: usize,
 }
 
 impl Default for ExecutionOptions {
@@ -47,8 +51,10 @@ impl Default for ExecutionOptions {
             cargo_jobs: 1,
             memory_mib: 2048,
             cpus: 1,
-            max_work_bytes: Some(20 * 1024 * 1024 * 1024),
+            max_work_bytes: Some(5 * 1024 * 1024 * 1024),
             prune_before_run: false,
+            scan_timeout_seconds: 3300,
+            minimum_exercised: 1,
         }
     }
 }
@@ -60,9 +66,10 @@ impl ExecutionOptions {
             || self.memory_mib < 128
             || self.cpus == 0
             || self.max_work_bytes == Some(0)
+            || self.scan_timeout_seconds == 0
         {
             return Err(std::io::Error::other(
-                "execution requires 1..=32 workers, 1..=256 Cargo jobs, at least 128 MiB per worker, positive CPUs and storage budget",
+                "execution requires 1..=32 workers, 1..=256 Cargo jobs, at least 128 MiB per worker, positive CPUs, storage budget and scan timeout",
             ));
         }
         Ok(())
@@ -82,6 +89,9 @@ pub struct ImpactRequest {
     pub force: bool,
     pub execution: ExecutionOptions,
     pub upstream: Option<UpstreamRevisions>,
+    /// The application's own executable implementing the hidden semver helper.
+    /// `None` runs the embedded checker in this trusted host process.
+    pub semver_helper: Option<PathBuf>,
 }
 
 impl ImpactRequest {
@@ -101,6 +111,7 @@ impl ImpactRequest {
             force: false,
             execution: ExecutionOptions::default(),
             upstream: None,
+            semver_helper: None,
         }
     }
 }
@@ -182,6 +193,9 @@ pub struct RunMetadata {
     pub storage_bytes: u64,
     pub planned_downstreams: usize,
     pub completed_downstreams: usize,
+    pub exercised_downstreams: usize,
+    /// None for an unfinished run or reports from an older schema.
+    pub coverage_sufficient: Option<bool>,
     pub upstream: Option<UpstreamRevisions>,
 }
 

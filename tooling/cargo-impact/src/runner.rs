@@ -247,8 +247,10 @@ impl Builder<'_> {
     ) -> std::io::Result<()> {
         // Never expose the scan root or another worker. Upstream sources are
         // immutable inputs; this worker owns its scratch and phase caches.
+        // Fetch can create the lockfile, but build/rustdoc phases never get
+        // writable source. A build script must use OUT_DIR for generated files.
+        mount(command, self.root, cwd, !network)?;
         for path in [
-            cwd,
             self.target.as_path(),
             cached,
             self.scope.join("home").as_path(),
@@ -423,7 +425,7 @@ fn safe_directory(root: &Path, path: &Path) -> std::io::Result<()> {
 }
 
 /// Preserve only tools and rustup's public installation location, never the caller's token environment.
-pub(crate) fn clean_command(program: &str) -> Command {
+pub(crate) fn clean_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut command = Command::new(program);
     command.env_clear();
     if let Some(path) = std::env::var_os("PATH") {
@@ -487,6 +489,10 @@ mod tests {
             .filter(|argument| argument.starts_with("type=bind"))
             .collect();
         assert_eq!(mounts.len(), 7);
+        assert!(
+            mounts.iter().any(|mount| mount
+                == &format!("type=bind,source={0},target={0},readonly", cwd.display()))
+        );
         assert!(mounts.iter().any(|mount| mount
             == &format!(
                 "type=bind,source={0},target={0},readonly",

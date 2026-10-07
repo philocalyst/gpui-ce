@@ -55,6 +55,15 @@ pub(crate) fn run_guarded(
     capture: Capture,
     mut resource_limit: impl FnMut() -> io::Result<bool>,
 ) -> io::Result<ProcessOutput> {
+    run_guarded_pid(command, timeout, capture, |_| resource_limit())
+}
+
+pub(crate) fn run_guarded_pid(
+    command: &mut Command,
+    timeout: Duration,
+    capture: Capture,
+    mut resource_limit: impl FnMut(u32) -> io::Result<bool>,
+) -> io::Result<ProcessOutput> {
     if !cfg!(unix) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -95,7 +104,7 @@ pub(crate) fn run_guarded(
     let started = Instant::now();
     let mut resource_limited = false;
     let wait = loop {
-        match resource_limit() {
+        match resource_limit(child.id()) {
             Ok(true) => {
                 resource_limited = true;
                 break Ok(None);
@@ -132,7 +141,7 @@ pub(crate) fn run_guarded(
     wait?;
     let status = status?;
     Ok(ProcessOutput {
-        success: status.success() && !timed_out,
+        success: status.success() && !timed_out && !resource_limited,
         code: status.code(),
         stdout: stdout.value,
         log: format!("{}\n{}", stdout.log.text(), stderr.log.text()),

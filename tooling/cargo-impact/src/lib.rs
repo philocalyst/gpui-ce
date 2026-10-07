@@ -11,11 +11,13 @@ mod source;
 pub mod bot;
 pub mod config;
 pub mod discovery;
+pub mod doctor;
 pub mod forge;
 pub mod http;
 pub mod runner;
 
 pub use engine::{ImpactError, analyze, analyze_with_discovery, analyze_with_progress};
+pub use gate::run_semver_helper;
 pub use model::{
     BuildProvenance, BuildResult, Classification, CompilerDiagnostic, DiagnosticOrigin,
     DiagnosticPackage, DownstreamResult, DownstreamSource, DownstreamSpec, ExecutionOptions,

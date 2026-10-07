@@ -32,6 +32,8 @@ pub struct DiscoveryConfig {
     pub github: bool,
     pub max_pages: u32,
     pub max_repositories: usize,
+    /// Cap selected package/manifest experiments after repository aggregation.
+    pub max_experiments: usize,
 }
 
 impl Default for DiscoveryConfig {
@@ -41,6 +43,7 @@ impl Default for DiscoveryConfig {
             github: false,
             max_pages: 5,
             max_repositories: 20,
+            max_experiments: 40,
         }
     }
 }
@@ -48,6 +51,7 @@ impl Default for DiscoveryConfig {
 impl Config {
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let mut config: Self = toml::from_str(&fs::read_to_string(path)?)?;
+        config.discovery.validate()?;
         let root = path
             .canonicalize()?
             .parent()
@@ -82,6 +86,18 @@ impl Config {
                 .iter()
                 .filter_map(|s| s.recipe.as_ref())
                 .any(|r| !r.runner.is_isolated())
+    }
+}
+
+impl DiscoveryConfig {
+    pub fn validate(&self) -> std::io::Result<()> {
+        if self.max_pages > 1_000 || self.max_repositories > 10_000 || self.max_experiments > 10_000
+        {
+            return Err(std::io::Error::other(
+                "discovery budgets are limited to 1,000 pages, 10,000 repositories and 10,000 experiments; zero disables a budget",
+            ));
+        }
+        Ok(())
     }
 }
 
