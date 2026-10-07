@@ -1,20 +1,43 @@
-//! Human reports are a concise view over the complete structured evidence.
-
-use std::fmt::Write;
+//! One evidence model, several views: Markdown, interactive HTML, SARIF and issue bundles.
 
 use crate::{
     discovery::Discovery,
-    forge::Repository,
-    model::{
-        BuildResult, Classification, CompilerDiagnostic, DiagnosticOrigin, DownstreamResult,
-        DownstreamSource, GateResult, ImpactReport,
-    },
+    model::{Classification, GateResult, ImpactReport},
 };
+use serde::Serialize;
+use std::{
+    fs,
+    io::{self, Read, Write},
+    path::Path,
+};
+use thiserror::Error;
+
+mod html;
+mod issues;
+mod markdown;
+mod presentation;
+mod sarif;
+pub use issues::IssueDraft;
+
+const MAX_REPORT_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Debug, Error)]
+pub enum ReportError {
+    #[error("report I/O: {0}")]
+    Io(#[from] io::Error),
+    #[error("invalid report JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("report exceeds the 512 MiB input limit")]
+    TooLarge,
+    #[error("unsupported report schema {0}; this scanner supports schema 1")]
+    Schema(u32),
+}
 
 impl ImpactReport {
     pub fn failed(library: &str, error: &str) -> Self {
         Self {
             schema_version: 1,
+            run: Default::default(),
             library: library.into(),
             baseline_fingerprint: None,
             candidate_fingerprint: None,
@@ -23,11 +46,27 @@ impl ImpactReport {
                 ran: false,
                 required_bump: None,
                 reason: "The experiment did not complete; its result is inconclusive.".into(),
-                log: error.into(),
+                log: String::new(),
             },
             discovery: Discovery::default(),
             downstreams: Vec::new(),
         }
+    }
+    pub fn load(path: &Path) -> Result<Self, ReportError> {
+        let file = fs::File::open(path)?;
+        if file.metadata()?.len() > MAX_REPORT_BYTES {
+            return Err(ReportError::TooLarge);
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_REPORT_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_REPORT_BYTES {
+            return Err(ReportError::TooLarge);
+        }
+        let report: Self = serde_json::from_slice(&bytes)?;
+        if report.schema_version != 1 {
+            return Err(ReportError::Schema(report.schema_version));
+        }
+        Ok(report)
     }
     pub fn has_regressions(&self) -> bool {
         self.downstreams
@@ -41,221 +80,154 @@ impl ImpactReport {
                 .iter()
                 .any(|r| r.classification == Classification::HarnessFailure)
     }
-    /// Large reports fall back to counts instead of cutting a diagnostic fence in half.
+    pub fn markdown(&self) -> String {
+        markdown::render(self, false)
+    }
+    pub fn html(&self) -> String {
+        html::render(self)
+    }
+    pub fn sarif(&self) -> serde_json::Value {
+        sarif::render(self)
+    }
     pub(crate) fn comment_markdown(&self) -> String {
-        let markdown = self.markdown();
-        if markdown.chars().count() <= 30_000 {
-            return markdown;
+        let value = markdown::render(self, true);
+        if value.chars().count() <= 30_000 && self.error.as_ref().is_none_or(|e| e.len() <= 30_000)
+        {
+            return value;
         }
-        let count = |classification| {
+        let count = |kind| {
             self.downstreams
                 .iter()
-                .filter(|r| r.classification == classification)
+                .filter(|r| r.classification == kind)
                 .count()
         };
         format!(
-            "# Downstream impact: {}\n\n{}\n\n{} regressions, {} compatible, {} baseline failures, {} harness failures, {} not exercised.\n\nThe detailed report exceeds the comment limit; inspect the full artifact for diagnostics and coverage notes.",
-            escape(&self.library.chars().take(100).collect::<String>()),
-            escape(&self.gate.reason.chars().take(1000).collect::<String>()),
+            "## Downstream impact · {}\n\n**{} regressions** · {} compatible · {} baseline failures · {} harness failures · {} not exercised\n\n{}\n\nThis report exceeds the comment limit. Download the artifact bundle and open index.html for highlighted spans, consumer filtering, issue drafts, reproduction recipes and all retained evidence.",
+            presentation::inline(&presentation::clip(&self.library, 100)),
             count(Classification::Regression),
             count(Classification::Compatible),
             count(Classification::PreExistingFailure),
             count(Classification::HarnessFailure),
             count(Classification::NotExercised),
+            presentation::escape(&presentation::clip(&self.gate.reason, 1_000))
         )
     }
-    pub fn markdown(&self) -> String {
-        let mut output = format!(
-            "# Downstream impact: {}\n\n{}\n\n",
-            escape(&self.library),
-            escape(&self.gate.reason)
+    /// Atomic checkpoints preserve completed evidence when a runner cancels the job.
+    pub fn write_checkpoint(&self, directory: &Path) -> Result<(), ReportError> {
+        fs::create_dir_all(directory)?;
+        // Completed evidence takes precedence over secondary view failures.
+        atomic_json(&directory.join("report.json"), self)?;
+        // Replace the previous run's views before exposing the new checkpoint.
+        // Re-rendering is offline; no untrusted build runs when opening a checkpoint.
+        let partial = format!(
+            "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Partial cargo-impact report</title><h1>Partial downstream impact report</h1><p>{}/{} consumers completed. Missing results are inconclusive.</p><p>Render the current evidence with <code>cargo impact report --input report.json --output-dir .</code>.</p><a href=\"report.json\">Current JSON evidence</a></html>",
+            self.run.completed_downstreams, self.run.planned_downstreams
         );
-        if let Some(error) = &self.error {
-            fenced(&mut output, error);
-            output.push_str("Adjust the library build recipe (runner, features, target, or system dependencies) and retry.\n\n");
-        }
-        if !self.discovery.notes.is_empty() {
-            output.push_str("## Coverage and configuration\n\n");
-            for note in &self.discovery.notes {
-                let _ = writeln!(output, "- {}", escape(note));
-            }
-            output.push('\n');
-        }
-        if self.downstreams.is_empty() {
-            output.push_str("No downstream builds were recorded. This does not establish ecosystem compatibility.\n");
-            return output;
-        }
-        output.push_str("| Downstream | Result |\n| --- | --- |\n");
-        for result in &self.downstreams {
-            let label = match result.classification {
-                Classification::Compatible => "Both versions compiled",
-                Classification::Regression => "Regression",
-                Classification::PreExistingFailure => "Baseline already failed; inconclusive",
-                Classification::HarnessFailure => "Harness failure; retry with a recipe override",
-                Classification::NotExercised => "Library was not exercised",
-            };
-            let _ = writeln!(output, "| {} | {label} |", escape(&result.name));
-        }
-        for result in &self.downstreams {
-            if result.classification == Classification::Compatible {
-                continue;
-            }
-            let _ = writeln!(output, "\n## {}\n", escape(&result.name));
-            if let Some(message) = &result.message {
-                let _ = writeln!(output, "{}\n", escape(message));
-            }
-            if let Some(revision) = &result.revision {
-                let _ = writeln!(output, "Downstream revision: {}\n", escape(revision));
-            }
-            let build = if result.classification == Classification::PreExistingFailure
-                || result.candidate.diagnostics.is_empty()
-            {
-                &result.baseline
-            } else {
-                &result.candidate
-            };
-            render_diagnostics(&mut output, result, build);
-            if result.classification == Classification::HarnessFailure {
-                for (label, build) in [
-                    ("Baseline", &result.baseline),
-                    ("Candidate", &result.candidate),
-                ] {
-                    // Rustc's rendered error is already above; keep only additional
-                    // harness context here. Complete original logs remain in JSON.
-                    let mut context = build.log.clone();
-                    for diagnostic in &build.diagnostics {
-                        if let Some(rendered) = &diagnostic.rendered {
-                            context = context.replace(rendered, "");
-                        }
-                    }
-                    if !context.trim().is_empty() {
-                        let _ = writeln!(output, "{label} harness output:\n");
-                        // The concise Markdown view is bounded independently of retained JSON logs.
-                        fenced(&mut output, &context.chars().take(4000).collect::<String>());
-                    }
-                }
-            }
-            output.push_str("Complete diagnostics, suggestions, macro expansions, byte ranges, snippets, and bounded logs are in report.json.\n");
-        }
-        output
+        atomic_bytes(&directory.join("index.html"), partial.as_bytes())?;
+        clear_issue_drafts(directory)?;
+        atomic_json(&directory.join("report.sarif"), &self.sarif())?;
+        atomic_bytes(
+            &directory.join("report.md"),
+            self.comment_markdown().as_bytes(),
+        )?;
+        atomic_bytes(
+            &directory.join("summary.md"),
+            self.comment_markdown().as_bytes(),
+        )?;
+        Ok(())
     }
-}
-
-fn render_diagnostics(output: &mut String, result: &DownstreamResult, build: &BuildResult) {
-    let mut seen = std::collections::BTreeSet::new();
-    for diagnostic in build
-        .diagnostics
-        .iter()
-        .filter(|d| matches!(d.level, cargo_metadata::diagnostic::DiagnosticLevel::Error))
-        // --all-targets can emit the same error for both the library and its test target.
-        // Preserve both in JSON, but show the source problem once in the concise report.
-        .filter(|d| {
-            seen.insert((
-                d.package_id.as_str(),
-                d.code.as_ref().map(|c| c.code.as_str()),
-                d.message.as_str(),
-                d.spans
-                    .iter()
-                    .find(|s| s.is_primary)
-                    .map(|s| (s.file_name.as_str(), s.line_start, s.column_start)),
-            ))
-        })
-        .take(8)
-    {
-        let code = diagnostic
-            .code
-            .as_ref()
-            .map(|c| c.code.as_str())
-            .unwrap_or("error");
-        let _ = writeln!(
-            output,
-            "{}: {}\n",
-            escape(code),
-            escape(&diagnostic.message)
+    pub fn write_artifacts(&self, directory: &Path) -> Result<(), ReportError> {
+        fs::create_dir_all(directory)?;
+        atomic_json(&directory.join("report.json"), self)?;
+        clear_issue_drafts(directory)?;
+        atomic_bytes(&directory.join("report.md"), self.markdown().as_bytes())?;
+        atomic_bytes(
+            &directory.join("summary.md"),
+            self.comment_markdown().as_bytes(),
+        )?;
+        atomic_bytes(&directory.join("index.html"), self.html().as_bytes())?;
+        atomic_json(&directory.join("report.sarif"), &self.sarif())?;
+        let issues = directory.join("issues");
+        fs::create_dir_all(&issues)?;
+        let drafts = self.issue_drafts();
+        let mut index = String::from(
+            "# Issue drafts\n\nThese are local drafts for human review. No issue has been submitted.\n\n| Consumer | Draft | Reproduction recipe | Issue form |\n| --- | --- | --- | --- |\n",
         );
-        if let Some(package) = &diagnostic.package {
-            let origin = match package.origin {
-                DiagnosticOrigin::Downstream => "downstream",
-                DiagnosticOrigin::Library => "injected library",
-                DiagnosticOrigin::Dependency => "external dependency",
-            };
-            let _ = writeln!(output, "Package: {} ({origin})\n", escape(&package.name),);
+        for draft in &drafts {
+            use std::fmt::Write;
+            atomic_bytes(&issues.join(&draft.filename), draft.body.as_bytes())?;
+            atomic_bytes(
+                &issues.join(&draft.reproduction_filename),
+                draft.reproduction_config.as_bytes(),
+            )?;
+            let link = draft
+                .composer_url
+                .as_ref()
+                .map(|url| format!("[Review draft](<{url}>)"))
+                .unwrap_or_else(|| "Copy Markdown into your tracker".into());
+            let _ = writeln!(
+                index,
+                "| {} | [{}]({}) | [TOML]({}) | {} |",
+                presentation::escape(&draft.downstream),
+                presentation::escape(&draft.title),
+                draft.filename,
+                draft.reproduction_filename,
+                link
+            );
         }
-        for span in diagnostic.spans.iter().filter(|s| s.is_primary).take(4) {
-            render_span(output, result, diagnostic, span);
-            if !diagnostic.source_files.contains_key(&span.file_name)
-                && let Some(callsite) = std::iter::successors(span.expansion.as_deref(), |e| {
-                    e.span.expansion.as_deref()
-                })
-                .map(|e| &e.span)
-                .find(|s| diagnostic.source_files.contains_key(&s.file_name))
-            {
-                output.push_str("Macro invocation: ");
-                render_span(output, result, diagnostic, callsite);
-            }
+        if drafts.is_empty() {
+            index.push_str(
+                "\nNo proven regressions were recorded, so no issue drafts were generated.\n",
+            );
         }
-        if let Some(rendered) = &diagnostic.rendered {
-            fenced(output, &rendered.chars().take(8000).collect::<String>());
-        }
+        atomic_bytes(&issues.join("index.md"), index.as_bytes())?;
+        atomic_json(&issues.join("index.json"), &drafts)?;
+        Ok(())
     }
 }
 
-fn render_span(
-    output: &mut String,
-    result: &DownstreamResult,
-    diagnostic: &CompilerDiagnostic,
-    span: &cargo_metadata::diagnostic::DiagnosticSpan,
-) {
-    let label = format!(
-        "{}:{}:{}",
-        escape(&span.file_name),
-        span.line_start,
-        span.column_start
-    );
-    let link = match (&result.source, &result.revision) {
-        (DownstreamSource::Git { url, forge, .. }, Some(revision)) => diagnostic
-            .source_files
-            .get(&span.file_name)
-            .and_then(|path| {
-                Repository::parse(url, *forge).ok()?.source_link(
-                    revision,
-                    path.to_str()?,
-                    span.line_start,
-                )
-            }),
-        _ => None,
-    };
-    if let Some(link) = link {
-        let _ = writeln!(output, "[{label}](<{link}>)\n");
-    } else {
-        let _ = writeln!(output, "{label}\n");
-    }
-}
-
-// Neutralize mentions, HTML, and Markdown injection from arbitrary source/forge data.
-fn escape(value: &str) -> String {
-    let value = value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('@', "@\u{200b}")
-        .replace('\n', " ");
-    let mut output = String::new();
-    for character in value.chars() {
-        if "\\`*[]_|".contains(character) {
-            output.push('\\');
+/// Remove only our hashed filenames. User notes and other files remain intact.
+fn clear_issue_drafts(directory: &Path) -> io::Result<()> {
+    let issues = directory.join("issues");
+    fs::create_dir_all(&issues)?;
+    for entry in fs::read_dir(&issues)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some((stem, extension)) = name.rsplit_once('.') else {
+            continue;
+        };
+        let owned = stem
+            .strip_prefix("consumer-")
+            .is_some_and(|hash| hash.len() == 16 && hash.bytes().all(|c| c.is_ascii_hexdigit()))
+            && matches!(extension, "md" | "toml");
+        if owned && entry.file_type()?.is_file() {
+            fs::remove_file(entry.path())?;
         }
-        output.push(character);
     }
-    output
+    atomic_bytes(&issues.join("index.json"), b"[]\n")?;
+    atomic_bytes(&issues.join("index.md"), b"# Issue drafts\n\nThis run has no exported drafts yet. Render report.json to export completed regressions.\n")
 }
 
-fn fenced(output: &mut String, value: &str) {
-    let longest = value.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(longest.max(2) + 1);
-    let _ = writeln!(
-        output,
-        "{fence}text\n{}\n{fence}\n",
-        value.replace('@', "@\u{200b}")
-    );
+fn atomic_bytes(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("artifact has no parent"))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(contents)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), ReportError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("artifact has no parent"))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(file.as_file_mut(), value)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }

@@ -1,6 +1,10 @@
 //! Installation is self-contained even before the scanner is published.
 
-use std::{fs, io, path::Path};
+use std::{
+    fs,
+    io::{self, Write},
+    path::Path,
+};
 
 type Asset = (&'static str, &'static [u8]);
 
@@ -21,6 +25,7 @@ const SCANNER: &[Asset] = assets![
     "src/cargo.rs",
     "src/config.rs",
     "src/discovery.rs",
+    "src/doctor.rs",
     "src/engine.rs",
     "src/forge.rs",
     "src/gate.rs",
@@ -28,6 +33,13 @@ const SCANNER: &[Asset] = assets![
     "src/model.rs",
     "src/process.rs",
     "src/report.rs",
+    "src/report/html.rs",
+    "src/report/issues.rs",
+    "src/report/markdown.rs",
+    "src/report/presentation.rs",
+    "src/report/sarif.rs",
+    "src/report/report.css",
+    "src/report/report.js",
     "src/runner.rs",
     "src/source.rs",
     "examples/impact.yml",
@@ -42,11 +54,32 @@ pub(crate) fn initialize(directory: &Path, library: &str) -> io::Result<()> {
     {
         return Err(io::Error::other("invalid library name"));
     }
+    let ignore_path = directory.join(".gitignore");
+    if fs::symlink_metadata(&ignore_path)
+        .is_ok_and(|metadata| !metadata.is_file() || metadata.file_type().is_symlink())
+    {
+        return Err(io::Error::other(".gitignore must be a regular file"));
+    }
+    let mut ignores = match fs::read_to_string(&ignore_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    for pattern in [".cargo-impact/", "impact-report/"] {
+        if !ignores.lines().any(|line| line == pattern) {
+            if !ignores.is_empty() && !ignores.ends_with('\n') {
+                ignores.push('\n');
+            }
+            ignores.push_str(pattern);
+            ignores.push('\n');
+        }
+    }
     let mut files = vec![
+        (".gitignore".into(),ignores.into_bytes()),
         (
             "impact.toml".to_owned(),
             format!(
-                "library = {library:?}\n\n[discovery]\ncrates_io = true\nmax_repositories = 20\n"
+                "library = {library:?}\n\n[execution]\njobs = 2\ncargo_jobs = 1\nmemory_mib = 2048\nmax_work_bytes = 5368709120\n\n[discovery]\ncrates_io = true\nmax_repositories = 20\n"
             )
             .into_bytes(),
         ),
@@ -66,11 +99,27 @@ pub(crate) fn initialize(directory: &Path, library: &str) -> io::Result<()> {
     );
     // Check every destination before writing anything; a rerun cannot partly overwrite a setup.
     for (path, _) in &files {
-        if directory.join(path).exists() {
+        let destination = directory.join(path);
+        // Existing symlinks, including dangling ones, are never setup destinations.
+        if path != ".gitignore" && fs::symlink_metadata(&destination).is_ok() {
             return Err(io::Error::other(format!(
                 "{} already exists",
                 directory.join(path).display()
             )));
+        }
+        for ancestor in destination.ancestors() {
+            // The caller chooses the root; normal OS aliases such as /var are valid.
+            if ancestor == directory {
+                break;
+            }
+            if fs::symlink_metadata(ancestor)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(io::Error::other(format!(
+                    "setup path contains a symlink: {}",
+                    ancestor.display()
+                )));
+            }
         }
     }
     for (path, bytes) in files {
@@ -79,7 +128,26 @@ pub(crate) fn initialize(directory: &Path, library: &str) -> io::Result<()> {
             path.parent()
                 .ok_or_else(|| io::Error::other("missing output parent"))?,
         )?;
-        fs::write(path, bytes)?;
+        if path.file_name().is_some_and(|name| name == ".gitignore") {
+            let mut temporary = tempfile::NamedTempFile::new_in(
+                path.parent()
+                    .ok_or_else(|| io::Error::other("missing output parent"))?,
+            )?;
+            temporary.write_all(&bytes)?;
+            if let Ok(metadata) = fs::metadata(&path) {
+                temporary
+                    .as_file()
+                    .set_permissions(metadata.permissions())?;
+            }
+            temporary.as_file().sync_all()?;
+            temporary.persist(path).map_err(|error| error.error)?;
+        } else {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?
+                .write_all(&bytes)?;
+        }
     }
     Ok(())
 }

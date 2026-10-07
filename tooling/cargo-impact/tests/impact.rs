@@ -50,6 +50,9 @@ fn classifies_real_downstream_builds_against_both_library_versions() {
         force: false,
         work_dir: Some(fixture.path().join("work")),
         timeout: Duration::from_secs(240),
+        execution: Default::default(),
+        upstream: None,
+        semver_helper: Some(assert_cmd::cargo::cargo_bin!("cargo-impact").into()),
     })
     .expect("semver gate and fixture runs should complete");
     assert!(
@@ -114,7 +117,7 @@ fn classifies_real_downstream_builds_against_both_library_versions() {
         "duplicate target errors should stay out of the human report"
     );
     let regression_section = markdown
-        .split("\n## regression\n")
+        .split("\n## 🔴 regression · Regression\n")
         .nth(1)
         .expect("the regression details should be rendered")
         .split("\n## ")
@@ -177,6 +180,9 @@ fn semantic_break_without_downstream_impact_does_not_invent_a_regression() {
         force: false,
         work_dir: None,
         timeout: Duration::from_secs(240),
+        execution: Default::default(),
+        upstream: None,
+        semver_helper: None,
     })
     .unwrap();
     assert!(report.gate.ran);
