@@ -407,11 +407,16 @@ fn check(args: CheckArgs) -> Result<i32> {
     request.execution = config.execution.clone();
     request.semver_helper = Some(std::env::current_exe()?);
     if upstream_repository.is_some() || baseline_sha.is_some() || candidate_sha.is_some() {
+        let repository = match upstream_repository
+            .as_deref()
+            .map(|url| Repository::parse(url, None))
+            .transpose()
+        {
+            Ok(repository) => repository,
+            Err(error) => return failed_check(&report_dir, &request.library, error),
+        };
         request.upstream = Some(UpstreamRevisions {
-            repository: upstream_repository
-                .as_deref()
-                .map(|url| Repository::parse(url, None))
-                .transpose()?,
+            repository,
             baseline_sha,
             candidate_sha,
         });

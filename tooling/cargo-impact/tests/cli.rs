@@ -180,6 +180,7 @@ fn saved_report_renders_offline_into_a_complete_bundle() {
         "index.html",
         "report.json",
         "report.md",
+        "summary.md",
         "report.sarif",
         "issues/index.md",
         "issues/index.json",
@@ -273,6 +274,40 @@ fn malformed_config_writes_failure_reports_with_config_path_and_library() {
     let markdown = fs::read_to_string(report_dir.join("report.md")).unwrap();
     assert!(markdown.contains("experiment did not complete"));
     assert!(markdown.contains("broken-impact.toml"));
+}
+
+#[test]
+fn invalid_upstream_context_replaces_previous_success_evidence() {
+    let directory = TempDir::new().unwrap();
+    let report_dir = directory.path().join("report");
+    let mut old = cargo_impact::ImpactReport::failed("old-library", "old error");
+    old.error = None;
+    old.write_artifacts(&report_dir).unwrap();
+    cli()
+        .args([
+            "check",
+            "--library",
+            "probe-lib",
+            "--baseline",
+            "missing-baseline",
+            "--candidate",
+            "missing-candidate",
+            "--upstream-repository",
+            "https://user:password@github.com/org/repo",
+            "--report-dir",
+        ])
+        .arg(&report_dir)
+        .assert()
+        .code(2);
+    let report = cargo_impact::ImpactReport::load(&report_dir.join("report.json")).unwrap();
+    assert_eq!(report.library, "probe-lib");
+    assert!(report.error.is_some());
+    assert!(!report.error.unwrap().contains("password"));
+    assert!(
+        fs::read_to_string(report_dir.join("summary.md"))
+            .unwrap()
+            .contains("experiment did not complete")
+    );
 }
 
 #[test]

@@ -255,6 +255,20 @@ fn forge_issue_forms_encode_text_and_advertise_actual_capabilities() {
 }
 
 #[test]
+fn changed_input_diagnostics_do_not_claim_verified_source_links() {
+    let mut report = report();
+    report.downstreams[0].classification = Classification::HarnessFailure;
+    report.downstreams[0].candidate.failure = Some(cargo_impact::HarnessFailure::InputMutation);
+    assert!(!report.html().contains("src/a%20b%23%3F.rs#L42"));
+    assert!(
+        report.sarif()["runs"][0]["results"][0]["locations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn offline_report_loader_rejects_future_schema_and_truncated_json() {
     let directory = TempDir::new().unwrap();
     let input = directory.path().join("report.json");

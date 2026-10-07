@@ -10,7 +10,7 @@ use crate::{
     forge::Repository,
     model::{
         BuildResult, Classification, CompilerDiagnostic, DiagnosticOrigin, DownstreamResult,
-        DownstreamSource,
+        DownstreamSource, HarnessFailure,
     },
 };
 
@@ -87,6 +87,9 @@ pub(crate) fn source_link(
     diagnostic: &CompilerDiagnostic,
     span: &DiagnosticSpan,
 ) -> Option<Url> {
+    if !source_unchanged(result) {
+        return None;
+    }
     let (DownstreamSource::Git { url, forge, .. }, Some(revision)) =
         (&result.source, &result.revision)
     else {
@@ -96,6 +99,11 @@ pub(crate) fn source_link(
     Repository::parse(url, *forge)
         .ok()?
         .source_link(revision, file.to_str()?, span.line_start)
+}
+
+pub(crate) fn source_unchanged(result: &DownstreamResult) -> bool {
+    ![result.baseline.failure, result.candidate.failure]
+        .contains(&Some(HarnessFailure::InputMutation))
 }
 
 pub(crate) fn source_spans(diagnostic: &CompilerDiagnostic) -> Vec<(&DiagnosticSpan, bool)> {

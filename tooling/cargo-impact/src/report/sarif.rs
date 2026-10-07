@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::model::{Classification, ImpactReport, RunStatus};
 
 use super::presentation::{
-    clip, diagnostic_key, errors, selected_build, source_link, source_spans,
+    clip, diagnostic_key, errors, selected_build, source_link, source_spans, source_unchanged,
 };
 
 pub(super) fn render(report: &ImpactReport) -> Value {
@@ -41,7 +41,10 @@ pub(super) fn render(report: &ImpactReport) -> Value {
                     json!(format!("https://doc.rust-lang.org/error_codes/{code}.html"));
             }
             let mut locations = Vec::new();
-            for (span, _) in source_spans(diagnostic) {
+            for (span, _) in source_spans(diagnostic)
+                .into_iter()
+                .filter(|_| source_unchanged(consumer))
+            {
                 let Some(file) = diagnostic.source_files.get(&span.file_name) else {
                     continue;
                 };
