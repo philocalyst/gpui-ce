@@ -22,7 +22,7 @@ use crate::{
 pub(crate) use experiment::classify;
 use preparation::PreparedScan;
 pub(crate) use storage::work_bytes;
-use storage::{WorkArea, prepare_storage};
+use storage::{WorkArea, prepare_storage, validate_inputs};
 
 #[derive(Debug, Error)]
 pub enum ImpactError {
@@ -56,6 +56,9 @@ pub fn analyze_with_discovery(
 
 /// Only the coordinator observes reports. Worker events move retained evidence
 /// into its report; no worker shares the callback or clones another pair's logs.
+/// Local sources returned by discovery must be outside the managed work directory.
+/// Only inputs supplied on the request can be protected before requested pruning;
+/// callback sources are validated once discovery returns and before dispatch.
 pub fn analyze_with_progress(
     request: &ImpactRequest,
     discover: impl FnOnce() -> Result<(Vec<DownstreamSpec>, Discovery), String>,
@@ -97,6 +100,7 @@ fn analyze_run(
         .checked_add(Duration::from_secs(request.execution.scan_timeout_seconds))
         .ok_or_else(|| io::Error::other("scan timeout exceeds the host clock range"))?;
     let area = WorkArea::open(request.work_dir.as_deref())?;
+    validate_inputs(area.path(), request)?;
     prepare_storage(area.path(), &request.execution)?;
     let images = Mutex::new(BTreeMap::new());
     let context = ScanContext {
