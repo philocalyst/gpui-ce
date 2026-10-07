@@ -58,8 +58,10 @@ fn main() -> io::Result<()> {
 
 fn engine_input(path: &str) -> bool {
     matches!(path, "Cargo.toml" | "Cargo.lock" | "build.rs")
-        || (path.starts_with("src/") && path.ends_with(".rs")
-            && !path.starts_with("src/report/") && !path.starts_with("src/cli/")
+        || (path.starts_with("src/")
+            && path.ends_with(".rs")
+            && !path.starts_with("src/report/")
+            && !path.starts_with("src/cli/")
             && !matches!(path, "src/report.rs" | "src/main.rs" | "src/setup.rs"))
 }
 
