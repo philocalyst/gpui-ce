@@ -38,6 +38,13 @@ shell argument forwarding, retained-input protection, installation preflight and
 classification. `init` automatically embeds every source module and is compiled as a
 fresh standalone installation in the fork's verification workflow.
 
+A follow-up review exposed report/source overlap with managed cleanup. Both CLI commands
+now resolve directory aliases and reject overlapping report/work/source trees before
+writing. The embedding API checks known inputs before pruning and discovered local inputs
+before worker dispatch. Sentinel tests cover selected replay targets, source-root output,
+future paths, symlinks and configured local consumers. Linux also exposed an executable
+test-fixture race; supervision tests now run their input script through the system shell.
+
 ## What the reference implementations teach
 
 [Crater workers](https://github.com/rust-lang/crater/blob/master/src/runner/worker.rs)

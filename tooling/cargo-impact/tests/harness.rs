@@ -62,6 +62,110 @@ fn package(root: &Path, name: &str, version: &str, source: &str, extra: &str) {
 const DEP: &str = "[dependencies]\nchanged-lib='1'";
 
 #[test]
+fn managed_input_guard_preserves_every_known_source_before_pruning() {
+    for role in ["baseline", "candidate", "consumer"] {
+        let mut fixture = Fixture::new();
+        let root = fixture.request.work_dir.as_ref().unwrap();
+        let protected = root.join("gate-sources/input");
+        package(&protected, "changed-lib", "1.0.0", "pub fn kept() {}", "");
+        let sentinel = protected.join("sentinel");
+        fs::write(&sentinel, "irreplaceable source").unwrap();
+        match role {
+            "baseline" => fixture.request.baseline = protected.clone(),
+            "candidate" => fixture.request.candidate = protected.clone(),
+            _ => fixture
+                .request
+                .downstreams
+                .push(DownstreamSpec::local("consumer", &protected)),
+        }
+        fixture.request.execution.prune_before_run = true;
+        let error = analyze(&fixture.request).unwrap_err().to_string();
+        assert!(
+            error.contains("source input must be outside"),
+            "{role}: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(sentinel).unwrap(),
+            "irreplaceable source"
+        );
+        assert!(protected.join("Cargo.toml").is_file());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_input_guard_resolves_source_aliases_before_pruning() {
+    let mut fixture = Fixture::new();
+    let protected = fixture
+        .request
+        .work_dir
+        .as_ref()
+        .unwrap()
+        .join("gate-sources/input");
+    package(&protected, "changed-lib", "1.0.0", "pub fn kept() {}", "");
+    let sentinel = protected.join("sentinel");
+    fs::write(&sentinel, "irreplaceable source").unwrap();
+    let alias = fixture.dir.path().join("input-alias");
+    std::os::unix::fs::symlink(&protected, &alias).unwrap();
+    fixture.request.candidate = alias;
+    fixture.request.execution.prune_before_run = true;
+    let error = analyze(&fixture.request).unwrap_err().to_string();
+    assert!(error.contains("source input must be outside"), "{error}");
+    assert_eq!(
+        fs::read_to_string(sentinel).unwrap(),
+        "irreplaceable source"
+    );
+}
+
+#[test]
+fn managed_input_guard_refuses_discovered_local_sources_before_worker_cleanup() {
+    let mut fixture = Fixture::new();
+    fixture.request.execution.prune_before_run = true;
+    let protected = fixture
+        .request
+        .work_dir
+        .as_ref()
+        .unwrap()
+        .join("gate-sources/discovered-input");
+    let sentinel = protected.join("sentinel");
+    let error = analyze_with_discovery(&fixture.request, || {
+        package(&protected, "consumer", "1.0.0", "pub fn kept() {}", DEP);
+        fs::write(&sentinel, "discovered source").unwrap();
+        Ok((
+            vec![DownstreamSpec::local("discovered", &protected)],
+            Discovery::default(),
+        ))
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("source input must be outside"), "{error}");
+    assert_eq!(fs::read_to_string(sentinel).unwrap(), "discovered source");
+    assert!(
+        !fixture
+            .request
+            .work_dir
+            .as_ref()
+            .unwrap()
+            .join("workers")
+            .exists()
+    );
+}
+
+#[test]
+fn managed_input_guard_allows_work_under_excluded_source_directory() {
+    let mut fixture = Fixture::new();
+    fixture.request.work_dir = Some(fixture.request.baseline.join(".cargo-impact/work"));
+    fixture.request.execution.prune_before_run = true;
+    fixture.consumer("consumer", "pub fn api() { changed_lib::kept(); }", DEP);
+    let report = analyze(&fixture.request).unwrap();
+    assert_eq!(
+        report.downstreams[0].classification,
+        Classification::Compatible
+    );
+    assert!(fixture.request.baseline.join("src/lib.rs").is_file());
+}
+
+#[test]
 fn oversized_manifest_is_a_bounded_preparation_failure_at_the_actual_phase() {
     let mut fixture = Fixture::new();
     let consumer = fixture.consumer(

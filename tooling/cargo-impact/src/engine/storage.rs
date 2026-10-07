@@ -1,6 +1,6 @@
 //! Owned work directories, snapshot boundaries and storage policy.
 
-use crate::model::ImpactRequest;
+use crate::model::{DownstreamSource, ImpactRequest};
 use fs2::FileExt;
 use std::{
     fs::{self, File, OpenOptions},
@@ -93,6 +93,56 @@ impl Drop for WorkArea {
         // Relying on descriptor closure can leave it briefly held by an exiting child.
         let _ = FileExt::unlock(&self._lock);
     }
+}
+
+/// Check known inputs before pruning any managed path. Missing inputs remain a
+/// later preparation failure, but their existing ancestors still reveal aliases
+/// and descendants of the work directory.
+pub(super) fn validate_inputs(root: &Path, request: &ImpactRequest) -> io::Result<()> {
+    validate_input(root, &request.baseline)?;
+    validate_input(root, &request.candidate)?;
+    for spec in &request.downstreams {
+        if let DownstreamSource::Local { path } = &spec.source {
+            validate_input(root, path)?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_input(root: &Path, source: &Path) -> io::Result<()> {
+    let mut ancestor = if source.is_absolute() {
+        source.to_owned()
+    } else {
+        std::env::current_dir()?.join(source)
+    };
+    let mut suffix = Vec::new();
+    let resolved = loop {
+        match ancestor.canonicalize() {
+            Ok(mut resolved) => {
+                for component in suffix.into_iter().rev() {
+                    if component == ".." {
+                        resolved.pop();
+                    } else if component != "." {
+                        resolved.push(component);
+                    }
+                }
+                break resolved;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let component = ancestor.components().next_back().ok_or(error)?;
+                suffix.push(component.as_os_str().to_owned());
+                ancestor.pop();
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    if resolved.starts_with(root) {
+        return Err(io::Error::other(format!(
+            "source input must be outside the managed work directory before cleanup: {}",
+            source.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Count only this managed tree. Symlinks are never followed into user files.
@@ -197,6 +247,21 @@ pub(super) fn prepare_fresh_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_boundaries_resolve_existing_ancestors_without_rejecting_missing_external_sources() {
+        let area = WorkArea::open(None).unwrap();
+        let outside = TempDir::new().unwrap();
+        assert!(validate_input(area.path(), area.path()).is_err());
+        assert!(validate_input(area.path(), &area.path().join("cache/absent")).is_err());
+        assert!(validate_input(area.path(), &outside.path().join("absent/../consumer")).is_ok());
+        #[cfg(unix)]
+        {
+            let alias = outside.path().join("work-alias");
+            std::os::unix::fs::symlink(area.path(), &alias).unwrap();
+            assert!(validate_input(area.path(), &alias.join("missing/../consumer")).is_err());
+        }
+    }
 
     #[test]
     fn clean_replay_discards_only_selected_targets_and_refuses_parent_symlinks() {
