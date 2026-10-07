@@ -76,14 +76,15 @@ fn rustdoc(root: &Path, package: &Package, builder: &Builder<'_>) -> io::Result<
         })
         .ok_or_else(|| io::Error::other("selected package has no Rust library target"))?;
     // Separate output locations keep baseline JSON intact when compiling candidate.
+    let phase = if root.file_name().is_some_and(|v| v == "baseline") {
+        "baseline"
+    } else {
+        "candidate"
+    };
+    let scope = builder.scope.join(phase);
     let builder = Builder {
-        target: builder
-            .target
-            .join(if root.file_name().is_some_and(|v| v == "baseline") {
-                "baseline"
-            } else {
-                "candidate"
-            }),
+        target: builder.target.join(phase),
+        scope: &scope,
         ..*builder
     };
     let manifest = root.join("Cargo.toml");
@@ -124,6 +125,19 @@ fn rustdoc(root: &Path, package: &Package, builder: &Builder<'_>) -> io::Result<
         .join(format!("{}.json", target.name.replace('-', "_")));
     if !file.is_file() {
         return Err(io::Error::other("rustdoc succeeded without producing JSON"));
+    }
+    if !file
+        .canonicalize()?
+        .starts_with(builder.target.canonicalize()?)
+    {
+        return Err(io::Error::other(
+            "rustdoc JSON escaped its managed target directory",
+        ));
+    }
+    if file.metadata()?.len() > 128 * 1024 * 1024 {
+        return Err(io::Error::other(
+            "rustdoc JSON exceeds the 128 MiB evidence limit; narrow the selected features or force controlled downstream checks",
+        ));
     }
     Ok(file)
 }

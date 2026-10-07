@@ -36,6 +36,18 @@ pub(crate) fn metadata(
         }
     }
     let output = builder.run(cwd, &args, Capture::Bytes, false)?;
+    if output.timed_out {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Cargo metadata exhausted the consumer deadline",
+        ));
+    }
+    if output.resource_limited {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            "work directory exceeded its storage budget",
+        ));
+    }
     if !output.success {
         return Err(io::Error::other(format!(
             "cargo metadata failed: {}",
@@ -58,6 +70,18 @@ pub(crate) fn fetch(builder: &Builder<'_>, cwd: &Path, manifest: &Path) -> io::R
         args.extend(["--target".into(), target.into()]);
     }
     let output = builder.run(cwd, &args, Capture::Bytes, true)?;
+    if output.timed_out {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Cargo fetch exhausted the consumer deadline",
+        ));
+    }
+    if output.resource_limited {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            "work directory exceeded its storage budget",
+        ));
+    }
     if !output.success {
         return Err(io::Error::other(format!(
             "cargo fetch failed: {}",
@@ -107,6 +131,13 @@ pub(crate) fn check(
     if let Some(target) = &builder.recipe.target {
         args.extend(["--target".into(), target.into()]);
     }
+    let provenance = builder.provenance(
+        cwd,
+        &metadata
+            .workspace_root
+            .join("Cargo.toml")
+            .into_std_path_buf(),
+    )?;
     let mut output = builder.run(cwd, &args, Capture::Cargo, false)?;
     for diagnostic in &mut output.diagnostics {
         let Some(package) = metadata
@@ -139,7 +170,9 @@ pub(crate) fn check(
             &mut diagnostic.source_files,
         );
     }
-    let failure = if output.timed_out {
+    let failure = if output.resource_limited {
+        Some(HarnessFailure::StorageLimit)
+    } else if output.timed_out {
         Some(HarnessFailure::Timeout)
     } else if output.data_truncated {
         Some(HarnessFailure::OutputLimit)
@@ -181,6 +214,7 @@ pub(crate) fn check(
         compiled_packages: output.artifacts.into_iter().collect(),
         selected_library: Some(selected),
         failure,
+        provenance,
     })
 }
 

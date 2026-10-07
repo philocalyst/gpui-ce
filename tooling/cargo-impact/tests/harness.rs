@@ -7,7 +7,7 @@ use std::{
 
 use cargo_impact::{
     Classification, DiagnosticOrigin, DownstreamSource, DownstreamSpec, HarnessFailure,
-    ImpactRequest, analyze, analyze_with_discovery,
+    ImpactRequest, RunStatus, analyze, analyze_with_discovery, analyze_with_progress,
     discovery::Discovery,
     runner::{BuildRecipe, Runner},
 };
@@ -34,7 +34,8 @@ impl Fixture {
         request.force = true;
         request.recipe.runner = Runner::Local;
         request.work_dir = Some(dir.path().join("work"));
-        request.timeout = Duration::from_secs(20);
+        // This is now a budget for the complete pair, not each individual Cargo command.
+        request.timeout = Duration::from_secs(60);
         Self { dir, request }
     }
     fn consumer(&mut self, name: &str, source: &str, dependencies: &str) -> PathBuf {
@@ -636,7 +637,8 @@ fn build_script_failure_is_a_harness_failure_and_does_not_stop_other_consumers()
     );
     assert_eq!(
         report.downstreams[1].classification,
-        Classification::Compatible
+        Classification::Compatible,
+        "{report:?}"
     );
 }
 
@@ -781,4 +783,200 @@ fn timeout_is_classified_and_descendants_do_not_hold_scan_open() {
         Some(HarnessFailure::Timeout)
     );
     assert!(started.elapsed() < Duration::from_secs(12));
+}
+
+#[test]
+fn bounded_workers_overlap_consumers_keep_pairs_sequential_and_checkpoint_in_order() {
+    let mut fixture = Fixture::new();
+    fixture.request.timeout = Duration::from_secs(40);
+    fixture.request.execution.jobs = 2;
+    let barrier = fixture.dir.path().join("barrier");
+    fs::create_dir(&barrier).unwrap();
+    for (name, other) in [("left", "right"), ("right", "left")] {
+        let consumer = fixture.consumer(name, "pub fn api() { changed_lib::kept(); }", DEP);
+        fs::write(
+            consumer.join("build.rs"),
+            format!(
+                r#"
+fn main() {{
+    let barrier = std::path::Path::new({barrier:?});
+    let manifest = std::fs::read_to_string("Cargo.toml").unwrap();
+    let baseline = manifest.contains("upstream/baseline");
+    if baseline {{
+        std::fs::write(barrier.join("{name}-started"), "").unwrap();
+        let start = std::time::Instant::now();
+        while !barrier.join("{other}-started").exists() {{
+            assert!(start.elapsed().as_secs() < 10, "consumers were serialized");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }}
+        std::fs::write(barrier.join("{name}-baseline-done"), "").unwrap();
+    }} else {{
+        assert!(barrier.join("{name}-baseline-done").exists(), "candidate overlapped its baseline");
+        std::fs::write(barrier.join("{name}-candidate-done"), "").unwrap();
+    }}
+}}
+"#,
+                barrier = barrier.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+    }
+    let mut checkpoints = Vec::new();
+    let report = analyze_with_progress(
+        &fixture.request,
+        || Ok((Vec::new(), Discovery::default())),
+        |report| {
+            checkpoints.push((
+                report.run.status,
+                report.run.completed_downstreams,
+                report
+                    .downstreams
+                    .iter()
+                    .map(|result| result.name.clone())
+                    .collect::<Vec<_>>(),
+            ));
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(
+        report
+            .downstreams
+            .iter()
+            .all(|result| result.classification == Classification::Compatible),
+        "{report:?}"
+    );
+    assert_eq!(report.run.planned_downstreams, 2);
+    assert_eq!(report.run.completed_downstreams, 2);
+    assert_eq!(report.run.status, RunStatus::Complete);
+    assert!(
+        checkpoints
+            .iter()
+            .any(|(status, completed, _)| *status == RunStatus::Running && *completed == 1)
+    );
+    assert_eq!(checkpoints.last().unwrap().2, ["left", "right"]);
+    assert!(barrier.join("left-candidate-done").exists());
+    assert!(barrier.join("right-candidate-done").exists());
+    let provenance = &report.downstreams[0].candidate.provenance;
+    assert!(provenance.rustc.as_ref().unwrap().contains("rustc "));
+    assert!(provenance.cargo.as_ref().unwrap().contains("cargo "));
+    assert!(provenance.lock_fingerprint.is_some());
+    assert!(report.downstreams[0].source_fingerprint.is_some());
+}
+
+#[test]
+fn observer_failure_fails_scan_and_storage_pruning_preserves_non_cache_data() {
+    let mut fixture = Fixture::new();
+    fixture.consumer("consumer", "pub fn api() { changed_lib::kept(); }", DEP);
+    fixture.request.timeout = Duration::from_secs(40);
+    let error = analyze_with_progress(
+        &fixture.request,
+        || Ok((Vec::new(), Discovery::default())),
+        |_| Err(std::io::Error::other("checkpoint disk failed")),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("checkpoint disk failed"));
+    analyze(&fixture.request).unwrap();
+    let root = fixture.request.work_dir.as_ref().unwrap();
+    let sentinel = root.join("targets/obsolete/sentinel");
+    fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    fs::write(&sentinel, "old cache").unwrap();
+    let note = root.join("user-notes.txt");
+    fs::write(&note, "keep this").unwrap();
+    fixture.request.execution.prune_before_run = true;
+    let report = analyze(&fixture.request).unwrap();
+    assert_eq!(
+        report.downstreams[0].classification,
+        Classification::Compatible
+    );
+    assert!(!sentinel.exists());
+    assert_eq!(fs::read_to_string(note).unwrap(), "keep this");
+}
+
+#[test]
+fn growing_build_storage_is_killed_and_inconclusive() {
+    let mut fixture = Fixture::new();
+    let consumer = fixture.consumer("disk-hog", "pub fn api() { changed_lib::kept(); }", DEP);
+    fs::write(consumer.join("build.rs"), r#"
+fn main() {
+    let file = std::fs::File::create(std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("large" )).unwrap();
+    file.set_len(128 * 1024 * 1024).unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(30));
+}
+"#).unwrap();
+    fixture.request.execution.max_work_bytes = Some(64 * 1024 * 1024);
+    fixture.request.timeout = Duration::from_secs(15);
+    let started = std::time::Instant::now();
+    let report = analyze(&fixture.request).unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(12),
+        "storage watchdog did not stop build promptly"
+    );
+    assert_eq!(
+        report.downstreams[0].classification,
+        Classification::HarnessFailure
+    );
+    assert_eq!(
+        report.downstreams[0].baseline.failure,
+        Some(HarnessFailure::StorageLimit)
+    );
+    assert!(report.run.storage_bytes > fixture.request.execution.max_work_bytes.unwrap());
+}
+
+#[test]
+fn host_source_mutation_cannot_be_reported_as_compatible() {
+    let mut fixture = Fixture::new();
+    let consumer = fixture.consumer(
+        "mutates-upstream",
+        "pub fn api() { changed_lib::removed(); }",
+        DEP,
+    );
+    let candidate = fixture
+        .request
+        .work_dir
+        .as_ref()
+        .unwrap()
+        .join("upstream/candidate/src/lib.rs");
+    fs::write(consumer.join("build.rs"), format!("fn main() {{ std::fs::write({:?}, \"pub fn removed() {{}}\\npub fn kept() {{}}\").unwrap(); }}", candidate.to_str().unwrap())).unwrap();
+    let report = analyze(&fixture.request).unwrap();
+    assert_eq!(
+        report.downstreams[0].classification,
+        Classification::HarnessFailure
+    );
+    assert_eq!(
+        report.downstreams[0].candidate.failure,
+        Some(HarnessFailure::InputMutation)
+    );
+    assert!(!report.has_regressions());
+}
+
+#[test]
+#[ignore = "requires a Docker daemon and the Rust worker image; run in isolated Linux CI"]
+fn docker_baseline_cannot_mutate_candidate_or_sibling_workers() {
+    let mut fixture = Fixture::new();
+    fixture.request.recipe.runner = Runner::default();
+    fixture.request.timeout = Duration::from_secs(180);
+    let consumer = fixture.consumer("malicious", "pub fn api() { changed_lib::removed(); }", DEP);
+    let root = fixture.request.work_dir.as_ref().unwrap().to_owned();
+    fs::create_dir_all(root.join("workers/sibling")).unwrap();
+    fs::write(root.join("workers/sibling/secret"), "another consumer").unwrap();
+    fs::write(consumer.join("build.rs"), format!(r#"
+fn main() {{
+    let root = std::path::Path::new({root:?});
+    assert!(std::fs::write(root.join("upstream/candidate/src/lib.rs"), "pub fn removed() {{}}" ).is_err(), "candidate was writable");
+    assert!(std::fs::write(root.join("upstream/baseline/src/lib.rs"), "pub fn removed() {{}}" ).is_err(), "baseline was writable");
+    assert!(!root.join("checkouts").exists(), "sibling checkouts were exposed");
+    assert!(!root.join("workers/sibling").exists(), "sibling workers were exposed");
+}}
+"#, root = root.to_str().unwrap())).unwrap();
+    let report = analyze(&fixture.request).unwrap();
+    assert_eq!(
+        report.downstreams[0].classification,
+        Classification::Regression,
+        "{report:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("upstream/candidate/src/lib.rs")).unwrap(),
+        "pub fn kept() {}"
+    );
 }

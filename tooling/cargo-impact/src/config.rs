@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     DownstreamSource, DownstreamSpec,
+    model::ExecutionOptions,
     runner::{BuildRecipe, Runner},
 };
 
@@ -21,6 +22,7 @@ pub struct Config {
     pub discovery: DiscoveryConfig,
     pub downstreams: Vec<DownstreamSpec>,
     pub overrides: BTreeMap<String, BuildRecipe>,
+    pub execution: ExecutionOptions,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
