@@ -17,6 +17,13 @@ runs:
       with:
         path: ${{ runner.temp }}/impact/bin
         key: cargo-impact-v1-${{ inputs.toolchain }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source), format('{0}/src/**', inputs.source), format('{0}/examples/**', inputs.source), format('{0}/clippy.toml', inputs.source), format('{0}/LICENSE.md', inputs.source), format('{0}/action.yml', inputs.source)) }}
+    - name: Restore trusted scanner compilation
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: steps.scanner-cache.outputs.cache-hit != 'true'
+      with:
+        path: ${{ runner.temp }}/impact/scanner-target
+        key: cargo-impact-build-v1-${{ inputs.toolchain }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source)) }}-${{ hashFiles(format('{0}/src/**', inputs.source), format('{0}/examples/**', inputs.source), format('{0}/action.yml', inputs.source)) }}
+        restore-keys: cargo-impact-build-v1-${{ inputs.toolchain }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source)) }}-
     - name: Build trusted scanner
       if: steps.scanner-cache.outputs.cache-hit != 'true'
       shell: bash
@@ -24,9 +31,16 @@ runs:
         SCANNER_SOURCE: ${{ inputs.source }}
         RUST_TOOLCHAIN: ${{ inputs.toolchain }}
         CARGO_BUILD_JOBS: "2"
+        CARGO_TARGET_DIR: ${{ runner.temp }}/impact/scanner-target
       run: |
         rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
         cargo "+$RUST_TOOLCHAIN" install --locked --path "$SCANNER_SOURCE" --root "$RUNNER_TEMP/impact"
+    - name: Save trusted scanner compilation
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: steps.scanner-cache.outputs.cache-hit != 'true' && github.event_name != 'issue_comment'
+      with:
+        path: ${{ runner.temp }}/impact/scanner-target
+        key: cargo-impact-build-v1-${{ inputs.toolchain }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source)) }}-${{ hashFiles(format('{0}/src/**', inputs.source), format('{0}/examples/**', inputs.source), format('{0}/action.yml', inputs.source)) }}
     - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: steps.scanner-cache.outputs.cache-hit != 'true' && github.event_name != 'issue_comment'
       with:

@@ -277,6 +277,11 @@ and HOME/configuration. Cache reuse accelerates builds; it never bypasses a comp
 with a previous result. Exact immutable result reuse, dependency sharing between phases,
 and tiered LRU eviction remain future work.
 
+The installation action caches the finished scanner and its compilation separately.
+Changing scanner source can reuse trusted dependencies keyed by the lockfile and
+toolchain. This cache lives outside downstream worker mounts; comment jobs only
+read caches and transfer the scanner through a same-run artifact.
+
 Set `driver = "boxington"` in a recipe to run downstream checks through `mbx`.
 Install mbx in the chosen local/Nix environment or Docker image. Rustdoc and
 metadata continue through Cargo. Persistent `MBX_CACHE_DIR` and `MBX_SHIMS_DIR`
