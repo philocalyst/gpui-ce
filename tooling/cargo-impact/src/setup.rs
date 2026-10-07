@@ -8,43 +8,7 @@ use std::{
 
 type Asset = (&'static str, &'static [u8]);
 
-macro_rules! assets {
-    ($($path:literal),* $(,)?) => { &[$(($path, include_bytes!(concat!("../", $path)) as &[u8])),*] };
-}
-
-const SCANNER: &[Asset] = assets![
-    "Cargo.toml",
-    "Cargo.lock",
-    "action.yml",
-    "clippy.toml",
-    "LICENSE.md",
-    "src/lib.rs",
-    "src/main.rs",
-    "src/setup.rs",
-    "src/bot.rs",
-    "src/cargo.rs",
-    "src/config.rs",
-    "src/discovery.rs",
-    "src/doctor.rs",
-    "src/engine.rs",
-    "src/forge.rs",
-    "src/gate.rs",
-    "src/http.rs",
-    "src/model.rs",
-    "src/process.rs",
-    "src/report.rs",
-    "src/report/html.rs",
-    "src/report/issues.rs",
-    "src/report/markdown.rs",
-    "src/report/presentation.rs",
-    "src/report/sarif.rs",
-    "src/report/report.css",
-    "src/report/report.js",
-    "src/runner.rs",
-    "src/source.rs",
-    "examples/impact.yml",
-    "examples/impact-comment.yml",
-];
+include!(concat!(env!("OUT_DIR"), "/scanner-assets.rs"));
 
 pub(crate) fn initialize(directory: &Path, library: &str) -> io::Result<()> {
     if library.is_empty()

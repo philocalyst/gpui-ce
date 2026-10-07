@@ -1,29 +1,44 @@
 name: Install cargo-impact
-description: Build the trusted vendored cargo-impact scanner and cache its binary.
+description: Build the trusted vendored scanner with separate binary and compilation caches.
 inputs:
   source:
     description: Path to the trusted cargo-impact source and action files
     required: false
     default: .github/cargo-impact
   toolchain:
-    description: Rust toolchain used to build the scanner
+    description: Named Rust toolchain used to build the scanner
     required: false
     default: 1.99.0
 runs:
   using: composite
   steps:
+    - name: Identify trusted scanner inputs
+      id: cache-plan
+      shell: bash
+      env:
+        RUST_TOOLCHAIN: ${{ inputs.toolchain }}
+        RUNNER_KIND: ${{ runner.os }}-${{ runner.arch }}
+        DEPENDENCY_HASH: ${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source)) }}
+        SOURCE_HASH: ${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source), format('{0}/build.rs', inputs.source), format('{0}/src/**', inputs.source), format('{0}/examples/**', inputs.source), format('{0}/docs/**', inputs.source), format('{0}/README.md', inputs.source), format('{0}/clippy.toml', inputs.source), format('{0}/LICENSE.md', inputs.source), format('{0}/action.yml', inputs.source)) }}
+      run: |
+        case "$RUST_TOOLCHAIN" in
+          ''|*[!a-zA-Z0-9._-]*) echo 'Use a named Rust toolchain.' >&2; exit 2 ;;
+        esac
+        prefix="cargo-impact-build-v2-$RUST_TOOLCHAIN-$RUNNER_KIND-$DEPENDENCY_HASH-"
+        printf 'binary=cargo-impact-v2-%s-%s-%s\nbuild=%s%s\nprefix=%s\n' \
+          "$RUST_TOOLCHAIN" "$RUNNER_KIND" "$SOURCE_HASH" "$prefix" "$SOURCE_HASH" "$prefix" >> "$GITHUB_OUTPUT"
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: scanner-cache
       with:
         path: ${{ runner.temp }}/impact/bin
-        key: cargo-impact-v1-${{ inputs.toolchain }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source), format('{0}/src/**', inputs.source), format('{0}/examples/**', inputs.source), format('{0}/clippy.toml', inputs.source), format('{0}/LICENSE.md', inputs.source), format('{0}/action.yml', inputs.source)) }}
+        key: ${{ steps.cache-plan.outputs.binary }}
     - name: Restore trusted scanner compilation
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: steps.scanner-cache.outputs.cache-hit != 'true'
       with:
         path: ${{ runner.temp }}/impact/scanner-target
-        key: cargo-impact-build-v1-${{ inputs.toolchain }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source)) }}-${{ hashFiles(format('{0}/src/**', inputs.source), format('{0}/examples/**', inputs.source), format('{0}/action.yml', inputs.source)) }}
-        restore-keys: cargo-impact-build-v1-${{ inputs.toolchain }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source)) }}-
+        key: ${{ steps.cache-plan.outputs.build }}
+        restore-keys: ${{ steps.cache-plan.outputs.prefix }}
     - name: Build trusted scanner
       if: steps.scanner-cache.outputs.cache-hit != 'true'
       shell: bash
@@ -40,9 +55,9 @@ runs:
       if: steps.scanner-cache.outputs.cache-hit != 'true' && github.event_name != 'issue_comment'
       with:
         path: ${{ runner.temp }}/impact/scanner-target
-        key: cargo-impact-build-v1-${{ inputs.toolchain }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source)) }}-${{ hashFiles(format('{0}/src/**', inputs.source), format('{0}/examples/**', inputs.source), format('{0}/action.yml', inputs.source)) }}
+        key: ${{ steps.cache-plan.outputs.build }}
     - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: steps.scanner-cache.outputs.cache-hit != 'true' && github.event_name != 'issue_comment'
       with:
         path: ${{ runner.temp }}/impact/bin
-        key: cargo-impact-v1-${{ inputs.toolchain }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/Cargo.toml', inputs.source), format('{0}/Cargo.lock', inputs.source), format('{0}/src/**', inputs.source), format('{0}/examples/**', inputs.source), format('{0}/clippy.toml', inputs.source), format('{0}/LICENSE.md', inputs.source), format('{0}/action.yml', inputs.source)) }}
+        key: ${{ steps.cache-plan.outputs.binary }}
