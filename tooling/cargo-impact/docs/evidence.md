@@ -5,6 +5,17 @@ source selection, manifest and effective recipe. Features and package selections
 are normalized. Different recipes remain independent even when display names match.
 Git branches resolve once; baseline and candidate use the same consumer snapshot.
 
+Reports and managed work must use separate directory trees. Report output must also
+stay outside library and local consumer sources; these checks run before failure reports
+or checkpoints can overwrite files. Existing symlink aliases and future paths are resolved
+during preflight. With `--candidate .`, select a sibling report directory or a temporary CI
+directory. The engine refuses known source inputs beneath managed work before pruning;
+work beneath a source's excluded `.cargo-impact` directory remains supported.
+
+An embedding's lazy discovery callback must supply source inputs outside managed work.
+The engine rejects a discovered local path there before dispatch, but cannot protect a
+path that was not supplied until after an explicitly requested pre-run prune.
+
 The engine separates preparation, scheduling, experiment execution and storage.
 Workers send typed lifecycle events. The coordinator owns reports and acknowledges
 a durable completed-baseline checkpoint before the candidate can begin. Queued and

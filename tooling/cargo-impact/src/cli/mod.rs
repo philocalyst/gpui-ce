@@ -19,6 +19,7 @@ mod args;
 mod artifacts;
 mod check;
 mod discovery;
+mod paths;
 mod replay;
 mod resources;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
