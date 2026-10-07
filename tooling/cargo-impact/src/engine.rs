@@ -410,6 +410,8 @@ fn experiment(
         &spec.source,
         &root.join("checkouts").join(&key),
         deadline.saturating_duration_since(Instant::now()),
+        root,
+        request.execution.max_work_bytes,
     )?;
     result.revision = revision;
     let working = root.join("downstreams").join(&key);
@@ -732,6 +734,7 @@ fn snapshot_in(
     destination: &Path,
     deadline: Instant,
 ) -> io::Result<String> {
+    crate::runner::safe_directory(root, destination)?;
     let available = request
         .execution
         .max_work_bytes

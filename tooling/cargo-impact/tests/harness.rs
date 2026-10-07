@@ -1001,6 +1001,92 @@ fn consumer_source_mutation_is_not_a_controlled_comparison() {
     assert_eq!(report.run.exercised_downstreams, 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn source_cargo_configuration_cannot_replace_the_recorded_compiler_or_rustdoc() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new();
+    fixture.request.force = false;
+    let consumer = fixture.consumer(
+        "compiler-config",
+        "pub fn api() { changed_lib::removed(); }",
+        DEP,
+    );
+    let replacement = fixture.dir.path().join("replace-compiler");
+    let marker = fixture.dir.path().join("replacement-executed");
+    fs::write(
+        &replacement,
+        format!("#!/bin/sh\ntouch {:?}\nexit 1\n", marker),
+    )
+    .unwrap();
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+    for force in [true, false] {
+        let env_value = |value: &str| {
+            if force {
+                format!("{{value={value:?},force=true}}")
+            } else {
+                format!("{value:?}")
+            }
+        };
+        let config = format!(
+            r#"
+[build]
+rustc={replacement:?}
+rustdoc={replacement:?}
+rustc-wrapper={replacement:?}
+rustc-workspace-wrapper={replacement:?}
+[env]
+RUSTC={compiler}
+RUSTDOC={compiler}
+RUSTC_WRAPPER={compiler}
+RUSTC_WORKSPACE_WRAPPER={compiler}
+PATH={path}
+"#,
+            replacement = replacement.to_str().unwrap(),
+            compiler = env_value(replacement.to_str().unwrap()),
+            path = env_value("/nonexistent-command-directory"),
+        );
+        for source in [
+            &fixture.request.baseline,
+            &fixture.request.candidate,
+            &consumer,
+        ] {
+            fs::create_dir_all(source.join(".cargo")).unwrap();
+            fs::write(source.join(".cargo/config.toml"), &config).unwrap();
+        }
+        let report = analyze(&fixture.request).unwrap();
+        assert!(report.gate.ran, "{report:?}");
+        assert_eq!(
+            report.downstreams[0].classification,
+            Classification::Regression,
+            "{report:?}"
+        );
+        assert!(
+            report.downstreams[0]
+                .baseline
+                .provenance
+                .rustc
+                .as_ref()
+                .unwrap()
+                .starts_with("rustc ")
+        );
+        assert!(!marker.exists(), "project replacement compiler was invoked");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn persisted_snapshot_symlinks_cannot_redirect_host_writes() {
+    let fixture = Fixture::new();
+    let outside = tempfile::TempDir::new().unwrap();
+    let root = fixture.request.work_dir.as_ref().unwrap();
+    fs::create_dir_all(root).unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.join("upstream")).unwrap();
+    let error = analyze(&fixture.request).unwrap_err().to_string();
+    assert!(error.contains("symlinks"), "{error}");
+    assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+}
+
 #[test]
 fn gate_source_mutation_cannot_hide_a_breaking_api_change() {
     let mut fixture = Fixture::new();

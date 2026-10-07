@@ -4,6 +4,7 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -94,7 +95,28 @@ impl Builder<'_> {
         } else {
             "cargo"
         };
-        self.run_program(cwd, driver, args, capture, network)
+        let mut controlled: Vec<_> = args.iter().take(1).cloned().collect();
+        // Command-line configuration wins over project Cargo configuration,
+        // including [env] force=true. Only the explicit recipe driver may wrap
+        // the trusted compiler; source-controlled replacements cannot choose it.
+        for setting in [
+            "build.rustc=\"rustc\"",
+            "build.rustdoc=\"rustdoc\"",
+            "build.rustc-wrapper=\"\"",
+            "build.rustc-workspace-wrapper=\"\"",
+        ] {
+            controlled.extend(["--config".into(), setting.into()]);
+        }
+        // Scalar [env] entries already defer to the worker environment. A
+        // dotted override would turn those valid strings into conflicting
+        // tables, so only override force on existing forced table entries.
+        for key in forced_environment(cwd, self.recipe.runner.is_isolated())? {
+            controlled.extend(["--config".into(), format!("env.{key}.force=false").into()]);
+        }
+        // Cargo rustdoc contains `--` followed by rustdoc flags. Global Cargo
+        // policy must precede that separator rather than becoming rustdoc args.
+        controlled.extend(args.iter().skip(1).cloned());
+        self.run_program(cwd, driver, &controlled, capture, network)
     }
 
     fn remaining(&self) -> std::io::Result<Duration> {
@@ -221,6 +243,10 @@ impl Builder<'_> {
 
     fn environment(&self, cached: &Path) -> Vec<(&'static str, OsString)> {
         vec![
+            ("RUSTC", "rustc".into()),
+            ("RUSTDOC", "rustdoc".into()),
+            ("RUSTC_WRAPPER", "".into()),
+            ("RUSTC_WORKSPACE_WRAPPER", "".into()),
             ("CARGO_HOME", cached.join("cargo").into_os_string()),
             ("CARGO_TARGET_DIR", self.target.clone().into_os_string()),
             ("CARGO_TERM_COLOR", "never".into()),
@@ -303,6 +329,106 @@ impl Builder<'_> {
                 .map(|bytes| crate::source::key(&bytes)),
         })
     }
+}
+
+const CONTROLLED_ENV: &[&str] = &[
+    "RUSTC",
+    "RUSTDOC",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "PATH",
+    "HOME",
+];
+
+/// Follow Cargo's config/include precedence without logging configuration
+/// values, which may contain credentials. Managed Cargo homes are cleared
+/// before each invocation; Docker only exposes the source directory.
+fn forced_environment(cwd: &Path, isolated: bool) -> std::io::Result<Vec<String>> {
+    let mut environment = BTreeMap::new();
+    let mut ancestors: Vec<_> = cwd
+        .ancestors()
+        .take(if isolated { 1 } else { usize::MAX })
+        .collect();
+    ancestors.reverse();
+    let mut remaining_files = 64usize;
+    for ancestor in ancestors {
+        let config = ancestor.join(".cargo/config");
+        let config = if config.exists() {
+            config
+        } else {
+            ancestor.join(".cargo/config.toml")
+        };
+        load_environment(&config, true, &mut remaining_files, &mut environment)?;
+    }
+    Ok(environment
+        .into_iter()
+        .filter_map(|(key, value): (String, toml::Value)| {
+            (value.get("force").and_then(toml::Value::as_bool) == Some(true)).then_some(key)
+        })
+        .collect())
+}
+
+fn load_environment(
+    config: &Path,
+    optional: bool,
+    remaining_files: &mut usize,
+    environment: &mut BTreeMap<String, toml::Value>,
+) -> std::io::Result<()> {
+    let file = match fs::File::open(config) {
+        Ok(file) => file,
+        Err(error) if optional && error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    *remaining_files = remaining_files.checked_sub(1).ok_or_else(|| {
+        std::io::Error::other("Cargo config/include exceeds 64 files or contains a cycle")
+    })?;
+    let mut contents = String::new();
+    file.take(1024 * 1024 + 1).read_to_string(&mut contents)?;
+    if contents.len() > 1024 * 1024 {
+        return Err(std::io::Error::other("Cargo configuration exceeds 1 MiB"));
+    }
+    let value: toml::Value = contents.parse().map_err(|_| {
+        std::io::Error::other(format!(
+            "invalid Cargo configuration in {}",
+            config.display()
+        ))
+    })?;
+    if let Some(includes) = value.get("include") {
+        for include in includes
+            .as_array()
+            .ok_or_else(|| std::io::Error::other("Cargo config include must be an array"))?
+        {
+            let path = include
+                .as_str()
+                .or_else(|| include.get("path").and_then(toml::Value::as_str))
+                .ok_or_else(|| std::io::Error::other("Cargo config include requires a path"))?;
+            let optional = include
+                .get("optional")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false);
+            load_environment(
+                &config.parent().unwrap().join(path),
+                optional,
+                remaining_files,
+                environment,
+            )?;
+        }
+    }
+    if let Some(values) = value.get("env").and_then(toml::Value::as_table) {
+        for key in CONTROLLED_ENV {
+            if let Some(value) = values.get(*key) {
+                match (environment.get_mut(*key), value) {
+                    (Some(toml::Value::Table(previous)), toml::Value::Table(next)) => {
+                        previous.extend(next.clone())
+                    }
+                    _ => {
+                        environment.insert((*key).into(), value.clone());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn pin_image(
@@ -389,7 +515,7 @@ fn mount(command: &mut Command, root: &Path, path: &Path, readonly: bool) -> std
     Ok(())
 }
 
-fn safe_directory(root: &Path, path: &Path) -> std::io::Result<()> {
+pub(crate) fn safe_directory(root: &Path, path: &Path) -> std::io::Result<()> {
     let relative = path.strip_prefix(root).map_err(std::io::Error::other)?;
     let mut current = root.to_owned();
     for component in relative.components() {
@@ -447,6 +573,50 @@ pub(crate) fn clean_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiler_policy_follows_includes_legacy_precedence_and_scalar_types() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let cargo = root.join(".cargo");
+        fs::create_dir(&cargo).unwrap();
+        fs::write(
+            cargo.join("included.toml"),
+            "[env]\nRUSTC={value='replacement', force=true}\nRUSTDOC={value='replacement', force=true}\n",
+        ).unwrap();
+        fs::write(
+            cargo.join("config"),
+            "include=['included.toml', {path='absent.toml', optional=true}]\n[env]\nRUSTC={value='other'}\nRUSTC_WRAPPER='replacement'\nPATH={value='/missing', force=true}\n",
+        ).unwrap();
+        fs::write(
+            cargo.join("config.toml"),
+            "[env]\nHOME={value='/missing', force=true}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            forced_environment(&root, true).unwrap(),
+            ["PATH", "RUSTC", "RUSTDOC"]
+        );
+    }
+
+    #[test]
+    fn compiler_policy_bounds_include_cycles_and_omits_sensitive_parse_values() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cargo = temp.path().join(".cargo");
+        fs::create_dir(&cargo).unwrap();
+        let config = cargo.join("config.toml");
+        fs::write(&config, "include=['config.toml']\n").unwrap();
+        let error = forced_environment(temp.path(), true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("64 files"), "{error}");
+        fs::write(config, "token = private-credential-value\n").unwrap();
+        let error = forced_environment(temp.path(), true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid Cargo configuration"), "{error}");
+        assert!(!error.contains("private-credential-value"), "{error}");
+    }
 
     #[test]
     fn docker_mounts_do_not_expose_scan_root_siblings_or_writable_upstream() {

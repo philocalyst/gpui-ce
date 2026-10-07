@@ -25,6 +25,8 @@ pub(crate) fn checkout(
     source: &DownstreamSource,
     destination: &Path,
     timeout: Duration,
+    root: &Path,
+    max_work_bytes: Option<u64>,
 ) -> io::Result<(PathBuf, Option<String>)> {
     let deadline = Instant::now()
         .checked_add(timeout)
@@ -36,6 +38,13 @@ pub(crate) fn checkout(
         return Ok((path.canonicalize()?, None));
     };
     Repository::parse(url, None).map_err(io::Error::other)?;
+    crate::runner::safe_directory(root, destination)?;
+    let storage = max_work_bytes.map(|budget| (root, budget));
+    if fs::symlink_metadata(destination.join(".git")).is_ok_and(|m| m.is_symlink() || !m.is_dir()) {
+        return Err(io::Error::other(
+            "managed Git metadata must be a directory without symlinks",
+        ));
+    }
     if revision.is_empty() || revision.starts_with('-') || revision.chars().any(char::is_whitespace)
     {
         return Err(io::Error::other("invalid git revision"));
@@ -72,6 +81,7 @@ pub(crate) fn checkout(
                     .ok_or_else(|| io::Error::other("non-UTF8 checkout path"))?,
             ],
             deadline,
+            storage,
         )?;
         if fs::symlink_metadata(destination).is_ok() {
             fs::remove_dir_all(destination)?;
@@ -89,11 +99,13 @@ pub(crate) fn checkout(
             revision,
         ],
         deadline,
+        storage,
     )?;
     let sha = git(
         destination,
         &["rev-parse", "--verify", "FETCH_HEAD^{commit}"],
         deadline,
+        storage,
     )?;
     let sha = sha.trim().to_owned();
     if sha.len() != 40 && sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -104,12 +116,18 @@ pub(crate) fn checkout(
         destination,
         &["checkout", "--quiet", "--force", "--detach", &sha, "--"],
         deadline,
+        storage,
     )?;
-    git(destination, &["clean", "-ffdqx"], deadline)?;
+    git(destination, &["clean", "-ffdqx"], deadline, storage)?;
     Ok((destination.to_owned(), Some(sha)))
 }
 
-fn git(cwd: &Path, args: &[&str], deadline: Instant) -> io::Result<String> {
+fn git(
+    cwd: &Path,
+    args: &[&str],
+    deadline: Instant,
+    storage: Option<(&Path, u64)>,
+) -> io::Result<String> {
     let timeout = deadline.saturating_duration_since(Instant::now());
     if timeout.is_zero() {
         return Err(io::Error::new(
@@ -133,7 +151,23 @@ fn git(cwd: &Path, args: &[&str], deadline: Instant) -> io::Result<String> {
         ])
         .args(args)
         .current_dir(cwd);
-    let output = process::run(&mut command, timeout, Capture::Bytes)?;
+    let mut checked = None;
+    let output = process::run_guarded(&mut command, timeout, Capture::Bytes, || {
+        let Some((root, budget)) = storage else {
+            return Ok(false);
+        };
+        if checked.is_some_and(|last: Instant| last.elapsed() < Duration::from_secs(1)) {
+            return Ok(false);
+        }
+        checked = Some(Instant::now());
+        Ok(crate::engine::work_bytes(root)? > budget)
+    })?;
+    if output.resource_limited {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            "Git checkout exceeded the scan storage budget",
+        ));
+    }
     if output.timed_out {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -472,6 +506,46 @@ pub(crate) fn validate_manifest(manifest: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_storage_guard_preserves_a_distinct_budget_failure() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::write(root.join("stored"), vec![0; 1024]).unwrap();
+        let error = git(
+            &root,
+            &["--version"],
+            Instant::now() + Duration::from_secs(5),
+            Some((&root, 512)),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        assert!(error.to_string().contains("storage budget"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_checkout_symlinks_are_rejected_before_git_runs() {
+        let work = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let root = work.path().canonicalize().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("checkouts")).unwrap();
+        let source = DownstreamSource::Git {
+            url: "https://github.com/example/project".into(),
+            revision: "HEAD".into(),
+            forge: None,
+        };
+        let error = checkout(
+            &source,
+            &root.join("checkouts/consumer"),
+            Duration::from_secs(5),
+            &root,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("symlinks"));
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
 
     #[cfg(unix)]
     #[test]
