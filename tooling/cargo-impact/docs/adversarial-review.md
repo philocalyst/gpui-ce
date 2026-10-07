@@ -51,9 +51,10 @@ be implemented. Our storage watchdog is not a filesystem quota.
 and [triage guide](https://github.com/rust-lang/crater/blob/master/docs/report-triage.md)
 distinguish experiment failures, dependency fallout and known exceptional crates.
 Matching error fingerprints in this scanner identify repeated compiler symptoms;
-they do not prove that one dependency caused every failure. A dependency-cause
-graph and clean confirmation are now recorded through resolved Cargo paths and verified
-replay. Infrastructure retry policy and reasoned suppressions with expiry remain missing.
+they do not prove that one dependency caused every failure. Resolved dependency paths
+and clean confirmation are now recorded through Cargo graphs and verified replay.
+A proven dependency-cause graph, infrastructure retry policy and reasoned suppressions
+with expiry remain missing.
 
 [cargo-audit's presenter](https://github.com/rustsec/rustsec/blob/main/cargo-audit/src/presenter.rs)
 uses inverse dependency explanations and actionable solutions, while
