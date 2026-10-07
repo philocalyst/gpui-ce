@@ -34,6 +34,7 @@ pub(crate) struct ProcessOutput {
     pub stdout: Vec<u8>,
     pub log: String,
     pub timed_out: bool,
+    pub resource_limited: bool,
     pub log_truncated: bool,
     pub data_truncated: bool,
     pub diagnostics: Vec<CompilerDiagnostic>,
@@ -44,6 +45,24 @@ pub(crate) fn run(
     command: &mut Command,
     timeout: Duration,
     capture: Capture,
+) -> io::Result<ProcessOutput> {
+    run_guarded(command, timeout, capture, || Ok(false))
+}
+
+pub(crate) fn run_guarded(
+    command: &mut Command,
+    timeout: Duration,
+    capture: Capture,
+    mut resource_limit: impl FnMut() -> io::Result<bool>,
+) -> io::Result<ProcessOutput> {
+    run_guarded_pid(command, timeout, capture, |_| resource_limit())
+}
+
+pub(crate) fn run_guarded_pid(
+    command: &mut Command,
+    timeout: Duration,
+    capture: Capture,
+    mut resource_limit: impl FnMut(u32) -> io::Result<bool>,
 ) -> io::Result<ProcessOutput> {
     if !cfg!(unix) {
         return Err(io::Error::new(
@@ -82,14 +101,33 @@ pub(crate) fn run(
     let err_stop = stopped.clone();
     let out_reader = thread::spawn(move || drain(stdout, capture, &out_stop));
     let err_reader = thread::spawn(move || drain(stderr, Capture::Cargo, &err_stop));
-    let wait = child.wait_timeout(timeout);
-    let timed_out = matches!(wait, Ok(None));
+    let started = Instant::now();
+    let mut resource_limited = false;
+    let wait = loop {
+        match resource_limit(child.id()) {
+            Ok(true) => {
+                resource_limited = true;
+                break Ok(None);
+            }
+            Err(error) => break Err(error),
+            Ok(false) => {}
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break Ok(None);
+        }
+        match child.wait_timeout(remaining.min(Duration::from_millis(250))) {
+            Ok(None) => continue,
+            result => break result,
+        }
+    };
+    let timed_out = !resource_limited && matches!(wait, Ok(None));
     // Background grandchildren must not hold log pipes open, even on normal parent exit.
     #[cfg(unix)]
     unsafe {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
-    if timed_out || wait.is_err() {
+    if timed_out || resource_limited || wait.is_err() {
         let _ = child.kill();
     }
     let status = child.wait();
@@ -103,11 +141,12 @@ pub(crate) fn run(
     wait?;
     let status = status?;
     Ok(ProcessOutput {
-        success: status.success() && !timed_out,
+        success: status.success() && !timed_out && !resource_limited,
         code: status.code(),
         stdout: stdout.value,
         log: format!("{}\n{}", stdout.log.text(), stderr.log.text()),
         timed_out,
+        resource_limited,
         log_truncated: stdout.log.truncated || stderr.log.truncated,
         data_truncated: stdout.truncated || stderr.truncated,
         diagnostics: stdout

@@ -20,7 +20,7 @@ def copy_library(checkout: Path, destination: Path) -> None:
     )
 
 
-def prepare(baseline: Path, candidate: Path, output: Path, missing_target: bool, local: bool) -> None:
+def prepare(baseline: Path, candidate: Path, output: Path, missing_target: bool, local: bool, consumer_revision: str | None) -> None:
     output.mkdir(parents=True, exist_ok=False)
     for name, checkout in (("baseline", baseline), ("candidate", candidate)):
         copy_library(checkout, output / name)
@@ -28,16 +28,19 @@ def prepare(baseline: Path, candidate: Path, output: Path, missing_target: bool,
     if local:
         config.extend(["[recipe.runner]", 'kind = "local"'])
     for name in ("reserve-user", "base-user"):
-        source = baseline / "tooling/cargo-impact/experiments/fork/consumers" / name
-        destination = output / "consumers" / name
-        shutil.copytree(source, destination)
-        config.extend([
-            "[[downstreams]]",
-            f"name = {json.dumps(name)}",
-            "[downstreams.source]",
-            'kind = "local"',
-            f"path = {json.dumps(str(destination.resolve()))}",
-        ])
+        config.extend(["[[downstreams]]", f"name = {json.dumps(name)}"])
+        if consumer_revision:
+            config.extend([
+                f'manifest = "tooling/cargo-impact/experiments/fork/consumers/{name}/Cargo.toml"',
+                "[downstreams.source]", 'kind = "git"',
+                'url = "https://github.com/philocalyst/gpui-ce"',
+                f"revision = {json.dumps(consumer_revision)}",
+            ])
+        else:
+            source = baseline / "tooling/cargo-impact/experiments/fork/consumers" / name
+            destination = output / "consumers" / name
+            shutil.copytree(source, destination)
+            config.extend(["[downstreams.source]", 'kind = "local"', f"path = {json.dumps(str(destination.resolve()))}"])
     if missing_target:
         config.extend([
             '[overrides."reserve-user"]',
@@ -55,5 +58,6 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--missing-target", action="store_true")
     parser.add_argument("--local", action="store_true")
+    parser.add_argument("--consumer-revision", help="Clone only the personal fork at this exact commit, retaining source permalinks")
     args = parser.parse_args()
-    prepare(args.baseline.resolve(), args.candidate.resolve(), args.output.resolve(), args.missing_target, args.local)
+    prepare(args.baseline.resolve(), args.candidate.resolve(), args.output.resolve(), args.missing_target, args.local, args.consumer_revision)

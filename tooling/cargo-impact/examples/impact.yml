@@ -44,26 +44,57 @@ jobs:
           source: baseline/.github/cargo-impact
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/impact-work
-          key: impact-untrusted-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-${{ github.run_id }}
-          restore-keys: impact-untrusted-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-
+          path: |
+            ${{ runner.temp }}/impact-work/targets
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/mbx
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/mbx
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/git
+            ${{ runner.temp }}/impact-work/gate-target
+          key: impact-untrusted-v2-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-${{ github.run_id }}
+          restore-keys: impact-untrusted-v2-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-
       - name: Check downstream consumers
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          BASELINE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: >-
           "$RUNNER_TEMP/impact/bin/cargo-impact" check
           --baseline baseline --candidate candidate --config baseline/impact.toml
-          --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report
+          --upstream-repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          --baseline-sha "$BASELINE_SHA" --candidate-sha "$CANDIDATE_SHA"
+          --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report --scan-timeout-seconds 2100
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: impact-artifact
         if: always()
         with:
           name: downstream-impact
           path: impact-report/
       - name: Add report to job summary
         if: always()
-        run: if test -f impact-report/report.md; then cat impact-report/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+        env:
+          REPORT_ARTIFACT_URL: ${{ steps.impact-artifact.outputs.artifact-url }}
+        run: |
+          if test -f impact-report/summary.md; then cat impact-report/summary.md >> "$GITHUB_STEP_SUMMARY"; fi
+          if test -n "$REPORT_ARTIFACT_URL"; then
+            echo "[Download the report bundle](<$REPORT_ARTIFACT_URL>)" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: always()
         with:
-          path: ${{ runner.temp }}/impact-work
-          key: impact-untrusted-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/impact-work/targets
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/mbx
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/mbx
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/git
+            ${{ runner.temp }}/impact-work/gate-target
+          key: impact-untrusted-v2-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-${{ github.run_id }}

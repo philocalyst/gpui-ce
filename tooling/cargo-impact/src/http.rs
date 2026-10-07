@@ -1,6 +1,9 @@
 //! Bounded HTTP transport. Credentials belong to the control plane, never builds.
 
-use std::{io::Read, time::Duration};
+use std::{
+    io::Read,
+    time::{Duration, Instant},
+};
 
 use reqwest::{StatusCode, blocking::Client};
 use serde::de::DeserializeOwned;
@@ -27,6 +30,12 @@ pub enum ApiError {
     Decode(#[from] serde_json::Error),
     #[error("invalid API URL: {0}")]
     Url(#[from] url::ParseError),
+    #[error("API deadline exceeded")]
+    Deadline,
+    #[error(
+        "API base must use HTTPS without credentials (HTTP is permitted only for loopback tests)"
+    )]
+    InvalidBase,
 }
 
 /// No automatic redirects: a forge token must never follow a redirect to another host.
@@ -34,10 +43,20 @@ pub struct Api {
     client: Client,
     base: Url,
     token: Option<String>,
+    deadline: Option<Instant>,
 }
 
 impl Api {
     pub fn new(base: Url, token: Option<String>) -> Result<Self, ApiError> {
+        let loopback = matches!(base.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
+        if (base.scheme() != "https" && !(base.scheme() == "http" && loopback))
+            || !base.username().is_empty()
+            || base.password().is_some()
+            || base.query().is_some()
+            || base.fragment().is_some()
+        {
+            return Err(ApiError::InvalidBase);
+        }
         Ok(Self {
             client: Client::builder()
                 .user_agent(concat!("cargo-impact/", env!("CARGO_PKG_VERSION")))
@@ -46,7 +65,14 @@ impl Api {
                 .build()?,
             base,
             token,
+            deadline: None,
         })
+    }
+
+    /// Shares a total deadline across pagination and safe retries.
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
     }
 
     pub fn get<T: DeserializeOwned>(
@@ -65,6 +91,14 @@ impl Api {
         self.request(reqwest::Method::POST, path, &[], Some(body))
     }
 
+    pub fn patch<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<T, ApiError> {
+        self.request(reqwest::Method::PATCH, path, &[], Some(body))
+    }
+
     fn request<T: DeserializeOwned>(
         &self,
         method: reqwest::Method,
@@ -77,25 +111,64 @@ impl Api {
         if url.origin() != self.base.origin() {
             return Err(ApiError::Status(StatusCode::BAD_REQUEST));
         }
-        let mut request = self
-            .client
-            .request(method, url)
-            .query(query)
-            .header("Accept", "application/json");
-        if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
-        }
-        if let Some(body) = body {
-            request = request.json(&body);
-        }
-        let response = request.send()?;
+        // Only reads are retried. A timeout after a write may mean it succeeded.
+        let mut attempts = 0;
+        let response = loop {
+            let timeout = self
+                .deadline
+                .map(|deadline| {
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_secs(30))
+                })
+                .unwrap_or(Duration::from_secs(30));
+            if timeout.is_zero() {
+                return Err(ApiError::Deadline);
+            }
+            let mut request = self
+                .client
+                .request(method.clone(), url.clone())
+                .query(query)
+                .timeout(timeout)
+                .header("Accept", "application/json");
+            if let Some(token) = &self.token {
+                request = request.bearer_auth(token);
+            }
+            if let Some(body) = &body {
+                request = request.json(&body);
+            }
+            let response = request.send()?;
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+            let transient = matches!(response.status().as_u16(), 502..=504);
+            let short_throttle = matches!(response.status().as_u16(), 429 | 403)
+                && retry_after.is_some_and(|delay| delay <= 2);
+            if method == reqwest::Method::GET && attempts < 2 && (transient || short_throttle) {
+                attempts += 1;
+                let delay = Duration::from_secs(retry_after.unwrap_or(attempts));
+                if self.deadline.is_some_and(|deadline| {
+                    Instant::now()
+                        .checked_add(delay)
+                        .is_none_or(|wake| wake >= deadline)
+                }) {
+                    return Err(ApiError::Deadline);
+                }
+                std::thread::sleep(delay);
+                continue;
+            }
+            break response;
+        };
         let status = response.status();
         if status == StatusCode::TOO_MANY_REQUESTS
             || (status == StatusCode::FORBIDDEN
-                && response
-                    .headers()
-                    .get("x-ratelimit-remaining")
-                    .is_some_and(|v| v == "0"))
+                && (response.headers().contains_key("retry-after")
+                    || response
+                        .headers()
+                        .get("x-ratelimit-remaining")
+                        .is_some_and(|v| v == "0")))
         {
             return Err(ApiError::RateLimited {
                 retry_after_seconds: response
