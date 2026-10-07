@@ -114,7 +114,7 @@ impl<S: Refineable + Default> Cascade<S> {
     ///
     /// Setting a slot to `None` effectively removes it from consideration
     /// during merging.
-    pub fn set(&mut self, slot: CascadeSlot, refinement: Option<S::Refinement>) {
+    pub(crate) fn set(&mut self, slot: CascadeSlot, refinement: Option<S::Refinement>) {
         self.0[slot.0] = refinement
     }
 
