@@ -2,14 +2,18 @@
 
 use std::{
     ffi::OsString,
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
 use cargo_metadata::{Metadata, Package};
 
 use crate::{
-    model::{BuildResult, DiagnosticOrigin, DiagnosticPackage, HarnessFailure},
+    model::{
+        BuildResult, DependencyGraph, DependencyPackage, DiagnosticOrigin, DiagnosticPackage,
+        HarnessFailure, LockfileEvidence,
+    },
     process::Capture,
     runner::Builder,
     source,
@@ -133,13 +137,10 @@ pub(crate) fn check(
     if let Some(target) = &builder.recipe.target {
         args.extend(["--target".into(), target.into()]);
     }
-    let provenance = builder.provenance(
-        cwd,
-        &metadata
-            .workspace_root
-            .join("Cargo.toml")
-            .into_std_path_buf(),
-    )?;
+    let lockfile = resolved_lockfile(metadata.workspace_root.as_std_path())?;
+    let mut provenance = builder.provenance(cwd)?;
+    provenance.lock_fingerprint = lockfile.as_ref().map(|lock| lock.sha256.clone());
+    let dependency_graph = dependency_graph(metadata, cwd, builder.root, &selected);
     let source_fingerprint = (!builder.recipe.runner.is_isolated())
         .then(|| source::fingerprint(cwd))
         .transpose()?;
@@ -149,12 +150,13 @@ pub(crate) fn check(
     if source_changed {
         output.log.push_str("\nThe build changed its consumer source copy; this comparison is inconclusive. Generate files in OUT_DIR or use an isolated recipe.\n");
     }
+    let packages: std::collections::BTreeMap<_, _> = metadata
+        .packages
+        .iter()
+        .map(|package| (package.id.repr.as_str(), package))
+        .collect();
     for diagnostic in &mut output.diagnostics {
-        let Some(package) = metadata
-            .packages
-            .iter()
-            .find(|p| p.id.repr == diagnostic.package_id)
-        else {
+        let Some(package) = packages.get(diagnostic.package_id.as_str()) else {
             continue;
         };
         let package_root = package.manifest_path.parent().unwrap().as_std_path();
@@ -216,7 +218,7 @@ pub(crate) fn check(
         None
     };
     Ok(BuildResult {
-        success: output.success,
+        success: output.success && failure.is_none(),
         exit_code: output.code,
         timed_out: output.timed_out,
         diagnostics: output.diagnostics,
@@ -227,6 +229,105 @@ pub(crate) fn check(
         selected_library: Some(selected),
         failure,
         provenance,
+        lockfile,
+        dependency_graph,
+    })
+}
+
+fn resolved_lockfile(workspace: &Path) -> io::Result<Option<LockfileEvidence>> {
+    let path = workspace.join("Cargo.lock");
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_file() || metadata.is_symlink() {
+        return Err(io::Error::other(
+            "resolved Cargo.lock must be a regular file without symlinks",
+        ));
+    }
+    let mut contents = String::new();
+    fs::File::open(path)?
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_string(&mut contents)?;
+    if contents.len() > 16 * 1024 * 1024 {
+        return Err(io::Error::other("resolved Cargo.lock exceeds 16 MiB"));
+    }
+    Ok(Some(LockfileEvidence {
+        sha256: source::key(contents.as_bytes()),
+        contents,
+    }))
+}
+
+fn dependency_graph(
+    metadata: &Metadata,
+    cwd: &Path,
+    work: &Path,
+    selected: &str,
+) -> Option<DependencyGraph> {
+    let resolved = metadata.resolve.as_ref()?;
+    let indexed: std::collections::BTreeMap<_, _> = metadata
+        .packages
+        .iter()
+        .map(|package| (package.id.repr.as_str(), package))
+        .collect();
+    let mut packages: Vec<_> = resolved
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let package = indexed.get(node.id.repr.as_str())?;
+            let mut features: Vec<_> = node.features.iter().map(ToString::to_string).collect();
+            features.sort();
+            let mut dependencies: Vec<_> = node
+                .deps
+                .iter()
+                .map(|dependency| dependency.pkg.to_string())
+                .collect();
+            dependencies.sort();
+            dependencies.dedup();
+            let manifest = package.manifest_path.as_std_path();
+            let upstream = work.join("upstream");
+            let (origin, relative) = if let Ok(relative) = manifest.strip_prefix(cwd) {
+                (DiagnosticOrigin::Downstream, relative)
+            } else if let Ok(relative) = manifest.strip_prefix(&upstream) {
+                (DiagnosticOrigin::Library, relative)
+            } else {
+                (DiagnosticOrigin::Dependency, Path::new("Cargo.toml"))
+            };
+            let identity = source::key(
+                &serde_json::to_vec(&(
+                    origin,
+                    &package.name,
+                    &package.version,
+                    &package.source,
+                    relative,
+                ))
+                .ok()?,
+            );
+            Some(DependencyPackage {
+                id: node.id.to_string(),
+                identity,
+                name: package.name.to_string(),
+                version: package.version.to_string(),
+                source: package.source.as_ref().map(ToString::to_string),
+                manifest: relative.to_path_buf(),
+                origin,
+                features,
+                dependencies,
+            })
+        })
+        .collect();
+    packages.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut roots: Vec<_> = metadata
+        .workspace_members
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    roots.sort();
+    Some(DependencyGraph {
+        roots,
+        selected_library: selected.into(),
+        packages,
     })
 }
 

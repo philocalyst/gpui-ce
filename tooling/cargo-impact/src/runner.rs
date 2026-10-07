@@ -300,11 +300,7 @@ impl Builder<'_> {
         Ok(())
     }
 
-    pub(crate) fn provenance(
-        &self,
-        cwd: &Path,
-        manifest: &Path,
-    ) -> std::io::Result<BuildProvenance> {
+    pub(crate) fn provenance(&self, cwd: &Path) -> std::io::Result<BuildProvenance> {
         let version = |program: &str, arguments: &[&str]| -> std::io::Result<Option<String>> {
             let args: Vec<_> = arguments.iter().map(OsString::from).collect();
             let output = self.run_program(cwd, program, &args, Capture::Bytes, false)?;
@@ -312,23 +308,22 @@ impl Builder<'_> {
                 .success
                 .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
         };
-        let runner_identity = match &self.recipe.runner {
+        let (runner_identity, image_id) = match &self.recipe.runner {
             Runner::Docker { image } => {
-                format!(
-                    "{image} ({})",
-                    pin_image(image, self.images, self.deadline)?
-                )
+                let id = pin_image(image, self.images, self.deadline)?;
+                (format!("{image} ({id})"), Some(id))
             }
-            Runner::Local => "local".into(),
-            Runner::Nix { file, attribute } => format!("nix:{}#{attribute}", file.display()),
+            Runner::Local => ("local".into(), None),
+            Runner::Nix { file, attribute } => {
+                (format!("nix:{}#{attribute}", file.display()), None)
+            }
         };
         Ok(BuildProvenance {
             rustc: version("rustc", &["-Vv"])?,
             cargo: version("cargo", &["--version"])?,
             runner_identity,
-            lock_fingerprint: fs::read(manifest.with_file_name("Cargo.lock"))
-                .ok()
-                .map(|bytes| crate::source::key(&bytes)),
+            lock_fingerprint: None,
+            image_id,
         })
     }
 }

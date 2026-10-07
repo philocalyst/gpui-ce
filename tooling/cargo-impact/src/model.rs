@@ -1,4 +1,8 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    path::PathBuf,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -187,6 +191,7 @@ pub enum RunStatus {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RunMetadata {
+    pub engine_fingerprint: Option<String>,
     pub status: RunStatus,
     pub elapsed_ms: u64,
     pub execution: ExecutionOptions,
@@ -220,6 +225,10 @@ pub struct GateResult {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DownstreamResult {
+    #[serde(default)]
+    pub experiment_id: Option<ExperimentId>,
+    #[serde(default)]
+    pub lifecycle: ExperimentLifecycle,
     pub name: String,
     pub revision: Option<String>,
     pub source: DownstreamSource,
@@ -260,6 +269,10 @@ pub struct BuildResult {
     pub failure: Option<HarnessFailure>,
     #[serde(default)]
     pub provenance: BuildProvenance,
+    #[serde(default)]
+    pub lockfile: Option<LockfileEvidence>,
+    #[serde(default)]
+    pub dependency_graph: Option<DependencyGraph>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -269,6 +282,283 @@ pub struct BuildProvenance {
     pub cargo: Option<String>,
     pub runner_identity: String,
     pub lock_fingerprint: Option<String>,
+    pub image_id: Option<String>,
+}
+
+/// Identity of a configured experiment, independent of its display label.
+/// Values are full lowercase SHA-256 digests and safe as artifact path segments.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(try_from = "String", into = "String")]
+pub struct ExperimentId(String);
+
+impl ExperimentId {
+    pub fn for_spec(
+        library: &str,
+        spec: &DownstreamSpec,
+        recipe: &BuildRecipe,
+    ) -> std::io::Result<Self> {
+        let mut recipe = recipe.clone();
+        recipe.features.sort();
+        recipe.features.dedup();
+        recipe.packages.sort();
+        recipe.packages.dedup();
+        let identity = (
+            "cargo-impact-experiment-v1",
+            library,
+            &spec.name,
+            &spec.source,
+            &spec.manifest,
+            recipe,
+        );
+        serde_json::to_vec(&identity)
+            .map(|bytes| Self(crate::source::key(&bytes)))
+            .map_err(std::io::Error::other)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ExperimentId {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.len() == 64
+            && value
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        {
+            Ok(Self(value))
+        } else {
+            Err("experiment ID must be 64 lowercase hexadecimal characters".into())
+        }
+    }
+}
+impl From<ExperimentId> for String {
+    fn from(value: ExperimentId) -> Self {
+        value.0
+    }
+}
+impl std::fmt::Display for ExperimentId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExperimentStatus {
+    #[default]
+    Unknown,
+    Queued,
+    Preparing,
+    Baseline,
+    Candidate,
+    Complete,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExperimentStage {
+    Scheduling,
+    SourcePreparation,
+    Baseline,
+    Candidate,
+    IntegrityCheck,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildPhase {
+    Baseline,
+    Candidate,
+}
+
+impl BuildPhase {
+    pub fn stage(self) -> ExperimentStage {
+        match self {
+            Self::Baseline => ExperimentStage::Baseline,
+            Self::Candidate => ExperimentStage::Candidate,
+        }
+    }
+    pub fn status(self) -> ExperimentStatus {
+        match self {
+            Self::Baseline => ExperimentStatus::Baseline,
+            Self::Candidate => ExperimentStatus::Candidate,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::Candidate => "candidate",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExperimentFailure {
+    pub stage: ExperimentStage,
+    pub cause: HarnessFailure,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExperimentLifecycle {
+    pub status: ExperimentStatus,
+    pub failure: Option<ExperimentFailure>,
+}
+
+impl ExperimentLifecycle {
+    pub fn is_finished(&self) -> bool {
+        matches!(
+            self.status,
+            ExperimentStatus::Complete | ExperimentStatus::Cancelled
+        )
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LockfileEvidence {
+    pub sha256: String,
+    pub contents: String,
+}
+
+impl LockfileEvidence {
+    pub fn verify(&self) -> bool {
+        crate::source::key(self.contents.as_bytes()) == self.sha256
+    }
+}
+
+/// The resolved, feature-filtered Cargo graph used by one build phase.
+/// Edges explain dependency paths; matching compiler symptoms alone do not prove causality.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DependencyGraph {
+    pub roots: Vec<String>,
+    pub selected_library: String,
+    pub packages: Vec<DependencyPackage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DependencyPackage {
+    pub id: String,
+    /// Source-relative identity used when comparing equivalent graphs across work directories.
+    pub identity: String,
+    pub name: String,
+    pub version: String,
+    pub source: Option<String>,
+    pub manifest: PathBuf,
+    pub origin: DiagnosticOrigin,
+    pub features: Vec<String>,
+    pub dependencies: Vec<String>,
+}
+
+impl DependencyGraph {
+    pub fn fingerprint(&self) -> Result<String, String> {
+        let ids: BTreeMap<_, _> = self
+            .packages
+            .iter()
+            .map(|p| (p.id.as_str(), p.identity.as_str()))
+            .collect();
+        let identities: BTreeSet<_> = self
+            .packages
+            .iter()
+            .map(|package| package.identity.as_str())
+            .collect();
+        if ids.len() != self.packages.len() || identities.len() != self.packages.len() {
+            return Err("dependency graph contains colliding package identities".into());
+        }
+        let lookup = |id: &str| {
+            ids.get(id)
+                .copied()
+                .ok_or_else(|| "dependency graph references an absent package".to_owned())
+        };
+        let mut roots = self
+            .roots
+            .iter()
+            .map(|id| lookup(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        roots.sort();
+        let mut packages = Vec::new();
+        for package in &self.packages {
+            if ExperimentId::try_from(package.identity.clone()).is_err() {
+                return Err("dependency graph lacks a valid source-relative identity".into());
+            }
+            let expected = serde_json::to_vec(&(
+                package.origin,
+                &package.name,
+                &package.version,
+                &package.source,
+                &package.manifest,
+            ))
+            .map_err(|error| error.to_string())?;
+            if crate::source::key(&expected) != package.identity {
+                return Err(
+                    "dependency graph package identity does not match retained source metadata"
+                        .into(),
+                );
+            }
+            let mut dependencies = package
+                .dependencies
+                .iter()
+                .map(|id| lookup(id))
+                .collect::<Result<Vec<_>, _>>()?;
+            dependencies.sort();
+            dependencies.dedup();
+            let mut features = package.features.clone();
+            features.sort();
+            features.dedup();
+            packages.push((
+                &package.identity,
+                &package.name,
+                &package.version,
+                package.origin,
+                features,
+                dependencies,
+            ));
+        }
+        packages.sort_by(|a, b| a.0.cmp(b.0));
+        serde_json::to_vec(&(
+            "cargo-impact-graph-v1",
+            roots,
+            lookup(&self.selected_library)?,
+            packages,
+        ))
+        .map(|bytes| crate::source::key(&bytes))
+        .map_err(|error| error.to_string())
+    }
+
+    /// One shortest resolved path, bounded by the graph's node count even with cycles.
+    pub fn dependency_path(&self, from: &str, to: &str) -> Option<Vec<String>> {
+        let packages: BTreeMap<_, _> = self.packages.iter().map(|p| (p.id.as_str(), p)).collect();
+        if !packages.contains_key(from) || !packages.contains_key(to) {
+            return None;
+        }
+        let mut queue = VecDeque::from([from]);
+        let mut visited = BTreeSet::from([from]);
+        let mut previous = BTreeMap::new();
+        while let Some(current) = queue.pop_front() {
+            if current == to {
+                let mut path = vec![to.to_owned()];
+                let mut current = to;
+                while current != from {
+                    current = *previous.get(current)?;
+                    path.push(current.to_owned());
+                }
+                path.reverse();
+                return Some(path);
+            }
+            for dependency in &packages.get(current)?.dependencies {
+                if packages.contains_key(dependency.as_str()) && visited.insert(dependency.as_str())
+                {
+                    previous.insert(dependency.as_str(), current);
+                    queue.push_back(dependency.as_str());
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
