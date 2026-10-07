@@ -69,16 +69,26 @@ jobs:
         run: chmod +x "$RUNNER_TEMP/impact/bin/cargo-impact"
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/impact-work
-          key: impact-untrusted-${{ runner.os }}-${{ github.event.issue.number }}-${{ github.run_id }}
-          restore-keys: impact-untrusted-${{ runner.os }}-${{ github.event.issue.number }}-
+          path: |
+            ${{ runner.temp }}/impact-work/targets
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/mbx
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/mbx
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/git
+            ${{ runner.temp }}/impact-work/gate-target
+          key: impact-untrusted-v2-${{ runner.os }}-${{ github.event.issue.number }}-${{ github.run_id }}
+          restore-keys: impact-untrusted-v2-${{ runner.os }}-${{ github.event.issue.number }}-
       - name: Check downstream consumers
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
           "$RUNNER_TEMP/impact/bin/cargo-impact" check
           --baseline baseline --candidate candidate --config baseline/impact.toml
-          --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report
+          --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report --scan-timeout-seconds 2100
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -105,9 +115,17 @@ jobs:
       - name: Make scanner executable
         run: chmod +x "$RUNNER_TEMP/impact/bin/cargo-impact"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
         with:
           name: downstream-impact
           path: impact-report
+      - name: Preserve a worker failure when evidence is unavailable
+        run: |
+          if ! test -f impact-report/report.json; then
+            "$RUNNER_TEMP/impact/bin/cargo-impact" report \
+              --failure "The worker did not produce downloadable evidence. Inspect this Actions run for preparation, cancellation, installation, or artifact failures." \
+              --output-dir impact-report
+          fi
       - name: Report if the PR still points at the tested head
         env:
           GITHUB_TOKEN: ${{ github.token }}

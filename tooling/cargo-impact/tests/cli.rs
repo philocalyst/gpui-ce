@@ -12,11 +12,20 @@ fn cli() -> AssertCommand {
 #[test]
 fn init_vendors_a_standalone_scanner_manifest() {
     let directory = TempDir::new().unwrap();
+    fs::write(
+        directory.path().join(".gitignore"),
+        "user-owned-pattern\n.cargo-impact/",
+    )
+    .unwrap();
     cli()
         .args(["init", "--library", "probe-lib", "--directory"])
         .arg(directory.path())
         .assert()
         .success();
+    assert_eq!(
+        fs::read_to_string(directory.path().join(".gitignore")).unwrap(),
+        "user-owned-pattern\n.cargo-impact/\nimpact-report/\n"
+    );
 
     let scanner = directory.path().join(".github/cargo-impact");
     let metadata = Command::new("cargo")
@@ -126,6 +135,63 @@ fn cargo_plugin_style_argv_is_accepted() {
         .assert()
         .success()
         .stdout(contains("Usage: cargo-impact check"));
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_rejects_a_symlink_inside_the_chosen_repository() {
+    let directory = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    std::os::unix::fs::symlink(outside.path(), directory.path().join(".github")).unwrap();
+    cli()
+        .args(["init", "--library", "probe-lib", "--directory"])
+        .arg(directory.path())
+        .assert()
+        .code(2)
+        .stderr(contains("contains a symlink"));
+    assert!(!directory.path().join("impact.toml").exists());
+    assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn saved_report_renders_offline_into_a_complete_bundle() {
+    let directory = TempDir::new().unwrap();
+    let input = directory.path().join("input.json");
+    fs::write(
+        &input,
+        serde_json::to_vec(&cargo_impact::ImpactReport::failed(
+            "demo",
+            "missing dependency",
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let output = directory.path().join("rendered");
+    cli()
+        .args(["report", "--input"])
+        .arg(&input)
+        .args(["--output-dir"])
+        .arg(&output)
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("GH_TOKEN")
+        .assert()
+        .success();
+    for name in [
+        "index.html",
+        "report.json",
+        "report.md",
+        "report.sarif",
+        "issues/index.md",
+        "issues/index.json",
+    ] {
+        assert!(output.join(name).is_file(), "missing {name}");
+    }
+    let sarif: Value =
+        serde_json::from_slice(&fs::read(output.join("report.sarif")).unwrap()).unwrap();
+    assert_eq!(
+        sarif["runs"][0]["invocations"][0]["executionSuccessful"],
+        false
+    );
 }
 
 #[test]

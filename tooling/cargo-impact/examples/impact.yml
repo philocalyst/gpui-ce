@@ -44,16 +44,26 @@ jobs:
           source: baseline/.github/cargo-impact
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/impact-work
-          key: impact-untrusted-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-${{ github.run_id }}
-          restore-keys: impact-untrusted-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-
+          path: |
+            ${{ runner.temp }}/impact-work/targets
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/mbx
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/mbx
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/git
+            ${{ runner.temp }}/impact-work/gate-target
+          key: impact-untrusted-v2-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-${{ github.run_id }}
+          restore-keys: impact-untrusted-v2-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-
       - name: Check downstream consumers
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
           "$RUNNER_TEMP/impact/bin/cargo-impact" check
           --baseline baseline --candidate candidate --config baseline/impact.toml
-          --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report
+          --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report --scan-timeout-seconds 2100
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -65,5 +75,15 @@ jobs:
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: always()
         with:
-          path: ${{ runner.temp }}/impact-work
-          key: impact-untrusted-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/impact-work/targets
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/mbx
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/mbx
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/git
+            ${{ runner.temp }}/impact-work/gate-target
+          key: impact-untrusted-v2-${{ runner.os }}-${{ github.event.pull_request.number || 'manual' }}-${{ github.run_id }}

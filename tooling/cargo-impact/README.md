@@ -5,8 +5,8 @@ Find out whether a Rust API change actually breaks downstream code. An embedded
 consumers. A semver warning alone never fails the job.
 
 This is a standalone Cargo workspace. It has no GPUI dependencies and can be
-copied out of this repository. The initial implementation deliberately uses a
-single bounded worker; the library API also works independently of the CLI.
+copied out of this repository. The runner bounds parallel consumers and keeps each baseline/candidate pair sequential.
+The library API also works independently of the CLI.
 
 ## Try it
 
@@ -32,11 +32,30 @@ For a trusted local experiment without Docker, add `--local --allow-local`.
 changes, or other changes outside the checker's API model. Downstreams still
 receive the same recipe and revision on both sides of the comparison.
 
-Reports are written to `impact-report/report.json` and `report.md`, including
+Reports include `index.html`, `report.json`, `report.md`, `report.sarif`, and local
+issue Markdown/reproduction TOML bundles, including
 fatal configuration, preparation, or gate errors. The JSON includes fingerprints, selected
 package IDs, recipes, immutable downstream revisions, full rustc diagnostic
 trees, suggestions, macro expansions, byte/line/column ranges, and source
-snippets. Markdown shows the useful errors and links to tested source commits.
+snippets. Markdown uses Rust syntax highlighting and bold failing expressions. The self-contained
+HTML report highlights exact compiler spans, filters consumers and errors, and copies
+issue drafts. Both link to verified files in tested source commits.
+
+Render any saved report offline with:
+
+```sh
+cargo impact report --input impact-report/report.json --output-dir impact-report --open
+```
+
+Issue drafts contain a commit-pinned consumer configuration, selected manifest/package,
+source fingerprints, compiler/runner/lockfile provenance when available, and reproduction
+commands. Supply the actual library snapshots and original resolved lockfile to reproduce
+them; hashes alone cannot reconstruct missing files. The issue form contains a compact
+summary and requires human submission. Old reports without provenance are labelled.
+SARIF retains commit-pinned consumer URLs and reports harness/partial failures through
+invocation notifications; it is not uploaded to the upstream repository as foreign code.
+Progress checkpoints preserve completed experiments after interruption; re-render their
+JSON offline. New checkpoints replace old HTML/SARIF/issue views.
 Each diagnostic retains its Cargo target and package origin (downstream,
 injected library, or external dependency). Source links use verified original
 checkout files, including nested workspace paths; generated and external files
@@ -52,7 +71,8 @@ transitive consumer can still establish impact, with their origin shown explicit
 | `not_exercised` | The consuming package or feature did not compile the requested library. |
 
 Exit status is **1** for proven regressions, **2** for harness/discovery failures,
-and **0** otherwise. Coverage notes and `not_exercised` results matter: a green
+and **0** otherwise. A gate-open scan needs at least one exercised consumer by default;
+`execution.minimum_exercised` can change that policy. Too little coverage is inconclusive. Coverage notes and `not_exercised` results matter: a green
 job establishes compatibility only for the successful experiments it records.
 
 ## Set up CI and the comment bot
@@ -61,13 +81,14 @@ Run this in the library repository:
 
 ```sh
 cargo impact init --library your-crate
+cargo impact doctor --config impact.toml
 ```
 
 This writes `impact.toml`, two GitHub Actions workflows, and a versioned copy of
 the scanner in `.github/cargo-impact`. It checks every destination first and
 refuses existing files. The workflows install that copy with `--locked`; no
-published crate, hosted service, or GitHub App registration is required. Add
-`.cargo-impact/` and `impact-report/` to the library repository's `.gitignore`.
+published crate, hosted service, or GitHub App registration is required. Existing
+`.gitignore` content is preserved, and generated work/report directories are added.
 The vendored composite action pins the scanner's Rust toolchain and saves its
 binary cache immediately, so a later regression failure still preserves the
 installation for the next attempt. Its key includes source, embedded templates,
@@ -92,7 +113,8 @@ from the PR's pinned baseline in the PR workflow. Comment jobs pass the trusted
 default-branch scanner as an immutable same-run artifact to the worker and
 reporter; their recipes still come from the pinned baseline. Candidate code runs in Docker without API tokens
 or checkout credentials. The reporter reads JSON as data and checks the current
-PR head again before commenting. If the PR moved, it keeps the artifact and
+PR head again before commenting. It updates its own marked report comment on reruns
+and ignores copied markers in human comments. If the PR moved, it keeps the artifact and
 does not post stale results. Comments neutralize source-controlled mentions,
 HTML, and Markdown delimiters. Cache keys are scoped to untrusted PR work.
 
@@ -115,6 +137,15 @@ search is an additional opt-in provider:
 
 ```toml
 library = "your-crate"
+
+[execution]
+jobs = 2
+cargo_jobs = 1
+memory_mib = 2048
+cpus = 1
+max_work_bytes = 5368709120
+scan_timeout_seconds = 3300
+minimum_exercised = 1
 
 [discovery]
 crates_io = true
@@ -162,7 +193,13 @@ consumer within it.
 `Repository` identities and evidence. Forge-specific URL/link behavior is
 independent of discovery and execution. New providers can be composed with
 `Discovery::merge`; embeddings supply them lazily through
-`analyze_with_discovery`. GitHub is currently the only comment-bot adapter.
+`analyze_with_discovery`. GitHub Actions is currently the only comment-bot adapter. GitHub, GitLab and Gitea
+provide source permalinks and prefilled issue forms; generic Git hosts provide cloning.
+GitLab subgroup paths and self-hosted GitLab/Gitea are supported with explicit forge hints.
+No GitLab/Gitea global code-search provider, bot, or hosted App is implemented. Registry
+packages in one repository are tested separately, so a removed workspace package cannot
+poison a different consumer. Repository HEAD is tested, rather than published archives;
+published-version fidelity requires a future archive adapter.
 
 ## Fix harness errors with recipes
 
@@ -216,10 +253,29 @@ isolation and do not enable host recipes automatically.
 
 Keep the same `--work-dir` (default `.cargo-impact`) between attempts. It stores
 anonymous checkouts, Cargo downloads, separate rustdoc outputs, per-consumer
-targets, and Boxington storage. Baseline and candidate share a consumer's target
-directory. Identical copied files preserve timestamps; changed/deleted files
+targets, and Boxington storage. Baseline and candidate have separate targets and download caches: one build cannot
+poison the other through Cargo artifacts or configuration. Identical copied files preserve timestamps; changed/deleted files
 refresh the source snapshot. Cargo incrementality and fingerprints decide which
-artifacts remain valid. A work-directory lock prevents overlapping scans.
+artifacts remain valid. A work-directory lock prevents overlapping scans. Scoped parallel workers mount only
+their own scratch/cache/target paths, plus read-only upstream and source inputs. Offline
+compilation mounts consumer sources and fetched Cargo registry/git sources read-only.
+Host source drift is detected and makes the experiment inconclusive. Packages that write
+generated code into their own source tree need an adjusted package/build recipe.
+
+The default managed storage budget is 5 GiB. A periodic watcher terminates builds that
+exceed it. `--prune` removes managed caches before retrying and preserves user files.
+`--jobs`, `--cargo-jobs`, `--memory-mib`, `--cpus`, and `--max-work-gib` override resource
+settings. `--timeout-seconds` bounds a whole consumer pair; the scan-wide deadline
+includes API analysis, discovery and queued consumers. CLI API analysis runs the same
+embedded checker in a supervised child of the scanner; it never calls an external
+cargo-semver-checks executable. Library embeddings can supply that helper or run the
+checker inline for trusted inputs. The CLI bounds discovery requests to the scan deadline;
+an embedding's arbitrary discovery closure must enforce its own interruption policy.
+
+Actions caches retain target and Cargo/Boxington cache tiers, omitting mutable sources
+and HOME/configuration. Cache reuse accelerates builds; it never bypasses a comparison
+with a previous result. Exact immutable result reuse, dependency sharing between phases,
+and tiered LRU eviction remain future work.
 
 Set `driver = "boxington"` in a recipe to run downstream checks through `mbx`.
 Install mbx in the chosen local/Nix environment or Docker image. Rustdoc and
@@ -227,7 +283,9 @@ metadata continue through Cargo. Persistent `MBX_CACHE_DIR` and `MBX_SHIMS_DIR`
 are provided; quiet output and target-view settings favor repeated harness
 runs. Different consumers keep separate Cargo targets to prevent stale results
 when repositories share package names. Boxington can share matching artifacts
-across those targets.
+across those targets when supported. Compiler-selection hardening uses Cargo
+`--config` overrides; current Boxington versions can fall back to ordinary Cargo
+for these invocations, so cache acceleration is not claimed without live validation.
 
 Both output streams are drained continuously. Cargo progress and artifact JSON
 are removed from the human log while structured diagnostics are retained after
@@ -279,9 +337,12 @@ Boxington live execution and alternate-registry patching need broader coverage.
 
 The gate checks the configured feature/target selection, not every possible
 configuration or runtime behavior. Builds use `cargo check --all-targets`, not
-execution of downstream tests. Additional runner modes, workers, forge indexes,
+execution of downstream tests. Additional runner modes, forge indexes,
 and a hosted App can extend these boundaries without changing the comparison
 model.
+
+The [adversarial review and remaining gaps](docs/adversarial-review.md) map this
+implementation to Crater and RustSec patterns and record unverified capabilities.
 
 Inspired by [Rust Crater](https://github.com/rust-lang/crater), using the
 [cargo-semver-checks library](https://docs.rs/cargo-semver-checks/0.51.0/cargo_semver_checks/)
