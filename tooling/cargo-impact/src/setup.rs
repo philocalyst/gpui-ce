@@ -8,43 +8,7 @@ use std::{
 
 type Asset = (&'static str, &'static [u8]);
 
-macro_rules! assets {
-    ($($path:literal),* $(,)?) => { &[$(($path, include_bytes!(concat!("../", $path)) as &[u8])),*] };
-}
-
-const SCANNER: &[Asset] = assets![
-    "Cargo.toml",
-    "Cargo.lock",
-    "action.yml",
-    "clippy.toml",
-    "LICENSE.md",
-    "src/lib.rs",
-    "src/main.rs",
-    "src/setup.rs",
-    "src/bot.rs",
-    "src/cargo.rs",
-    "src/config.rs",
-    "src/discovery.rs",
-    "src/doctor.rs",
-    "src/engine.rs",
-    "src/forge.rs",
-    "src/gate.rs",
-    "src/http.rs",
-    "src/model.rs",
-    "src/process.rs",
-    "src/report.rs",
-    "src/report/html.rs",
-    "src/report/issues.rs",
-    "src/report/markdown.rs",
-    "src/report/presentation.rs",
-    "src/report/sarif.rs",
-    "src/report/report.css",
-    "src/report/report.js",
-    "src/runner.rs",
-    "src/source.rs",
-    "examples/impact.yml",
-    "examples/impact-comment.yml",
-];
+include!(concat!(env!("OUT_DIR"), "/scanner-assets.rs"));
 
 pub(crate) fn initialize(directory: &Path, library: &str) -> io::Result<()> {
     if library.is_empty()
@@ -107,16 +71,16 @@ pub(crate) fn initialize(directory: &Path, library: &str) -> io::Result<()> {
                 directory.join(path).display()
             )));
         }
-        for ancestor in destination.ancestors() {
+        for ancestor in destination.ancestors().skip(1) {
             // The caller chooses the root; normal OS aliases such as /var are valid.
             if ancestor == directory {
                 break;
             }
             if fs::symlink_metadata(ancestor)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                .is_ok_and(|metadata| !metadata.is_dir() || metadata.file_type().is_symlink())
             {
                 return Err(io::Error::other(format!(
-                    "setup path contains a symlink: {}",
+                    "setup path ancestor must be a directory without symlinks: {}",
                     ancestor.display()
                 )));
             }

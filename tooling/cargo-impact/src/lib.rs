@@ -14,13 +14,18 @@ pub mod discovery;
 pub mod doctor;
 pub mod forge;
 pub mod http;
+pub mod replay;
 pub mod runner;
 
-pub use engine::{ImpactError, analyze, analyze_with_discovery, analyze_with_progress};
+pub use engine::{
+    ImpactError, analyze, analyze_replay, analyze_replay_with_progress, analyze_with_discovery,
+    analyze_with_progress,
+};
 pub use gate::run_semver_helper;
 pub use model::{
-    BuildProvenance, BuildResult, Classification, CompilerDiagnostic, DiagnosticOrigin,
-    DiagnosticPackage, DownstreamResult, DownstreamSource, DownstreamSpec, ExecutionOptions,
-    GateResult, HarnessFailure, ImpactReport, ImpactRequest, RunMetadata, RunStatus, SemverBump,
-    UpstreamRevisions,
+    BuildPhase, BuildProvenance, BuildResult, Classification, CompilerDiagnostic, DependencyGraph,
+    DependencyPackage, DiagnosticOrigin, DiagnosticPackage, DownstreamResult, DownstreamSource,
+    DownstreamSpec, ExecutionOptions, ExperimentFailure, ExperimentId, ExperimentLifecycle,
+    ExperimentStage, ExperimentStatus, GateResult, HarnessFailure, ImpactReport, ImpactRequest,
+    LockfileEvidence, RunMetadata, RunStatus, SemverBump, UpstreamRevisions,
 };

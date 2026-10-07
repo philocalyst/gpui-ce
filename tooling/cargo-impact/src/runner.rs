@@ -140,14 +140,16 @@ impl Builder<'_> {
     ) -> std::io::Result<ProcessOutput> {
         self.remaining()?;
         let cached = self.scope.join("cache");
-        for path in [&cached, &self.scope.join("home"), &self.target] {
+        for path in [
+            &cached,
+            &cached.join("cargo"),
+            &cached.join("mbx"),
+            &cached.join("mbx-shims"),
+            &self.scope.join("home"),
+            &self.target,
+        ] {
             safe_directory(self.root, path)?;
         }
-        fs::create_dir_all(cached.join("cargo"))?;
-        fs::create_dir_all(cached.join("mbx"))?;
-        fs::create_dir_all(cached.join("mbx-shims"))?;
-        fs::create_dir_all(self.scope.join("home"))?;
-        fs::create_dir_all(&self.target)?;
         // Builds may write their own Cargo home, but cannot install a config for the
         // next invocation. Registry/Git source trees are mounted read-only offline.
         for filename in ["config", "config.toml", "credentials", "credentials.toml"] {
@@ -298,11 +300,7 @@ impl Builder<'_> {
         Ok(())
     }
 
-    pub(crate) fn provenance(
-        &self,
-        cwd: &Path,
-        manifest: &Path,
-    ) -> std::io::Result<BuildProvenance> {
+    pub(crate) fn provenance(&self, cwd: &Path) -> std::io::Result<BuildProvenance> {
         let version = |program: &str, arguments: &[&str]| -> std::io::Result<Option<String>> {
             let args: Vec<_> = arguments.iter().map(OsString::from).collect();
             let output = self.run_program(cwd, program, &args, Capture::Bytes, false)?;
@@ -310,23 +308,24 @@ impl Builder<'_> {
                 .success
                 .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
         };
-        let runner_identity = match &self.recipe.runner {
+        let (runner_identity, image_id, image_reference) = match &self.recipe.runner {
             Runner::Docker { image } => {
-                format!(
-                    "{image} ({})",
-                    pin_image(image, self.images, self.deadline)?
-                )
+                let id = pin_image(image, self.images, self.deadline)?;
+                let reference = image_reference(&id, self.deadline)?;
+                (format!("{image} ({id})"), Some(id), reference)
             }
-            Runner::Local => "local".into(),
-            Runner::Nix { file, attribute } => format!("nix:{}#{attribute}", file.display()),
+            Runner::Local => ("local".into(), None, None),
+            Runner::Nix { file, attribute } => {
+                (format!("nix:{}#{attribute}", file.display()), None, None)
+            }
         };
         Ok(BuildProvenance {
             rustc: version("rustc", &["-Vv"])?,
             cargo: version("cargo", &["--version"])?,
             runner_identity,
-            lock_fingerprint: fs::read(manifest.with_file_name("Cargo.lock"))
-                .ok()
-                .map(|bytes| crate::source::key(&bytes)),
+            lock_fingerprint: None,
+            image_id,
+            image_reference,
         })
     }
 }
@@ -436,6 +435,15 @@ fn pin_image(
     images: &Mutex<BTreeMap<String, String>>,
     deadline: Instant,
 ) -> std::io::Result<String> {
+    pin_image_with_pull(image, images, deadline, true)
+}
+
+fn pin_image_with_pull(
+    image: &str,
+    images: &Mutex<BTreeMap<String, String>>,
+    deadline: Instant,
+    allow_pull: bool,
+) -> std::io::Result<String> {
     let mut images = images
         .lock()
         .map_err(|_| std::io::Error::other("worker image cache poisoned"))?;
@@ -458,7 +466,19 @@ fn pin_image(
         )
     };
     let mut output = inspect()?;
+    if output.timed_out {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "worker image inspection exhausted the consumer deadline",
+        ));
+    }
     if !output.success {
+        if !allow_pull {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "immutable local image is unavailable; image config IDs cannot be pulled from a registry",
+            ));
+        }
         let mut pull = clean_command("docker");
         pull.args(["pull", image]);
         let pulled = process::run(
@@ -492,6 +512,92 @@ fn pin_image(
     }
     images.insert(image.to_owned(), image_id.clone());
     Ok(image_id)
+}
+
+pub(crate) fn immutable_image_reference(reference: &str) -> bool {
+    let Some((repository, digest)) = reference.rsplit_once("@sha256:") else {
+        return false;
+    };
+    !repository.is_empty()
+        && repository.len() <= 255
+        && !repository.starts_with('-')
+        && repository
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/.:_-".contains(&byte))
+        && digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn image_reference(image: &str, deadline: Instant) -> std::io::Result<Option<String>> {
+    let mut command = clean_command("docker");
+    command.args([
+        "image",
+        "inspect",
+        "--format",
+        "{{json .RepoDigests}}",
+        image,
+    ]);
+    let output = process::run(
+        &mut command,
+        deadline.saturating_duration_since(Instant::now()),
+        Capture::Bytes,
+    )?;
+    if output.timed_out {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Docker image provenance exhausted the consumer deadline",
+        ));
+    }
+    if !output.success || output.data_truncated {
+        return Err(std::io::Error::other(
+            "Docker could not retain image repository digests",
+        ));
+    }
+    let mut digests: Vec<String> = serde_json::from_slice::<Option<Vec<String>>>(&output.stdout)
+        .map_err(|_| std::io::Error::other("Docker returned invalid image repository digests"))?
+        .unwrap_or_default();
+    if digests
+        .iter()
+        .any(|reference| !immutable_image_reference(reference))
+    {
+        return Err(std::io::Error::other(
+            "Docker returned a non-immutable image repository reference",
+        ));
+    }
+    digests.sort();
+    Ok(digests.into_iter().next())
+}
+
+pub(crate) fn prepare_replay_image(
+    configured: &str,
+    expected: &crate::replay::PhaseIdentity,
+    images: &Mutex<BTreeMap<String, String>>,
+    deadline: Instant,
+) -> std::io::Result<String> {
+    let reference = expected
+        .image_reference
+        .as_deref()
+        .unwrap_or(&expected.image);
+    let actual = pin_image_with_pull(reference, images, deadline, expected.image_reference.is_some())
+        .map_err(|error| match &expected.image_reference {
+            Some(_) => error,
+            None => std::io::Error::new(
+                error.kind(),
+                format!(
+                    "Replay requires the locally built image {} to be present on this daemon; the original report has no registry-pullable digest. {error}",
+                    expected.image
+                ),
+            ),
+        })?;
+    if actual == expected.image {
+        images
+            .lock()
+            .map_err(|_| std::io::Error::other("worker image cache poisoned"))?
+            .insert(configured.into(), actual.clone());
+    }
+    Ok(actual)
 }
 
 fn mount(command: &mut Command, root: &Path, path: &Path, readonly: bool) -> std::io::Result<()> {
@@ -573,6 +679,57 @@ pub(crate) fn clean_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_image_requires_a_pullable_digest_or_explicit_local_availability() {
+        let reference = format!("ghcr.io/example/worker@sha256:{}", "a".repeat(64));
+        assert!(immutable_image_reference(&reference));
+        for invalid in [
+            "rust:latest",
+            "--platform=other@sha256:abc",
+            "https://token@host/image@sha256:abc",
+        ] {
+            assert!(!immutable_image_reference(invalid));
+        }
+        let expected = crate::replay::PhaseIdentity {
+            image: format!("sha256:{}", "b".repeat(64)),
+            image_reference: Some(reference.clone()),
+            lockfile: String::new(),
+            dependency_graph: String::new(),
+            rustc: String::new(),
+            cargo: String::new(),
+            injection_sources: Vec::new(),
+        };
+        // The repository digest is the acquisition key; .Id remains the proof.
+        let images = Mutex::new(BTreeMap::from([(reference, expected.image.clone())]));
+        assert_eq!(
+            prepare_replay_image(
+                "mutable-tag",
+                &expected,
+                &images,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .unwrap(),
+            expected.image
+        );
+        assert_eq!(
+            images.lock().unwrap().get("mutable-tag"),
+            Some(&expected.image)
+        );
+        let mut local = expected;
+        local.image_reference = None;
+        let images = Mutex::new(BTreeMap::from([(local.image.clone(), local.image.clone())]));
+        assert_eq!(
+            prepare_replay_image(
+                "local-image",
+                &local,
+                &images,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .unwrap(),
+            local.image
+        );
+    }
 
     #[test]
     fn compiler_policy_follows_includes_legacy_precedence_and_scalar_types() {
@@ -684,6 +841,47 @@ mod tests {
                 .filter(|mount| mount.contains("cargo/registry") || mount.contains("cargo/git"))
                 .all(|mount| mount.ends_with(",readonly"))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_cache_symlinks_fail_before_native_preparation_touches_other_files() {
+        for directory in ["cargo", "mbx", "mbx-shims"] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let outside = tempfile::TempDir::new().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let scope = root.join("workers/consumer/baseline");
+            fs::create_dir_all(scope.join("cache")).unwrap();
+            fs::write(outside.path().join("config.toml"), "retained").unwrap();
+            std::os::unix::fs::symlink(outside.path(), scope.join("cache").join(directory))
+                .unwrap();
+            let recipe = BuildRecipe::default();
+            let execution = ExecutionOptions::default();
+            let images = Mutex::new(BTreeMap::new());
+            let builder = Builder {
+                recipe: &recipe,
+                root: &root,
+                scope: &scope,
+                target: root.join("targets/consumer/baseline"),
+                timeout: Duration::from_secs(5),
+                deadline: Instant::now() + Duration::from_secs(5),
+                execution: &execution,
+                images: &images,
+            };
+            let error = builder
+                .run(&root, &["metadata".into()], Capture::Bytes, false)
+                .err()
+                .expect("nested cache symlink must fail before invoking Cargo");
+            assert!(
+                error.to_string().contains("symlinks"),
+                "{directory}: {error}"
+            );
+            assert_eq!(
+                fs::read_to_string(outside.path().join("config.toml")).unwrap(),
+                "retained"
+            );
+            assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 1);
+        }
     }
 
     #[cfg(unix)]

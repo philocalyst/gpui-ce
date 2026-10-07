@@ -3,7 +3,8 @@
 use std::fmt::Write;
 
 use crate::model::{
-    BuildResult, Classification, CompilerDiagnostic, DownstreamResult, ImpactReport, RunStatus,
+    BuildPhase, BuildResult, Classification, CompilerDiagnostic, DownstreamResult, ImpactReport,
+    RunStatus,
 };
 use cargo_metadata::diagnostic::DiagnosticSpanLine;
 
@@ -44,6 +45,26 @@ pub(super) fn render(report: &ImpactReport) -> String {
             report.run.exercised_downstreams, report.run.execution.minimum_exercised
         );
     }
+    if let Some(identity) = &report.run.replay_of {
+        let _ = write!(
+            output,
+            "<aside class=\"notice\"><strong>Replay attempt</strong><p>Compared fresh inputs against retained experiment identity <code>{}</code>. Inspect each phase to assess whether the outcome repeated.</p></aside>",
+            html(identity)
+        );
+        if let Some(expected) = report.run.replay_expected {
+            let (_, _, label) = classification(expected);
+            let observed = report
+                .downstreams
+                .first()
+                .map(result_status)
+                .map(|(_, _, label)| label)
+                .unwrap_or("No completed comparison");
+            let _ = write!(
+                output,
+                "<p><strong>Original comparison:</strong> {label} · <strong>New assessment:</strong> {observed}</p>"
+            );
+        }
+    }
     if !report.gate.log.is_empty() {
         let _ = write!(
             output,
@@ -51,14 +72,8 @@ pub(super) fn render(report: &ImpactReport) -> String {
             html(&clip(&report.gate.log, 12_000))
         );
     }
-    output.push_str("<nav class=\"downloads\" aria-label=\"Report downloads\"><a href=\"report.json\" download>Full evidence ↗</a><a href=\"report.md\" download>Markdown ↗</a><a href=\"report.sarif\" download>SARIF ↗</a><a href=\"issues/index.md\">Issue bundles ↗</a></nav></header><main>");
-    let count = |kind| {
-        report
-            .downstreams
-            .iter()
-            .filter(|r| r.classification == kind)
-            .count()
-    };
+    output.push_str("<nav class=\"downloads\" aria-label=\"Report downloads\"><a href=\"report.json\" download>Full evidence ↗</a><a href=\"report.md\" download>Markdown ↗</a><a href=\"report.sarif\" download>SARIF ↗</a><a href=\"issues/index.md\">Issue bundles ↗</a></nav><details><summary>Check a downloaded report</summary><p>Run <code>cargo impact verify --report-dir PATH_TO_REPORT</code> from the extracted bundle root. The verifier checks file sizes, hashes, publication identity, and the complete artifact inventory. Preserve the original trusted download; hashes check integrity, and do not identify its author.</p></details></header><main>");
+    let summary = super::ReportSummary::from_report(report);
     output.push_str("<section class=\"scorecards\" aria-label=\"Result filters\">");
     for kind in [
         Classification::Regression,
@@ -71,7 +86,14 @@ pub(super) fn render(report: &ImpactReport) -> String {
         let _ = write!(
             output,
             "<button type=\"button\" class=\"scorecard {slug}\" data-filter=\"{slug}\" aria-pressed=\"false\"><span>{icon} {label}</span><strong>{}</strong></button>",
-            count(kind)
+            summary.count(kind)
+        );
+    }
+    if summary.pending > 0 {
+        let _ = write!(
+            output,
+            "<button type=\"button\" class=\"scorecard pending\" data-filter=\"pending\" aria-pressed=\"false\"><span>⏳ In progress</span><strong>{}</strong></button>",
+            summary.pending
         );
     }
     output.push_str("</section>");
@@ -106,7 +128,7 @@ pub(super) fn render(report: &ImpactReport) -> String {
     output.push_str("<div class=\"table-scroll\"><table id=\"results\"><thead><tr><th>Consumer</th><th>Baseline</th><th>Candidate</th><th>Comparison</th><th>Time</th></tr></thead><tbody>");
     for result in &report.downstreams {
         let id = result_id(result);
-        let (slug, icon, label) = classification(result.classification);
+        let (slug, icon, label) = result_status(result);
         let _ = write!(
             output,
             "<tr data-status=\"{slug}\" data-consumer=\"{id}\"><th scope=\"row\"><a href=\"#{id}\">{}</a></th><td>{}</td><td>{}</td><td><span class=\"badge {slug}\">{icon} {label}</span></td><td>{}</td></tr>",
@@ -124,8 +146,9 @@ pub(super) fn render(report: &ImpactReport) -> String {
     for result in &report.downstreams {
         consumer(
             &mut output,
+            report,
             result,
-            drafts.iter().find(|d| d.downstream == result.name),
+            drafts.iter().find(|d| d.id == result_id(result)),
         );
     }
     output.push_str("</div><footer><strong>Retained compiler evidence.</strong> JSON contains complete retained diagnostic trees and all Cargo targets. This view deduplicates compiler symptoms and bounds excerpts. Generated/external paths stay unlinked; macro callsites retain their own provenance. Issue forms require human submission.</footer></main><div id=\"copy-status\" role=\"status\" aria-live=\"polite\"></div><script>");
@@ -158,9 +181,14 @@ fn build_status(build: &BuildResult) -> String {
     }
 }
 
-fn consumer(output: &mut String, result: &DownstreamResult, draft: Option<&IssueDraft>) {
+fn consumer(
+    output: &mut String,
+    report: &ImpactReport,
+    result: &DownstreamResult,
+    draft: Option<&IssueDraft>,
+) {
     let id = result_id(result);
-    let (slug, icon, label) = classification(result.classification);
+    let (slug, icon, label) = result_status(result);
     let _ = write!(
         output,
         "<article id=\"{id}\" data-status=\"{slug}\" class=\"consumer\"><div class=\"consumer-heading\"><h2>{}</h2><span class=\"badge {slug}\">{icon} {label}</span></div>",
@@ -168,6 +196,15 @@ fn consumer(output: &mut String, result: &DownstreamResult, draft: Option<&Issue
     );
     if let Some(message) = &result.message {
         let _ = write!(output, "<p>{}</p>", html(&clip(message, 2_000)));
+    }
+    if let Some(failure) = &result.lifecycle.failure {
+        let _ = write!(
+            output,
+            "<p class=\"notice warning\"><strong>Failed during {:?}</strong> · {:?}<br>{}</p>",
+            failure.stage,
+            failure.cause,
+            html(&clip(&failure.message, 2_000))
+        );
     }
     let _ = write!(
         output,
@@ -212,7 +249,7 @@ fn consumer(output: &mut String, result: &DownstreamResult, draft: Option<&Issue
             diagnostics.len() - 8
         );
     }
-    if result.classification == Classification::HarnessFailure {
+    if super::view::outcome(result) == Some(Classification::HarnessFailure) {
         output.push_str("<details open><summary>Environment failure and retry recipe</summary>");
         for (phase, build) in [
             ("Baseline", &result.baseline),
@@ -244,12 +281,13 @@ fn consumer(output: &mut String, result: &DownstreamResult, draft: Option<&Issue
     }
     output.push_str("<details><summary>Both build phases and reproduction evidence</summary>");
     for (phase, build) in [
-        ("Baseline", &result.baseline),
-        ("Candidate", &result.candidate),
+        (BuildPhase::Baseline, &result.baseline),
+        (BuildPhase::Candidate, &result.candidate),
     ] {
         let _ = write!(
             output,
-            "<h3>{phase}</h3><dl class=\"metadata\"><div><dt>Runner</dt><dd><code>{}</code></dd></div><div><dt>Resolved lockfile</dt><dd><code>{}</code></dd></div><div><dt>Library selected</dt><dd><code>{}</code></dd></div></dl>",
+            "<h3>{}</h3><dl class=\"metadata\"><div><dt>Runner</dt><dd><code>{}</code></dd></div><div><dt>Resolved lockfile</dt><dd><code>{}</code></dd></div><div><dt>Library selected</dt><dd><code>{}</code></dd></div></dl>",
+            phase.as_str(),
             html_code(&build.provenance.runner_identity),
             html(
                 build
@@ -260,6 +298,22 @@ fn consumer(output: &mut String, result: &DownstreamResult, draft: Option<&Issue
             ),
             html(build.selected_library.as_deref().unwrap_or("not selected"))
         );
+        if build.lockfile.as_ref().is_some_and(|lock| lock.verify()) {
+            let _ = write!(
+                output,
+                "<p><a href=\"{}\" download>Download resolved {} Cargo.lock</a></p>",
+                lock_path(result, phase),
+                phase.as_str()
+            );
+        }
+        if let Some(selected) = &build.selected_library {
+            render_paths(
+                output,
+                build,
+                selected,
+                "Resolved path to the injected library",
+            );
+        }
         if let Some(rustc) = &build.provenance.rustc {
             let _ = write!(output, "<pre>{}</pre>", html_code(rustc));
         }
@@ -271,6 +325,30 @@ fn consumer(output: &mut String, result: &DownstreamResult, draft: Option<&Issue
                 output,
                 "<p class=\"notice warning\">Evidence limit: log truncated = {}, diagnostics truncated = {}, timed out = {}. Inspect report.json.</p>",
                 build.log_truncated, build.diagnostics_truncated, build.timed_out
+            );
+        }
+    }
+    match crate::replay::ReplayIdentity::from_report(report, result) {
+        Ok(identity) => {
+            if let Ok(digest) = identity.digest() {
+                let command = super::presentation::replay_command(&identity.experiment_id);
+                let _ = write!(
+                    output,
+                    "<pre>{}</pre><button type=\"button\" data-copy=\"replay-{id}\" data-copy-message=\"Replay command copied. Supply the report directory and library snapshots.\">Copy replay command</button><textarea id=\"replay-{id}\" class=\"draft-text\" aria-hidden=\"true\" tabindex=\"-1\">{}</textarea>",
+                    html_code(&command),
+                    html_code(&command)
+                );
+                let _ = write!(
+                    output,
+                    "<p><strong>Complete replay identity</strong><br><code>{digest}</code></p><p>The identity covers engine, source snapshots, recipe, phase lockfiles, dependency graphs, compilers, and immutable Docker image. A new compilation verifies whether the outcome repeats.</p>"
+                );
+            }
+        }
+        Err(reason) => {
+            let _ = write!(
+                output,
+                "<p class=\"muted\">Replay evidence is incomplete: {}.</p>",
+                html(&reason.to_string())
             );
         }
     }
@@ -301,6 +379,12 @@ fn render_diagnostic(
             origin(package.origin)
         );
     }
+    render_paths(
+        output,
+        selected_build(result),
+        &diagnostic.package_id,
+        "Resolved path to the failing package",
+    );
     for (span, callsite) in source_spans(diagnostic) {
         let label = format!(
             "{}:{}:{}",
@@ -366,6 +450,32 @@ fn render_diagnostic(
         );
     }
     output.push_str("</section>");
+}
+
+fn render_paths(output: &mut String, build: &BuildResult, target: &str, label: &str) {
+    let paths = dependency_paths(build, target);
+    if paths.is_empty() {
+        return;
+    }
+    let _ = write!(
+        output,
+        "<details class=\"dependency-paths\"><summary>{label}</summary><p>The recorded Cargo graph explains dependency selection. Inspect the compiler diagnostic to assess the cause.</p><ul>"
+    );
+    for path in paths {
+        let _ = write!(
+            output,
+            "<li><code>{}</code></li>",
+            html_code(&path_label(&path))
+        );
+        if let Some(package) = path.last() {
+            let _ = write!(
+                output,
+                "<li class=\"muted\">Selected features: <code>{}</code></li>",
+                html_code(&package.features.join(", "))
+            );
+        }
+    }
+    output.push_str("</ul></details>");
 }
 
 fn highlighted_line(line: &DiagnosticSpanLine) -> String {
