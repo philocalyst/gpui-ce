@@ -9,6 +9,7 @@ Crater's ecosystem coverage or operational infrastructure.
 | Finding | Change and evidence |
 | --- | --- |
 | A build could mutate candidate, sibling or shared cache files | Narrow phase mounts, read-only library/consumer/registry/git inputs during compilation, separate targets and mutable caches, symlink checks and source drift detection. Fake-Docker mount tests and an actual-Docker integration test exercise this boundary. |
+| A source Cargo configuration could substitute its compiler and return false success | Scanner-controlled rustc/rustdoc and empty wrapper settings override project configuration. Real Cargo fixtures exercise forced environment tables and scalar settings; diagnostics from mutated inputs lose their source links. |
 | Consumers ran serially; individual commands each received a fresh timeout | Bounded parallel consumers, sequential pairs, pair and scan deadlines, supervised embedded API analysis, deadline-aware HTTP pagination. Barrier tests prove overlap without reversing a pair. |
 | A cancellation discarded all useful results | Serialized progress callbacks and atomic authoritative JSON checkpoints. Partial reports retain completed results. A failed secondary view cannot discard saved compiler evidence. |
 | Storage grew without a policy | Default 5 GiB managed-work budget, streaming source copies, storage watchdogs, explicit pruning under the scan lock, and narrower Actions cache tiers. |

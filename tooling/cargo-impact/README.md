@@ -312,6 +312,11 @@ the disposable copy **after** the gate, so a major bump can test source
 compatibility against consumers requiring the old version. This is recorded in
 the report. Original source trees and lockfiles are never rewritten.
 
+Source Cargo configurations cannot replace rustc/rustdoc or install compiler
+wrappers, including through forced `[env]` tables. Recorded native compiler
+provenance governs each check; custom preparation or toolchains need explicit
+runner recipes.
+
 ```sh
 cd tooling/cargo-impact
 cargo test --all-targets
