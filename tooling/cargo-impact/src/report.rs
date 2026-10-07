@@ -130,6 +130,10 @@ impl ImpactReport {
             &directory.join("report.md"),
             self.comment_markdown().as_bytes(),
         )?;
+        atomic_bytes(
+            &directory.join("summary.md"),
+            self.comment_markdown().as_bytes(),
+        )?;
         Ok(())
     }
     pub fn write_artifacts(&self, directory: &Path) -> Result<(), ReportError> {
@@ -137,6 +141,10 @@ impl ImpactReport {
         atomic_json(&directory.join("report.json"), self)?;
         clear_issue_drafts(directory)?;
         atomic_bytes(&directory.join("report.md"), self.markdown().as_bytes())?;
+        atomic_bytes(
+            &directory.join("summary.md"),
+            self.comment_markdown().as_bytes(),
+        )?;
         atomic_bytes(&directory.join("index.html"), self.html().as_bytes())?;
         atomic_json(&directory.join("report.sarif"), &self.sarif())?;
         let issues = directory.join("issues");

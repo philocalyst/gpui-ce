@@ -104,6 +104,7 @@ jobs:
             --baseline-sha "$BASELINE_SHA" --candidate-sha "$CANDIDATE_SHA" \
             --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report "${options[@]}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: impact-artifact
         if: always() && (github.event_name != 'workflow_dispatch' || inputs.scanner_only != true)
         with:
           name: downstream-impact
@@ -111,7 +112,13 @@ jobs:
           if-no-files-found: error
       - name: Report summary
         if: always() && (github.event_name != 'workflow_dispatch' || inputs.scanner_only != true)
-        run: if test -f impact-report/report.md; then cat impact-report/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+        env:
+          REPORT_ARTIFACT_URL: ${{ steps.impact-artifact.outputs.artifact-url }}
+        run: |
+          if test -f impact-report/summary.md; then cat impact-report/summary.md >> "$GITHUB_STEP_SUMMARY"; fi
+          if test -n "$REPORT_ARTIFACT_URL"; then
+            echo "[Download the report bundle](<$REPORT_ARTIFACT_URL>)" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: always() && (github.event_name != 'workflow_dispatch' || inputs.scanner_only != true)
         with:
