@@ -4,6 +4,78 @@ use serde::{Deserialize, Serialize};
 
 use crate::{discovery::Discovery, runner::BuildRecipe};
 
+/// Caller-supplied revision context; snapshot fingerprints remain the tested evidence.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpstreamRevisions {
+    pub repository: Option<crate::forge::Repository>,
+    pub baseline_sha: Option<String>,
+    pub candidate_sha: Option<String>,
+}
+
+impl UpstreamRevisions {
+    pub(crate) fn validate(&self) -> std::io::Result<()> {
+        if [&self.baseline_sha, &self.candidate_sha]
+            .into_iter()
+            .flatten()
+            .any(|sha| !matches!(sha.len(), 40 | 64) || !sha.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(std::io::Error::other(
+                "upstream revisions must be full 40- or 64-character Git commit IDs",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Bounds apply to a scan's workers; a pair always uses one worker sequentially.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecutionOptions {
+    pub jobs: usize,
+    pub cargo_jobs: usize,
+    pub memory_mib: u64,
+    pub cpus: u16,
+    pub max_work_bytes: Option<u64>,
+    pub prune_before_run: bool,
+    /// Wall-clock budget for preparation, gate, discovery and all consumer pairs.
+    pub scan_timeout_seconds: u64,
+    /// Successful controlled comparisons required when the downstream gate opens.
+    pub minimum_exercised: usize,
+}
+
+impl Default for ExecutionOptions {
+    fn default() -> Self {
+        Self {
+            jobs: 2,
+            cargo_jobs: 1,
+            memory_mib: 2048,
+            cpus: 1,
+            max_work_bytes: Some(5 * 1024 * 1024 * 1024),
+            prune_before_run: false,
+            scan_timeout_seconds: 3300,
+            minimum_exercised: 1,
+        }
+    }
+}
+
+impl ExecutionOptions {
+    pub(crate) fn validate(&self) -> std::io::Result<()> {
+        if !(1..=32).contains(&self.jobs)
+            || !(1..=256).contains(&self.cargo_jobs)
+            || self.memory_mib < 128
+            || self.cpus == 0
+            || self.max_work_bytes == Some(0)
+            || self.scan_timeout_seconds == 0
+        {
+            return Err(std::io::Error::other(
+                "execution requires 1..=32 workers, 1..=256 Cargo jobs, at least 128 MiB per worker, positive CPUs, storage budget and scan timeout",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The same recipe and downstream revision are used for both halves of an experiment.
 #[derive(Clone, Debug)]
 pub struct ImpactRequest {
@@ -15,6 +87,11 @@ pub struct ImpactRequest {
     pub timeout: Duration,
     pub recipe: BuildRecipe,
     pub force: bool,
+    pub execution: ExecutionOptions,
+    pub upstream: Option<UpstreamRevisions>,
+    /// The application's own executable implementing the hidden semver helper.
+    /// `None` runs the embedded checker in this trusted host process.
+    pub semver_helper: Option<PathBuf>,
 }
 
 impl ImpactRequest {
@@ -32,6 +109,9 @@ impl ImpactRequest {
             timeout: Duration::from_secs(1800),
             recipe: BuildRecipe::default(),
             force: false,
+            execution: ExecutionOptions::default(),
+            upstream: None,
+            semver_helper: None,
         }
     }
 }
@@ -92,6 +172,31 @@ pub struct ImpactReport {
     pub gate: GateResult,
     pub discovery: Discovery,
     pub downstreams: Vec<DownstreamResult>,
+    #[serde(default)]
+    pub run: RunMetadata,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    Running,
+    #[default]
+    Complete,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RunMetadata {
+    pub status: RunStatus,
+    pub elapsed_ms: u64,
+    pub execution: ExecutionOptions,
+    pub storage_bytes: u64,
+    pub planned_downstreams: usize,
+    pub completed_downstreams: usize,
+    pub exercised_downstreams: usize,
+    /// None for an unfinished run or reports from an older schema.
+    pub coverage_sufficient: Option<bool>,
+    pub upstream: Option<UpstreamRevisions>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,11 +223,17 @@ pub struct DownstreamResult {
     pub name: String,
     pub revision: Option<String>,
     pub source: DownstreamSource,
+    #[serde(default = "default_manifest")]
+    pub manifest: PathBuf,
+    #[serde(default)]
+    pub source_fingerprint: Option<String>,
     pub recipe: BuildRecipe,
     pub classification: Classification,
     pub baseline: BuildResult,
     pub candidate: BuildResult,
     pub message: Option<String>,
+    #[serde(default)]
+    pub elapsed_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,6 +258,17 @@ pub struct BuildResult {
     pub compiled_packages: Vec<String>,
     pub selected_library: Option<String>,
     pub failure: Option<HarnessFailure>,
+    #[serde(default)]
+    pub provenance: BuildProvenance,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BuildProvenance {
+    pub rustc: Option<String>,
+    pub cargo: Option<String>,
+    pub runner_identity: String,
+    pub lock_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -159,6 +281,8 @@ pub enum HarnessFailure {
     InternalCompilerError,
     Environment,
     LibraryCompilation,
+    StorageLimit,
+    InputMutation,
 }
 
 /// Keep rustc's diagnostic tree, suggestions, macro expansions, byte ranges, and snippets.

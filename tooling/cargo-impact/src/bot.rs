@@ -58,6 +58,10 @@ pub enum BotError {
     Unauthorized,
     #[error("pull request is closed or its revisions are invalid")]
     InvalidPullRequest,
+    #[error(
+        "comment history exceeds the safe lookup budget; retained artifacts without creating a duplicate report"
+    )]
+    CommentBudget,
 }
 
 /// `event` must come from a trusted Actions event file or a verified webhook.
@@ -184,19 +188,74 @@ pub fn publish(
     {
         return Err(BotError::InvalidPullRequest);
     }
+    if report
+        .run
+        .upstream
+        .as_ref()
+        .and_then(|r| r.candidate_sha.as_deref())
+        .is_some_and(|sha| sha != candidate_sha)
+    {
+        return Err(BotError::InvalidPullRequest);
+    }
     let pr: PullRequest = api.get(&format!("repos/{repository}/pulls/{number}"), &[])?;
     if pr.state != "open" || pr.head.sha != candidate_sha {
         return Ok(false);
     }
+    const MARKER: &str = "<!-- cargo-impact:report:v1 -->";
     let body = format!(
-        "{}\n\nTested PR head: `{}`. [Full report and build artifacts](<{}>).",
+        "{MARKER}\n{}\n\nTested PR head: `{}`. [Full report and build artifacts](<{}>).",
         report.comment_markdown(),
         candidate_sha,
         run_url
     );
-    let _: serde_json::Value = api.post(
-        &format!("repos/{repository}/issues/{number}/comments"),
-        serde_json::json!({"body": body}),
-    )?;
+    let mut existing = None;
+    for page in 1..=5 {
+        let comments: Vec<ReportComment> = api.get(
+            &format!("repos/{repository}/issues/{number}/comments"),
+            &[("per_page", "100".into()), ("page", page.to_string())],
+        )?;
+        for comment in &comments {
+            // A copied marker in a human comment does not authorize editing it.
+            if comment.user.login == "github-actions[bot]"
+                && comment.user.kind == "Bot"
+                && comment.body.starts_with(MARKER)
+            {
+                existing = Some((comment.id, comment.body.clone()));
+            }
+        }
+        if comments.len() < 100 {
+            break;
+        }
+        if page == 5 {
+            return Err(BotError::CommentBudget);
+        }
+    }
+    // Permissioned lookup can take time; check the head again before the mutation.
+    let pr: PullRequest = api.get(&format!("repos/{repository}/pulls/{number}"), &[])?;
+    if pr.state != "open" || pr.head.sha != candidate_sha {
+        return Ok(false);
+    }
+    match existing {
+        Some((_, previous)) if previous == body => {}
+        Some((id, _)) => {
+            let _: serde_json::Value = api.patch(
+                &format!("repos/{repository}/issues/comments/{id}"),
+                serde_json::json!({"body":body}),
+            )?;
+        }
+        None => {
+            let _: serde_json::Value = api.post(
+                &format!("repos/{repository}/issues/{number}/comments"),
+                serde_json::json!({"body":body}),
+            )?;
+        }
+    }
     Ok(true)
+}
+
+#[derive(Deserialize)]
+struct ReportComment {
+    id: u64,
+    body: String,
+    user: EventUser,
 }

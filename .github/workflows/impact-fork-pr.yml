@@ -18,10 +18,31 @@ concurrency:
   group: impact-fork-pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
+  verify:
+    if: github.repository == 'philocalyst/gpui-ce' && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || inputs.scanner_only != true)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: philocalyst/gpui-ce
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Test the trusted scanner and actual Docker isolation
+        env:
+          CARGO_BUILD_JOBS: "2"
+        working-directory: tooling/cargo-impact
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
+          cargo +1.99.0 test --locked --all-targets
+          cargo +1.99.0 clippy --locked --all-targets -- -D warnings
+          cargo +1.99.0 fmt --all -- --check
+          docker pull rust:1.99.0-bookworm
+          cargo +1.99.0 test --test harness docker_baseline_cannot_mutate_candidate_or_sibling_workers -- --ignored --nocapture
   check:
     if: github.repository == 'philocalyst/gpui-ce' && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,31 +63,48 @@ jobs:
         if: github.event_name != 'workflow_dispatch' || inputs.scanner_only != true
         env:
           MISSING_TARGET: ${{ inputs.missing_target || false }}
+          CONSUMER_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
         run: |
           options=()
           if [ "$MISSING_TARGET" = true ]; then options+=(--missing-target); fi
           python3 baseline/tooling/cargo-impact/experiments/fork/prepare.py \
-            --baseline baseline --candidate candidate --output "$RUNNER_TEMP/impact-inputs" "${options[@]}"
+            --baseline baseline --candidate candidate --output "$RUNNER_TEMP/impact-inputs" \
+            --consumer-revision "$CONSUMER_REVISION" "${options[@]}"
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: github.event_name != 'workflow_dispatch' || inputs.scanner_only != true
         with:
-          path: ${{ runner.temp }}/impact-work
-          key: impact-fork-work-${{ runner.os }}-${{ github.event.pull_request.number || 'dispatch' }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: impact-fork-work-${{ runner.os }}-${{ github.event.pull_request.number || 'dispatch' }}-
+          path: |
+            ${{ runner.temp }}/impact-work/targets
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/mbx
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/mbx
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/git
+            ${{ runner.temp }}/impact-work/gate-target
+          key: impact-fork-work-v2-${{ runner.os }}-${{ github.event.pull_request.number || 'dispatch' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: impact-fork-work-v2-${{ runner.os }}-${{ github.event.pull_request.number || 'dispatch' }}-
       - name: Run embedded gate and isolated downstream checks
         if: github.event_name != 'workflow_dispatch' || inputs.scanner_only != true
         # Dispatch also builds identical revisions, to test Docker and recipe recovery.
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASELINE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           options=()
           if [ "$EVENT_NAME" = workflow_dispatch ]; then options+=(--force); fi
           "$RUNNER_TEMP/impact/bin/cargo-impact" check \
             --baseline "$RUNNER_TEMP/impact-inputs/baseline" \
             --candidate "$RUNNER_TEMP/impact-inputs/candidate" \
-            --config "$RUNNER_TEMP/impact-inputs/impact.toml" --no-discovery \
+            --config "$RUNNER_TEMP/impact-inputs/impact.toml" --no-discovery --scan-timeout-seconds 2100 \
+            --upstream-repository https://github.com/philocalyst/gpui-ce \
+            --baseline-sha "$BASELINE_SHA" --candidate-sha "$CANDIDATE_SHA" \
             --work-dir "$RUNNER_TEMP/impact-work" --report-dir impact-report "${options[@]}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: impact-artifact
         if: always() && (github.event_name != 'workflow_dispatch' || inputs.scanner_only != true)
         with:
           name: downstream-impact
@@ -74,9 +112,25 @@ jobs:
           if-no-files-found: error
       - name: Report summary
         if: always() && (github.event_name != 'workflow_dispatch' || inputs.scanner_only != true)
-        run: if test -f impact-report/report.md; then cat impact-report/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+        env:
+          REPORT_ARTIFACT_URL: ${{ steps.impact-artifact.outputs.artifact-url }}
+        run: |
+          if test -f impact-report/summary.md; then cat impact-report/summary.md >> "$GITHUB_STEP_SUMMARY"; fi
+          if test -n "$REPORT_ARTIFACT_URL"; then
+            echo "[Download the report bundle](<$REPORT_ARTIFACT_URL>)" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: always() && (github.event_name != 'workflow_dispatch' || inputs.scanner_only != true)
         with:
-          path: ${{ runner.temp }}/impact-work
-          key: impact-fork-work-${{ runner.os }}-${{ github.event.pull_request.number || 'dispatch' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/impact-work/targets
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/cargo/git
+            ${{ runner.temp }}/impact-work/workers/*/baseline/cache/mbx
+            ${{ runner.temp }}/impact-work/workers/*/candidate/cache/mbx
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/registry
+            ${{ runner.temp }}/impact-work/gate-worker/*/cache/cargo/git
+            ${{ runner.temp }}/impact-work/gate-target
+          key: impact-fork-work-v2-${{ runner.os }}-${{ github.event.pull_request.number || 'dispatch' }}-${{ github.run_id }}-${{ github.run_attempt }}

@@ -19,6 +19,14 @@ pub struct Repository {
     forge: Forge,
 }
 
+/// Web capabilities are explicit: a cloneable Git URL need not support a forge UI.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub struct ForgeCapabilities {
+    pub source_permalinks: bool,
+    pub issue_composer: bool,
+    pub comment_bot: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum RepositoryError {
     #[error("invalid repository URL: {0}")]
@@ -77,6 +85,44 @@ impl Repository {
     }
     pub fn name(&self) -> &str {
         self.url.path().trim_start_matches('/')
+    }
+
+    pub fn capabilities(&self) -> ForgeCapabilities {
+        ForgeCapabilities {
+            source_permalinks: self.forge != Forge::Generic,
+            issue_composer: self.forge != Forge::Generic,
+            comment_bot: self.forge == Forge::GitHub,
+        }
+    }
+
+    /// Opens a form for a human to inspect and submit. This never creates an issue.
+    /// Keep the form compact; the complete draft is exported separately.
+    pub fn issue_composer(&self, title: &str, body: &str) -> Option<Url> {
+        if !self.capabilities().issue_composer {
+            return None;
+        }
+        let mut url = self.url.clone();
+        {
+            let mut path = url.path_segments_mut().ok()?;
+            if self.forge == Forge::GitLab {
+                path.push("-");
+            }
+            path.push(if self.forge == Forge::GitLab {
+                "work_items"
+            } else {
+                "issues"
+            })
+            .push("new");
+        }
+        let (title_key, body_key) = if self.forge == Forge::GitLab {
+            ("issue[title]", "issue[description]")
+        } else {
+            ("title", "body")
+        };
+        url.query_pairs_mut()
+            .append_pair(title_key, title)
+            .append_pair(body_key, body);
+        (url.as_str().len() <= 8_000).then_some(url)
     }
 
     /// Pin links to the tested commit, rather than a branch that may move later.

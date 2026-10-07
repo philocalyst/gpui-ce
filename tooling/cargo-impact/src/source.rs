@@ -3,8 +3,9 @@
 use std::{
     collections::BTreeSet,
     fs, io,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use sha2::{Digest, Sha256};
@@ -24,7 +25,12 @@ pub(crate) fn checkout(
     source: &DownstreamSource,
     destination: &Path,
     timeout: Duration,
+    root: &Path,
+    max_work_bytes: Option<u64>,
 ) -> io::Result<(PathBuf, Option<String>)> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::other("timeout exceeds the host clock range"))?;
     let DownstreamSource::Git { url, revision, .. } = source else {
         let DownstreamSource::Local { path } = source else {
             unreachable!()
@@ -32,6 +38,13 @@ pub(crate) fn checkout(
         return Ok((path.canonicalize()?, None));
     };
     Repository::parse(url, None).map_err(io::Error::other)?;
+    crate::runner::safe_directory(root, destination)?;
+    let storage = max_work_bytes.map(|budget| (root, budget));
+    if fs::symlink_metadata(destination.join(".git")).is_ok_and(|m| m.is_symlink() || !m.is_dir()) {
+        return Err(io::Error::other(
+            "managed Git metadata must be a directory without symlinks",
+        ));
+    }
     if revision.is_empty() || revision.starts_with('-') || revision.chars().any(char::is_whitespace)
     {
         return Err(io::Error::other("invalid git revision"));
@@ -67,7 +80,8 @@ pub(crate) fn checkout(
                     .to_str()
                     .ok_or_else(|| io::Error::other("non-UTF8 checkout path"))?,
             ],
-            timeout,
+            deadline,
+            storage,
         )?;
         if fs::symlink_metadata(destination).is_ok() {
             fs::remove_dir_all(destination)?;
@@ -84,12 +98,14 @@ pub(crate) fn checkout(
             "origin",
             revision,
         ],
-        timeout,
+        deadline,
+        storage,
     )?;
     let sha = git(
         destination,
         &["rev-parse", "--verify", "FETCH_HEAD^{commit}"],
-        timeout,
+        deadline,
+        storage,
     )?;
     let sha = sha.trim().to_owned();
     if sha.len() != 40 && sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -99,13 +115,26 @@ pub(crate) fn checkout(
     git(
         destination,
         &["checkout", "--quiet", "--force", "--detach", &sha, "--"],
-        timeout,
+        deadline,
+        storage,
     )?;
-    git(destination, &["clean", "-ffdqx"], timeout)?;
+    git(destination, &["clean", "-ffdqx"], deadline, storage)?;
     Ok((destination.to_owned(), Some(sha)))
 }
 
-fn git(cwd: &Path, args: &[&str], timeout: Duration) -> io::Result<String> {
+fn git(
+    cwd: &Path,
+    args: &[&str],
+    deadline: Instant,
+    storage: Option<(&Path, u64)>,
+) -> io::Result<String> {
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    if timeout.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Git checkout deadline exceeded",
+        ));
+    }
     let mut command = clean_command("git");
     command
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -122,7 +151,29 @@ fn git(cwd: &Path, args: &[&str], timeout: Duration) -> io::Result<String> {
         ])
         .args(args)
         .current_dir(cwd);
-    let output = process::run(&mut command, timeout, Capture::Bytes)?;
+    let mut checked = None;
+    let output = process::run_guarded(&mut command, timeout, Capture::Bytes, || {
+        let Some((root, budget)) = storage else {
+            return Ok(false);
+        };
+        if checked.is_some_and(|last: Instant| last.elapsed() < Duration::from_secs(1)) {
+            return Ok(false);
+        }
+        checked = Some(Instant::now());
+        Ok(crate::engine::work_bytes(root)? > budget)
+    })?;
+    if output.resource_limited {
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            "Git checkout exceeded the scan storage budget",
+        ));
+    }
+    if output.timed_out {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Git checkout deadline exceeded",
+        ));
+    }
     if !output.success {
         return Err(io::Error::other(format!("git failed: {}", output.log)));
     }
@@ -132,7 +183,27 @@ fn git(cwd: &Path, args: &[&str], timeout: Duration) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+#[cfg(test)]
 pub(crate) fn snapshot(source: &Path, destination: &Path) -> io::Result<String> {
+    snapshot_with_limit(source, destination, 2 * 1024 * 1024 * 1024)
+}
+
+#[cfg(test)]
+pub(crate) fn snapshot_with_limit(
+    source: &Path,
+    destination: &Path,
+    max_bytes: u64,
+) -> io::Result<String> {
+    snapshot_before(source, destination, max_bytes, None, None)
+}
+
+pub(crate) fn snapshot_before(
+    source: &Path,
+    destination: &Path,
+    max_bytes: u64,
+    deadline: Option<Instant>,
+    storage: Option<(&Path, u64)>,
+) -> io::Result<String> {
     let source = source.canonicalize()?;
     if let Ok(relative) = destination.strip_prefix(&source)
         && relative
@@ -157,14 +228,36 @@ pub(crate) fn snapshot(source: &Path, destination: &Path) -> io::Result<String> 
         visited: BTreeSet::new(),
         bytes: 0,
         files: 0,
+        max_bytes: max_bytes.min(2 * 1024 * 1024 * 1024),
+        deadline,
+        storage,
+        storage_checked: None,
     };
-    snapshot.copy(&source, staged.path(), Path::new(""))?;
+    snapshot.copy(&source, Some(staged.path()), Path::new(""))?;
     let hash = format!("{:x}", snapshot.hash.finalize());
     if fs::symlink_metadata(destination).is_ok() {
         fs::remove_dir_all(destination)?;
     }
     fs::rename(staged.keep(), destination)?;
     Ok(hash)
+}
+
+pub(crate) fn fingerprint(source: &Path) -> io::Result<String> {
+    let source = source.canonicalize()?;
+    let mut snapshot = Snapshot {
+        root: &source,
+        previous: &source,
+        hash: Sha256::new(),
+        visited: BTreeSet::new(),
+        bytes: 0,
+        files: 0,
+        max_bytes: 2 * 1024 * 1024 * 1024,
+        deadline: None,
+        storage: None,
+        storage_checked: None,
+    };
+    snapshot.copy(&source, None, Path::new(""))?;
+    Ok(format!("{:x}", snapshot.hash.finalize()))
 }
 
 struct Snapshot<'a> {
@@ -174,10 +267,20 @@ struct Snapshot<'a> {
     visited: BTreeSet<PathBuf>,
     bytes: u64,
     files: usize,
+    max_bytes: u64,
+    deadline: Option<Instant>,
+    storage: Option<(&'a Path, u64)>,
+    storage_checked: Option<Instant>,
 }
 
 impl Snapshot<'_> {
-    fn copy(&mut self, source: &Path, destination: &Path, relative: &Path) -> io::Result<()> {
+    fn copy(
+        &mut self,
+        source: &Path,
+        destination: Option<&Path>,
+        relative: &Path,
+    ) -> io::Result<()> {
+        self.check_deadline()?;
         let resolved = source.canonicalize()?;
         if !resolved.starts_with(self.root) {
             return Err(io::Error::other(format!(
@@ -188,10 +291,13 @@ impl Snapshot<'_> {
         if !self.visited.insert(resolved.clone()) {
             return Err(io::Error::other("source tree has a symlink cycle"));
         }
-        fs::create_dir_all(destination)?;
+        if let Some(destination) = destination {
+            fs::create_dir_all(destination)?;
+        }
         let mut entries = fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
+            self.check_deadline()?;
             let name = entry.file_name();
             if [".git", "target", ".cargo-impact", "node_modules"]
                 .iter()
@@ -201,20 +307,17 @@ impl Snapshot<'_> {
             }
             let path = entry.path();
             let relative = relative.join(&name);
-            let destination = destination.join(&name);
+            let destination = destination.map(|directory| directory.join(&name));
             let metadata = match fs::metadata(&path) {
                 Ok(metadata) => metadata,
                 Err(error)
                     if error.kind() == io::ErrorKind::NotFound
                         && fs::symlink_metadata(&path)?.is_symlink() =>
                 {
-                    let target =
-                        preserve_dangling_link(self.root, &path, &destination).map_err(|e| {
-                            io::Error::new(
-                                e.kind(),
-                                format!("snapshot {}: {e}", relative.display()),
-                            )
-                        })?;
+                    let target = preserve_dangling_link(self.root, &path, destination.as_deref())
+                        .map_err(|e| {
+                        io::Error::new(e.kind(), format!("snapshot {}: {e}", relative.display()))
+                    })?;
                     self.hash.update(relative.as_os_str().as_encoded_bytes());
                     self.hash.update([0]);
                     self.hash.update(u64::MAX.to_le_bytes());
@@ -233,7 +336,7 @@ impl Snapshot<'_> {
                 }
             };
             if metadata.is_dir() {
-                self.copy(&path, &destination, &relative)?;
+                self.copy(&path, destination.as_deref(), &relative)?;
             } else if metadata.is_file() {
                 let resolved = path.canonicalize()?;
                 if !resolved.starts_with(self.root) {
@@ -244,32 +347,74 @@ impl Snapshot<'_> {
                 }
                 self.bytes += metadata.len();
                 self.files += 1;
-                if self.bytes > 2 * 1024 * 1024 * 1024 || self.files > 100_000 {
+                if self.bytes > self.max_bytes {
+                    return Err(io::Error::new(
+                        io::ErrorKind::StorageFull,
+                        "source snapshot exceeds the available storage budget or 2 GiB source limit",
+                    ));
+                }
+                if self.files > 100_000 {
                     return Err(io::Error::other(
                         "source snapshot exceeds 2 GiB or 100,000 files",
                     ));
                 }
-                let bytes = fs::read(&path)?;
                 self.hash.update(relative.as_os_str().as_encoded_bytes());
                 self.hash.update([0]);
-                self.hash.update((bytes.len() as u64).to_le_bytes());
-                self.hash.update(&bytes);
+                self.hash.update(metadata.len().to_le_bytes());
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    self.hash
+                        .update(metadata.permissions().mode().to_le_bytes());
+                }
                 let previous = self.previous.join(&relative);
-                let unchanged_time = previous
+                let previous_metadata = previous
                     .canonicalize()
                     .ok()
                     .filter(|p| p.starts_with(self.previous))
                     .and_then(|_| fs::metadata(&previous).ok())
-                    .filter(|m| m.is_file())
-                    .and_then(|m| {
-                        fs::read(&previous)
-                            .ok()
-                            .filter(|old| *old == bytes)
-                            .and_then(|_| m.modified().ok())
-                    });
-                fs::copy(&path, &destination)?;
-                if let Some(time) = unchanged_time {
-                    fs::File::open(&destination)?
+                    .filter(|m| destination.is_some() && m.is_file() && m.len() == metadata.len());
+                let mut old = previous_metadata
+                    .as_ref()
+                    .and_then(|_| fs::File::open(&previous).ok());
+                let mut unchanged = old.is_some();
+                let mut input = fs::File::open(&path)?;
+                let mut output = destination.as_ref().map(fs::File::create).transpose()?;
+                let mut buffer = [0u8; 64 * 1024];
+                let mut old_buffer = [0u8; 64 * 1024];
+                let mut copied = 0u64;
+                loop {
+                    self.check_deadline()?;
+                    let size = input.read(&mut buffer)?;
+                    if size == 0 {
+                        break;
+                    }
+                    copied += size as u64;
+                    if copied > metadata.len() {
+                        return Err(io::Error::other("source changed while snapshotting"));
+                    }
+                    self.hash.update(&buffer[..size]);
+                    if let Some(output) = &mut output {
+                        output.write_all(&buffer[..size])?;
+                    }
+                    if unchanged {
+                        unchanged = old.as_mut().is_some_and(|file| {
+                            file.read_exact(&mut old_buffer[..size]).is_ok()
+                                && old_buffer[..size] == buffer[..size]
+                        });
+                    }
+                }
+                if copied != metadata.len() {
+                    return Err(io::Error::other("source changed while snapshotting"));
+                }
+                if let Some(destination) = &destination {
+                    fs::set_permissions(destination, metadata.permissions())?;
+                }
+                let unchanged_time = unchanged
+                    .then(|| previous_metadata.and_then(|m| m.modified().ok()))
+                    .flatten();
+                if let (Some(time), Some(destination)) = (unchanged_time, destination.as_ref()) {
+                    fs::File::open(destination)?
                         .set_times(fs::FileTimes::new().set_modified(time))?;
                 }
             } else {
@@ -279,11 +424,41 @@ impl Snapshot<'_> {
         self.visited.remove(&resolved);
         Ok(())
     }
+
+    fn check_deadline(&mut self) -> io::Result<()> {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "source preparation exceeded the pair or scan deadline",
+            ));
+        }
+        if let Some((root, budget)) = self.storage
+            && self
+                .storage_checked
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
+        {
+            self.storage_checked = Some(Instant::now());
+            if crate::engine::work_bytes(root)? > budget {
+                return Err(io::Error::new(
+                    io::ErrorKind::StorageFull,
+                    "source preparation exceeded the scan storage budget",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// An unused, dangling license link should not prevent compiling a valid package.
 /// Only preserve direct relative links whose existing parent proves they stay inside the source.
-fn preserve_dangling_link(root: &Path, source: &Path, destination: &Path) -> io::Result<PathBuf> {
+fn preserve_dangling_link(
+    root: &Path,
+    source: &Path,
+    destination: Option<&Path>,
+) -> io::Result<PathBuf> {
     let target = fs::read_link(source)?;
     if target.is_absolute() {
         return Err(io::Error::other(
@@ -304,7 +479,9 @@ fn preserve_dangling_link(root: &Path, source: &Path, destination: &Path) -> io:
         }
     }
     #[cfg(unix)]
-    std::os::unix::fs::symlink(&target, destination)?;
+    if let Some(destination) = destination {
+        std::os::unix::fs::symlink(&target, destination)?;
+    }
     #[cfg(not(unix))]
     return Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -324,4 +501,69 @@ pub(crate) fn validate_manifest(manifest: &Path) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_storage_guard_preserves_a_distinct_budget_failure() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::write(root.join("stored"), vec![0; 1024]).unwrap();
+        let error = git(
+            &root,
+            &["--version"],
+            Instant::now() + Duration::from_secs(5),
+            Some((&root, 512)),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        assert!(error.to_string().contains("storage budget"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_checkout_symlinks_are_rejected_before_git_runs() {
+        let work = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let root = work.path().canonicalize().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("checkouts")).unwrap();
+        let source = DownstreamSource::Git {
+            url: "https://github.com/example/project".into(),
+            revision: "HEAD".into(),
+            forge: None,
+        };
+        let error = checkout(
+            &source,
+            &root.join("checkouts/consumer"),
+            Duration::from_secs(5),
+            &root,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("symlinks"));
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streaming_fingerprints_match_snapshots_and_include_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::TempDir::new().unwrap();
+        let source = temp.path().join("input");
+        fs::create_dir(&source).unwrap();
+        let file = source.join("script");
+        fs::write(&file, vec![b'x'; 160 * 1024]).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        let first = snapshot(&source, &temp.path().join("copy")).unwrap();
+        assert_eq!(first, fingerprint(&source).unwrap());
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_ne!(first, fingerprint(&source).unwrap());
+        assert_eq!(
+            fingerprint(&source).unwrap(),
+            snapshot(&source, &temp.path().join("copy")).unwrap()
+        );
+    }
 }

@@ -211,6 +211,12 @@ fn very_large_bot_report_keeps_a_complete_summary_and_artifact_link() {
             json!({"state":"open","base":{"sha":"a".repeat(40),"repo":{"full_name":"org/lib"}},"head":{"sha":sha,"repo":{"full_name":"org/lib"}}}),
             vec![],
         ),
+        (200, json!([]), vec![]),
+        (
+            200,
+            json!({"state":"open","base":{"sha":"a".repeat(40),"repo":{"full_name":"org/lib"}},"head":{"sha":sha,"repo":{"full_name":"org/lib"}}}),
+            vec![],
+        ),
         (201, json!({"id":1}), vec![]),
     ]);
     let report = cargo_impact::ImpactReport::failed("demo", &"```x".repeat(20_000));
@@ -224,7 +230,7 @@ fn very_large_bot_report_keeps_a_complete_summary_and_artifact_link() {
     )
     .unwrap();
     let requests = server.finish();
-    let (_, body) = requests[1].split_once("\r\n\r\n").unwrap();
+    let (_, body) = requests[3].split_once("\r\n\r\n").unwrap();
     let body: serde_json::Value = serde_json::from_str(body).unwrap();
     let text = body["body"].as_str().unwrap();
     assert!(text.len() < 2000);
@@ -288,6 +294,12 @@ fn bot_reports_harness_failures_and_neutralizes_untrusted_mentions_and_fences() 
             json!({"state":"open","base":{"sha":"a".repeat(40),"repo":{"full_name":"org/lib"}},"head":{"sha":sha,"repo":{"full_name":"org/lib"}}}),
             vec![],
         ),
+        (200, json!([]), vec![]),
+        (
+            200,
+            json!({"state":"open","base":{"sha":"a".repeat(40),"repo":{"full_name":"org/lib"}},"head":{"sha":sha,"repo":{"full_name":"org/lib"}}}),
+            vec![],
+        ),
         (201, json!({"id":1}), vec![]),
     ]);
     let report = cargo_impact::ImpactReport::failed(
@@ -308,13 +320,16 @@ fn bot_reports_harness_failures_and_neutralizes_untrusted_mentions_and_fences() 
         .unwrap()
     );
     let requests = server.finish();
-    let (_, body) = requests[1].split_once("\r\n\r\n").unwrap();
+    let (_, body) = requests[3].split_once("\r\n\r\n").unwrap();
     let body: serde_json::Value = serde_json::from_str(body).unwrap();
     let text = body["body"].as_str().unwrap();
     assert!(text.contains("@\u{200b}everyone"));
     assert!(!text.contains("@everyone"));
     assert!(text.contains("````text"));
-    assert!(text.contains("&lt;img&gt;"));
+    assert!(
+        text.contains("` [demo](bad) @\u{200b}everyone <img> `"),
+        "untrusted HTML is contained inside a safe code span"
+    );
     assert!(text.contains("result is inconclusive"));
 }
 
@@ -438,4 +453,117 @@ fn source_links_handle_forges_and_reject_unsafe_identities() {
     ] {
         assert!(Repository::parse(input, None).is_err());
     }
+}
+
+fn open_pr(sha: &str) -> serde_json::Value {
+    json!({"state":"open","base":{"sha":"a".repeat(40),"repo":{"full_name":"org/lib"}},"head":{"sha":sha,"repo":{"full_name":"org/lib"}}})
+}
+
+#[test]
+fn bot_updates_its_report_and_ignores_a_forged_human_marker() {
+    let sha = "b".repeat(40);
+    let server = Server::new(vec![
+        (200, open_pr(&sha), vec![]),
+        (
+            200,
+            json!([
+                {"id":91,"body":"<!-- cargo-impact:report:v1 -->old report","user":{"login":"github-actions[bot]","type":"Bot"}},
+                {"id":92,"body":"<!-- cargo-impact:report:v1 -->forged","user":{"login":"contributor","type":"User"}}
+            ]),
+            vec![],
+        ),
+        (200, open_pr(&sha), vec![]),
+        (200, json!({"id":91}), vec![]),
+    ]);
+    bot::publish(
+        &server.api(),
+        "org/lib",
+        7,
+        &sha,
+        &cargo_impact::ImpactReport::failed("demo", "failure"),
+        &Url::parse("https://github.com/org/lib/actions/runs/1").unwrap(),
+    )
+    .unwrap();
+    let requests = server.finish();
+    assert!(requests[3].starts_with("PATCH /repos/org/lib/issues/comments/91 "));
+    assert!(requests[1].contains("per_page=100&page=1"));
+}
+
+#[test]
+fn bot_checks_head_again_after_comment_lookup() {
+    let sha = "b".repeat(40);
+    let server = Server::new(vec![
+        (200, open_pr(&sha), vec![]),
+        (200, json!([]), vec![]),
+        (200, open_pr(&"c".repeat(40)), vec![]),
+    ]);
+    assert!(
+        !bot::publish(
+            &server.api(),
+            "org/lib",
+            7,
+            &sha,
+            &cargo_impact::ImpactReport::failed("demo", "failure"),
+            &Url::parse("https://github.com/org/lib/actions/runs/1").unwrap()
+        )
+        .unwrap()
+    );
+    assert!(
+        server
+            .finish()
+            .iter()
+            .all(|request| request.starts_with("GET "))
+    );
+}
+
+#[test]
+fn identical_bot_report_does_not_send_another_write() {
+    let sha = "b".repeat(40);
+    let report = cargo_impact::ImpactReport::failed("demo", "failure");
+    let run = Url::parse("https://github.com/org/lib/actions/runs/1").unwrap();
+    let first = Server::new(vec![
+        (200, open_pr(&sha), vec![]),
+        (200, json!([]), vec![]),
+        (200, open_pr(&sha), vec![]),
+        (200, json!({"id":91}), vec![]),
+    ]);
+    assert!(bot::publish(&first.api(), "org/lib", 7, &sha, &report, &run).unwrap());
+    let requests = first.finish();
+    let body = requests[3].split_once("\r\n\r\n").unwrap().1;
+    let comment: serde_json::Value = serde_json::from_str(body).unwrap();
+    let second = Server::new(vec![
+        (200, open_pr(&sha), vec![]),
+        (
+            200,
+            json!([{"id":91,"body":comment["body"],"user":{"login":"github-actions[bot]","type":"Bot"}}]),
+            vec![],
+        ),
+        (200, open_pr(&sha), vec![]),
+    ]);
+    assert!(bot::publish(&second.api(), "org/lib", 7, &sha, &report, &run).unwrap());
+    assert!(
+        second
+            .finish()
+            .iter()
+            .all(|request| request.starts_with("GET "))
+    );
+}
+
+#[test]
+fn retry_reads_but_never_repeat_an_uncertain_write() {
+    let server = Server::new(vec![
+        (503, json!({}), vec![("Retry-After", "0")]),
+        (200, json!({"ok":true}), vec![]),
+    ]);
+    assert_eq!(
+        server.api().get::<serde_json::Value>("probe", &[]).unwrap()["ok"],
+        true
+    );
+    assert_eq!(server.finish().len(), 2);
+    let server = Server::new(vec![(503, json!({}), vec![])]);
+    assert!(matches!(
+        server.api().post::<serde_json::Value>("write", json!({})),
+        Err(ApiError::Status(_))
+    ));
+    assert_eq!(server.finish().len(), 1);
 }
