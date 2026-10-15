@@ -2166,8 +2166,9 @@ impl ParleyTextSystem {
                     glyphs,
                     x_range: start..start + px(glyph_run.advance()),
                     style: PaintStyle::from(&source_runs[source_run]),
-                    underline_offset: Some(px(run_metrics.underline_offset)),
-                    strikethrough_offset: Some(px(run_metrics.strikethrough_offset)),
+                    // Parley's offsets are y-up; painting adds them to the baseline in y-down.
+                    underline_offset: Some(px(-run_metrics.underline_offset)),
+                    strikethrough_offset: Some(px(-run_metrics.strikethrough_offset)),
                 });
             }
 
@@ -3957,6 +3958,35 @@ mod tests {
                 );
                 previous_end = first_line_end;
             }
+        }
+    }
+
+    #[test]
+    fn text_decorations_use_downward_window_coordinates() {
+        let system = test_system();
+        let text = "Underline and strike";
+        let run = TextRun {
+            underline: Some(UnderlineStyle {
+                thickness: px(1.),
+                ..Default::default()
+            }),
+            strikethrough: Some(StrikethroughStyle {
+                thickness: px(1.),
+                ..Default::default()
+            }),
+            ..text_run(text, IBM_PLEX.family)
+        };
+        let layout = layout_line(&system, text, px(24.), &[run]);
+        assert!(!layout.paint_fragments.is_empty());
+        for fragment in &layout.paint_fragments {
+            assert!(
+                fragment.underline_offset.unwrap() > Pixels::ZERO,
+                "underline must sit below the baseline"
+            );
+            assert!(
+                fragment.strikethrough_offset.unwrap() < Pixels::ZERO,
+                "strikethrough must sit above the baseline"
+            );
         }
     }
 
