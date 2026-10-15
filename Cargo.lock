@@ -2555,6 +2555,7 @@ dependencies = [
  "palette",
  "smallvec",
  "unicode-segmentation",
+ "web-time",
 ]
 
 [[package]]
