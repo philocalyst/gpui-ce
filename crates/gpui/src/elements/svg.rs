@@ -12,7 +12,13 @@ use crate::{
 };
 use gpui_util::ResultExt;
 
-/// An SVG element.
+/// An element that draws an SVG as a single-color mask, filled with the text color.
+///
+/// Create one with [`svg`]. The SVG's alpha channel becomes the shape, and its own colors are
+/// dropped. That suits icons that follow the theme. To keep an SVG's colors, use [`crate::img`] instead.
+///
+/// Nothing is drawn until the element has a source: [`Svg::path`], [`Svg::external_path`] or
+/// [`Svg::data`].
 pub struct Svg {
     interactivity: Interactivity,
     transformation: Option<Transformation>,
@@ -22,7 +28,19 @@ pub struct Svg {
     data_path: Option<SharedString>,
 }
 
-/// Create a new SVG element.
+/// Creates an [`Svg`] element with no source yet.
+///
+/// Give it a source with [`Svg::path`], [`Svg::external_path`] or [`Svg::data`]. The icon is filled
+/// with the text color, so set that with [`Styled::text_color`].
+///
+/// # Examples
+///
+/// ```
+/// # use gpui::*;
+/// const STAR: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\"/></svg>";
+///
+/// let star = svg().data(STAR).size(px(16.)).text_color(rgb(0xf59e0b));
+/// ```
 #[track_caller]
 pub fn svg() -> Svg {
     Svg {
@@ -36,20 +54,35 @@ pub fn svg() -> Svg {
 }
 
 impl Svg {
-    /// Set the path to the SVG file for this element.
+    /// Sets the SVG to load from the app's [`crate::AssetRegistry`], by `path`, such as `"icons/search.svg"`.
+    ///
+    /// The registry is read when the icon is first drawn at a given size, and each rasterized size
+    /// is then cached. If the registry has no such path, nothing is drawn.
+    ///
+    /// When several sources are set, [`Svg::data`] wins, then [`Svg::external_path`], then this
+    /// one.
     pub fn path(mut self, path: impl Into<SharedString>) -> Self {
         self.path = Some(path.into());
         self
     }
 
-    /// Set the path to the SVG file for this element.
+    /// Sets the SVG to load from a file on disk, relative to the working directory.
+    ///
+    /// The file is read once, in the background, and cached under `path`. Nothing is drawn until it
+    /// loads. A read error is logged, and nothing is drawn. The cache keeps the entry, so later
+    /// changes to the file are not picked up until the entry is removed.
+    ///
+    /// When several sources are set, [`Svg::data`] wins over this one.
     pub fn external_path(mut self, path: impl Into<SharedString>) -> Self {
         self.external_path = Some(path.into());
         self
     }
 
-    /// Set the raw SVG data for this element.
-    /// The SVG will be rendered directly from the provided bytes.
+    /// Sets the SVG from bytes that are already in memory, such as one included with `include_bytes!`.
+    ///
+    /// The bytes are copied into the element. The rasterized icon is cached under a hash of the
+    /// bytes, so the same data is rasterized once. Calling this again replaces the bytes. When
+    /// several sources are set, this one wins.
     pub fn data(mut self, data: &[u8]) -> Self {
         // Generate a unique deterministic path based on the data hash for caching
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -61,8 +94,10 @@ impl Svg {
         self
     }
 
-    /// Transform the SVG element with the given transformation.
-    /// Note that this won't effect the hitbox or layout of the element, only the rendering.
+    /// Rotates, scales or moves the rendered SVG around the center of the element.
+    ///
+    /// The transformation changes only what is drawn. The layout and the hitbox stay the same, so
+    /// the element still takes its full box and receives clicks there. See [`Transformation`].
     pub fn with_transformation(mut self, transformation: Transformation) -> Self {
         self.transformation = Some(transformation);
         self
@@ -209,7 +244,26 @@ impl InteractiveElement for Svg {
     }
 }
 
-/// A transformation to apply to an SVG element.
+/// A rotation, scale and translation applied to an [`Svg`] when it is drawn.
+///
+/// Build one with [`Transformation::scale`], [`Transformation::rotate`] or
+/// [`Transformation::translate`], then chain the `with_*` methods to set the other parts. The
+/// transformation turns around the center of the element's bounds. Translation is in logical
+/// pixels, and rotation is in radians.
+///
+/// # Examples
+///
+/// ```
+/// # use gpui::*;
+/// let rotated = Transformation::rotate(radians(std::f32::consts::FRAC_PI_4));
+/// let shrunk = Transformation::scale(size(0.5, 0.5));
+/// assert_eq!(shrunk, Transformation::default().with_scaling(size(0.5, 0.5)));
+///
+/// let icon = svg()
+///     .path("icons/chevron.svg")
+///     .size(px(16.))
+///     .with_transformation(rotated);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transformation {
     scale: Size<f32>,
@@ -228,7 +282,7 @@ impl Default for Transformation {
 }
 
 impl Transformation {
-    /// Create a new Transformation with the specified scale along each axis.
+    /// Creates a transformation that scales the SVG by `scale` on each axis. `1.0` keeps the size.
     pub fn scale(scale: Size<f32>) -> Self {
         Self {
             scale,
@@ -237,7 +291,7 @@ impl Transformation {
         }
     }
 
-    /// Create a new Transformation with the specified translation.
+    /// Creates a transformation that moves the SVG by `translate`, in logical pixels.
     pub fn translate(translate: Point<Pixels>) -> Self {
         Self {
             scale: size(1.0, 1.0),
@@ -246,7 +300,7 @@ impl Transformation {
         }
     }
 
-    /// Create a new Transformation with the specified rotation in radians.
+    /// Creates a transformation that rotates the SVG around its center by `rotate`.
     pub fn rotate(rotate: impl Into<Radians>) -> Self {
         let rotate = rotate.into();
         Self {
@@ -256,19 +310,19 @@ impl Transformation {
         }
     }
 
-    /// Update the scaling factor of this transformation.
+    /// Returns this transformation with its scale set to `scale`.
     pub fn with_scaling(mut self, scale: Size<f32>) -> Self {
         self.scale = scale;
         self
     }
 
-    /// Update the translation value of this transformation.
+    /// Returns this transformation with its translation set to `translate`, in logical pixels.
     pub fn with_translation(mut self, translate: Point<Pixels>) -> Self {
         self.translate = translate;
         self
     }
 
-    /// Update the rotation angle of this transformation.
+    /// Returns this transformation with its rotation set to `rotate`.
     pub fn with_rotation(mut self, rotate: impl Into<Radians>) -> Self {
         self.rotate = rotate.into();
         self
