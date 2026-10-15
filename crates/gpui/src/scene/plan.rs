@@ -2,15 +2,16 @@ use super::{AtlasTextureId, BatchIterator, FilterBoundary, Scene};
 use smallvec::SmallVec;
 use std::ops::Range;
 
-/// Nested content-filter groups with dedicated isolation targets; deeper ones render inline.
+/// The maximum nesting depth for content-filter groups that receive their own offscreen target.
+/// Deeper groups are drawn inline into the current target.
 pub const MAX_FILTER_GROUP_DEPTH: usize = 2;
 
-/// Index of an offscreen texture reserved for an isolated content-filter group.
+/// The index of an offscreen target in the renderer's content-filter target pool.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FilterTargetIndex(usize);
 
 impl FilterTargetIndex {
-    /// Returns the index into the renderer's content-filter target pool.
+    /// Returns the index as a `usize`.
     pub fn as_usize(self) -> usize {
         self.0
     }
@@ -19,7 +20,7 @@ impl FilterTargetIndex {
 /// Where the contents of a filter group are rendered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FilterRenderTarget {
-    /// Render directly into the current target once isolation targets are exhausted.
+    /// Render directly into the current target, such as once isolation targets are exhausted.
     Inline,
     /// Render into a dedicated offscreen target and composite it into the parent.
     Isolated(FilterTargetIndex),
@@ -31,19 +32,28 @@ impl FilterRenderTarget {
     }
 }
 
-/// Resource totals computed while a scene's render plan is compiled.
+/// Allocation and draw totals collected while compiling one [`ScenePlan`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[expect(missing_docs)]
 pub struct ScenePlanRequirements {
+    /// The number of entries in [`ScenePlan::commands`].
     pub command_count: usize,
+    /// The number of instanced draw calls. A path batch that rasterizes counts as two.
     pub instance_batch_count: usize,
+    /// The number of path vertices to rasterize into the path target.
     pub path_rasterization_vertex_count: usize,
+    /// The number of sprites that composite the rasterized paths.
     pub path_sprite_count: usize,
+    /// The number of [`crate::PaintSurface`]s to draw.
     pub surface_count: usize,
+    /// The number of [`crate::BackdropFilter`]s to draw.
     pub backdrop_filter_count: usize,
+    /// The number of content-filter groups that draw into an isolated target.
     pub isolated_filter_count: usize,
+    /// The number of isolated targets needed at the deepest level of nesting.
     pub isolated_target_count: usize,
+    /// Whether any path is rasterized into an offscreen target.
     pub uses_path_target: bool,
+    /// Whether a backdrop filter or an isolated content-filter group needs an offscreen target.
     pub uses_offscreen_target: bool,
 }
 
@@ -138,12 +148,12 @@ impl ScenePlan {
         }
     }
 
-    /// Returns the ordered rendering commands.
+    /// Returns the commands in the order they must be drawn.
     pub fn commands(&self) -> &[RenderCommand] {
         &self.commands
     }
 
-    /// Returns the resource totals collected while compiling this plan.
+    /// Returns the totals collected while this plan was compiled.
     pub fn requirements(&self) -> &ScenePlanRequirements {
         &self.requirements
     }
@@ -225,39 +235,64 @@ impl SceneLengths {
     }
 }
 
-/// A contiguous range of one primitive type drawn by a single pipeline invocation.
+/// A contiguous run of one primitive type that the renderer draws in one call.
+///
+/// The ranges index the matching vector in [`Scene`]. A batch never mixes primitive types.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[allow(missing_docs)]
 pub enum PrimitiveBatch {
+    /// Shadows, drawn with or without corner smoothing as a unit.
     Shadows {
+        /// The indices into [`Scene::shadows`].
         range: Range<usize>,
+        /// Whether the shadows use corner smoothing.
         smoothed: bool,
     },
+    /// Quads, drawn with or without corner smoothing as a unit.
     Quads {
+        /// The indices into [`Scene::quads`].
         range: Range<usize>,
+        /// Whether the quads use corner smoothing.
         smoothed: bool,
     },
+    /// Paths. The renderer rasterizes their vertices, then composites the results as sprites.
     Paths {
+        /// The indices into [`Scene::paths`].
         range: Range<usize>,
+        /// The number of path vertices to rasterize in this batch.
         rasterization_vertex_count: usize,
+        /// The number of sprites that composite the rasterized paths.
         sprite_count: usize,
     },
+    /// Underlines, as indices into [`Scene::underlines`].
     Underlines(Range<usize>),
+    /// Single-color sprites that all read from one atlas texture.
     MonochromeSprites {
+        /// The atlas texture that the sprites read from.
         texture_id: AtlasTextureId,
+        /// The indices into [`Scene::monochrome_sprites`].
         range: Range<usize>,
     },
+    /// Subpixel-antialiased sprites that all read from one atlas texture.
     SubpixelSprites {
+        /// The atlas texture that the sprites read from.
         texture_id: AtlasTextureId,
+        /// The indices into [`Scene::subpixel_sprites`].
         range: Range<usize>,
     },
+    /// Full-color sprites that all read from one atlas texture.
     PolychromeSprites {
+        /// The atlas texture that the sprites read from.
         texture_id: AtlasTextureId,
+        /// The indices into [`Scene::polychrome_sprites`].
         range: Range<usize>,
+        /// Whether the sprites use corner smoothing.
         smoothed: bool,
     },
+    /// Surfaces, as indices into [`Scene::surfaces`].
     Surfaces(Range<usize>),
+    /// Backdrop filters, as indices into [`Scene::backdrop_filters`].
     BackdropFilters(Range<usize>),
+    /// A content-filter boundary, as an index into [`Scene::filter_boundaries`].
     FilterBoundary(usize),
 }
 
@@ -285,7 +320,7 @@ pub enum RenderCommand {
 }
 
 impl RenderCommand {
-    /// Returns the opening filter boundary carried by a filter command.
+    /// Returns the opening [`FilterBoundary`] of a filter command, or `None` for a batch.
     pub fn boundary<'a>(&self, scene: &'a Scene) -> Option<&'a FilterBoundary> {
         match self {
             Self::BeginFilter { boundary_index, .. } | Self::EndFilter { boundary_index, .. } => {
@@ -295,7 +330,7 @@ impl RenderCommand {
         }
     }
 
-    /// A diagnostic label suitable for GPU debug annotations.
+    /// Returns a short description of this command, for GPU debugger labels.
     pub fn label(&self) -> String {
         match self {
             Self::Batch(batch) => batch.label(),
@@ -316,7 +351,7 @@ impl RenderCommand {
 }
 
 impl PrimitiveBatch {
-    /// A diagnostic label suitable for GPU debug annotations.
+    /// Returns a short description of this batch, for GPU debugger labels.
     pub fn label(&self) -> String {
         match self {
             Self::Shadows { range, smoothed } => format!(
